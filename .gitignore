@@ -1,0 +1,30 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and OS files
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
+
+# Dependencies
+web/node_modules/
+miniapp/node_modules/
+
+# Build outputs
+web/dist/
+server/server
+server/marketdata-probe
+server/test-results/
+web/test-results/
+web/playwright-report/
+
+# Coverage and temporary files
+coverage/
+*.out
+*.log
+tmp/
+server/tmp/

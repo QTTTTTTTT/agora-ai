@@ -1,0 +1,19 @@
+.nav-chart-container {
+  position: relative;
+  background: #ffffff;
+  border-radius: 8rpx;
+  overflow: hidden;
+}
+
+.nav-canvas {
+  display: block;
+}
+
+.empty-tip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 26rpx;
+  color: #bfbfbf;
+}

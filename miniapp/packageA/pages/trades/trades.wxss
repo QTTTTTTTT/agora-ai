@@ -1,0 +1,254 @@
+.page {
+  min-height: 100vh;
+  background: #f5f6fa;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 筛选栏 */
+.filter-bar {
+  background: #fff;
+  padding: 20rpx 24rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0,0,0,0.05);
+}
+.date-filters {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin-bottom: 16rpx;
+}
+.date-picker {
+  flex: 1;
+  background: #f5f6fa;
+  padding: 12rpx 20rpx;
+  border-radius: 10rpx;
+  font-size: 26rpx;
+  color: #333;
+  text-align: center;
+}
+.date-sep {
+  font-size: 24rpx;
+  color: #999;
+}
+.filter-tabs {
+  display: flex;
+  gap: 0;
+  background: #f5f6fa;
+  border-radius: 12rpx;
+  padding: 4rpx;
+  margin-bottom: 16rpx;
+}
+.tab {
+  flex: 1;
+  text-align: center;
+  padding: 14rpx 0;
+  font-size: 26rpx;
+  color: #666;
+  border-radius: 10rpx;
+  transition: all 0.2s;
+}
+.tab-active {
+  background: #667eea;
+  color: #fff;
+  font-weight: 500;
+}
+.search-box {
+  background: #f5f6fa;
+  border-radius: 10rpx;
+  padding: 0 20rpx;
+}
+.search-input {
+  height: 64rpx;
+  font-size: 26rpx;
+}
+
+/* 统计栏 */
+.stats-bar {
+  display: flex;
+  background: #fff;
+  margin: 16rpx 24rpx;
+  border-radius: 16rpx;
+  padding: 20rpx 0;
+  box-shadow: 0 2rpx 8rpx rgba(0,0,0,0.04);
+}
+.stat-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6rpx;
+}
+.stat-num {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #333;
+}
+.stat-buy {
+  color: #e53935;
+}
+.stat-sell {
+  color: #43a047;
+}
+.stat-label {
+  font-size: 22rpx;
+  color: #999;
+}
+
+/* 交易列表 */
+.trade-list {
+  flex: 1;
+  padding: 0 24rpx;
+  height: calc(100vh - 500rpx);
+}
+.trade-item {
+  background: #fff;
+  border-radius: 16rpx;
+  margin-bottom: 16rpx;
+  overflow: hidden;
+  box-shadow: 0 2rpx 8rpx rgba(0,0,0,0.04);
+}
+.trade-main {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 20rpx;
+  gap: 16rpx;
+}
+.trade-left {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8rpx;
+  min-width: 120rpx;
+}
+.trade-datetime {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.trade-date {
+  font-size: 22rpx;
+  color: #999;
+}
+.trade-time {
+  font-size: 20rpx;
+  color: #bbb;
+}
+.trade-badge {
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  font-size: 22rpx;
+  font-weight: 500;
+}
+.badge-buy {
+  background: #fce4ec;
+  color: #e53935;
+}
+.badge-sell {
+  background: #e8f5e9;
+  color: #43a047;
+}
+.trade-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+}
+.stock-info {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+.stock-code {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #333;
+}
+.stock-name {
+  font-size: 24rpx;
+  color: #999;
+}
+.trade-nums {
+  display: flex;
+  gap: 12rpx;
+}
+.trade-qty {
+  font-size: 24rpx;
+  color: #666;
+}
+.trade-price {
+  font-size: 24rpx;
+  color: #999;
+}
+.trade-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6rpx;
+  min-width: 160rpx;
+}
+.trade-amount {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #333;
+}
+.trade-fee {
+  font-size: 20rpx;
+  color: #bbb;
+}
+.trade-status {
+  font-size: 20rpx;
+  color: #43a047;
+}
+
+/* 展开详情 */
+.trade-detail {
+  background: #fafbfe;
+  padding: 20rpx 24rpx;
+  border-top: 1rpx solid #f0f0f0;
+}
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8rpx 0;
+}
+.detail-label {
+  font-size: 24rpx;
+  color: #999;
+}
+.detail-value {
+  font-size: 24rpx;
+  color: #333;
+  font-weight: 500;
+}
+
+/* 空状态 */
+.empty-tip {
+  text-align: center;
+  padding: 80rpx 0;
+  color: #ccc;
+  font-size: 28rpx;
+}
+
+/* 底部统计 */
+.bottom-stats {
+  background: #fff;
+  display: flex;
+  padding: 24rpx 40rpx;
+  padding-bottom: calc(24rpx + env(safe-area-inset-bottom));
+  box-shadow: 0 -2rpx 8rpx rgba(0,0,0,0.05);
+}
+.bottom-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+.bottom-label {
+  font-size: 22rpx;
+  color: #999;
+}
+.bottom-value {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: #333;
+}

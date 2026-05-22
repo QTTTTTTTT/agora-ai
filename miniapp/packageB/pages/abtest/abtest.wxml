@@ -1,0 +1,123 @@
+<view class="page">
+  <!-- 测试切换tabs -->
+  <view class="test-tabs">
+    <view class="test-tab {{currentIndex === index ? 'tab-active' : ''}}"
+          wx:for="{{tests}}" wx:key="id"
+          bindtap="onTabChange" data-index="{{index}}">
+      <text class="tab-name">{{item.name}}</text>
+      <view class="tab-status status-dot-{{item.status}}"></view>
+    </view>
+  </view>
+
+  <view wx:if="{{currentTest}}">
+    <!-- 测试概况 -->
+    <view class="card">
+      <view class="card-title">
+        <text>测试概况</text>
+        <view class="status-badge status-{{currentTest.status}}">{{currentTest.statusText}}</view>
+      </view>
+      <view class="overview-grid">
+        <view class="overview-item">
+          <text class="ov-label">测试名称</text>
+          <text class="ov-value">{{currentTest.name}}</text>
+        </view>
+        <view class="overview-item">
+          <text class="ov-label">变量类型</text>
+          <text class="ov-value">{{currentTest.variable}}</text>
+        </view>
+        <view class="overview-item">
+          <text class="ov-label">原值</text>
+          <text class="ov-value ov-old">{{currentTest.oldValue}}</text>
+        </view>
+        <view class="overview-item">
+          <text class="ov-label">新值</text>
+          <text class="ov-value ov-new">{{currentTest.newValue}}</text>
+        </view>
+        <view class="overview-item full-width">
+          <text class="ov-label">时长</text>
+          <text class="ov-value">{{currentTest.duration}}</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- 指标对比 -->
+    <view class="card">
+      <view class="card-title">指标对比</view>
+      <view class="compare-header">
+        <text class="compare-label"></text>
+        <text class="compare-col col-control">对照组</text>
+        <text class="compare-col col-experiment">实验组</text>
+      </view>
+      <view class="compare-row" wx:for="{{currentTest.metricsComparison}}" wx:key="label">
+        <text class="compare-label">{{item.label}}</text>
+        <text class="compare-col col-control {{item.controlWins ? 'winner' : ''}}">
+          {{item.controlValue}}{{item.controlWins ? ' ✓' : ''}}
+        </text>
+        <text class="compare-col col-experiment {{item.experimentWins ? 'winner' : ''}}">
+          {{item.experimentValue}}{{item.experimentWins ? ' ✓' : ''}}
+        </text>
+      </view>
+    </view>
+
+    <!-- NAV对比图 -->
+    <view class="card" wx:if="{{currentTest.navControl.length > 0}}">
+      <view class="card-title">NAV走势对比</view>
+      <view class="canvas-wrap">
+        <canvas type="2d" id="navCanvas" class="nav-canvas"
+                style="width: {{canvasWidth}}px; height: {{canvasHeight}}px;"></canvas>
+      </view>
+    </view>
+
+    <!-- 分歧事件时间线 -->
+    <view class="card" wx:if="{{currentTest.divergences.length > 0}}">
+      <view class="card-title">分歧事件</view>
+      <view class="timeline">
+        <view class="timeline-item" wx:for="{{currentTest.divergences}}" wx:key="date">
+          <view class="timeline-dot"></view>
+          <view class="timeline-line" wx:if="{{index < currentTest.divergences.length - 1}}"></view>
+          <view class="timeline-content">
+            <text class="timeline-date">{{item.date}}</text>
+            <view class="timeline-actions">
+              <view class="tl-action">
+                <text class="tl-tag tl-control">对照</text>
+                <text class="tl-text">{{item.controlAction}}</text>
+              </view>
+              <view class="tl-action">
+                <text class="tl-tag tl-experiment">实验</text>
+                <text class="tl-text">{{item.experimentAction}}</text>
+              </view>
+            </view>
+            <text class="tl-impact">{{item.impact}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 胜出者 -->
+    <view class="card" wx:if="{{currentTest.status === 'completed'}}">
+      <view class="winner-section">
+        <view class="winner-badge winner-{{currentTest.winner}}">
+          <text class="winner-icon">🏆</text>
+          <text class="winner-text">{{currentTest.winnerText}}</text>
+        </view>
+        <view class="winner-confidence" wx:if="{{currentTest.confidenceLevel > 0}}">
+          <text class="wc-label">置信度</text>
+          <text class="wc-value">{{currentTest.confidenceLevel}}%</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- LLM分析 -->
+    <view class="card">
+      <view class="card-title">AI分析总结</view>
+      <text class="analysis-text">{{currentTest.llmAnalysis}}</text>
+    </view>
+
+    <!-- 操作按钮 -->
+    <view class="action-btns">
+      <button class="btn-action btn-start" wx:if="{{currentTest.status === 'pending'}}" bindtap="onStartTest">开始测试</button>
+      <button class="btn-action btn-stop" wx:if="{{currentTest.status === 'running'}}" bindtap="onStopTest">停止测试</button>
+      <button class="btn-action btn-analyze" wx:if="{{currentTest.status === 'completed'}}" bindtap="onAnalyzeTest">重新分析</button>
+    </view>
+  </view>
+</view>

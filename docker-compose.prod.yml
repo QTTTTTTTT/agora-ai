@@ -1,0 +1,27 @@
+# =============================================================================
+# docker-compose.prod.yml — single-host production overlay
+# Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build postgres web-search-mcp app
+# =============================================================================
+
+name: fundai-simulator-prod
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD to a strong production database password}
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+
+  app:
+    image: fundai-simulator:${BUILD_VERSION:-prod}
+    environment:
+      APP_ENV: production
+      DATABASE_URL: ${APP_DATABASE_URL:-postgres://${POSTGRES_USER:-fundai}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fundai}?sslmode=${APP_DATABASE_SSLMODE:-disable}}
+      ALLOW_INTERNAL_COMPOSE_DB: ${ALLOW_INTERNAL_COMPOSE_DB:-1}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET to a strong production secret}
+      MODEL_CONFIG_API_KEY_SECRET: ${MODEL_CONFIG_API_KEY_SECRET:?set MODEL_CONFIG_API_KEY_SECRET to a strong independent production secret}
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS to your production frontend origin list}
+
+  web-search-mcp:
+    ports:
+      - "${WEB_SEARCH_MCP_BIND:-127.0.0.1}:${WEB_SEARCH_MCP_PORT:-3004}:3004"

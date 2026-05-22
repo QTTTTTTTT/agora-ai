@@ -1,0 +1,182 @@
+<!--pages/more/more.wxml - 更多/设置-->
+<view class="page-container">
+
+  <!-- 服务器配置 -->
+  <view class="section">
+    <view class="section-title">服务器配置</view>
+    <view class="config-card">
+      <view class="config-row">
+        <view class="config-input-wrapper">
+          <input
+            class="config-input"
+            placeholder="输入API地址，如 http://localhost:8000"
+            value="{{apiBase}}"
+            bindinput="onApiBaseInput"
+          />
+          <view class="status-dot status-{{serverStatus}}"></view>
+        </view>
+      </view>
+      <view class="config-actions">
+        <view class="config-btn config-btn-save" bindtap="saveApiBase">
+          <text>保存</text>
+        </view>
+        <view class="config-btn config-btn-test" bindtap="checkHealth">
+          <text>测试连接</text>
+        </view>
+        <view class="config-btn config-btn-copy" bindtap="copyApiBase">
+          <text>复制</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 功能入口 -->
+  <view class="section">
+    <view class="section-title">功能入口</view>
+    <view class="cell-group">
+      <view class="cell-item" bindtap="goToSubscription">
+        <view class="cell-left">
+          <text class="cell-icon">💎</text>
+          <text class="cell-label">订阅管理</text>
+        </view>
+        <view class="cell-right">
+          <view class="cell-badge">{{currentPlanName}}</view>
+          <text class="cell-arrow">›</text>
+        </view>
+      </view>
+      <view class="cell-item" bindtap="goToModelConfig">
+        <view class="cell-left">
+          <text class="cell-icon">🤖</text>
+          <text class="cell-label">模型配置</text>
+        </view>
+        <text class="cell-arrow">›</text>
+      </view>
+      <view class="cell-item" bindtap="goToUsage">
+        <view class="cell-left">
+          <text class="cell-icon">📈</text>
+          <text class="cell-label">用量与账单</text>
+        </view>
+        <view class="cell-right">
+          <text class="cell-value">本月 ¥{{monthCost}}</text>
+          <text class="cell-arrow">›</text>
+        </view>
+      </view>
+      <view class="cell-item" bindtap="goToABTest">
+        <view class="cell-left">
+          <text class="cell-icon">🧪</text>
+          <text class="cell-label">A/B 测试对比</text>
+        </view>
+        <text class="cell-arrow">›</text>
+      </view>
+      <view class="cell-item" bindtap="goToTrades">
+        <view class="cell-left">
+          <text class="cell-icon">📊</text>
+          <text class="cell-label">交易记录</text>
+        </view>
+        <text class="cell-arrow">›</text>
+      </view>
+      <view class="cell-item" bindtap="goToRoundtable">
+        <view class="cell-left">
+          <text class="cell-icon">🔄</text>
+          <text class="cell-label">决策与圆桌</text>
+        </view>
+        <text class="cell-arrow">›</text>
+      </view>
+      <view class="cell-item" bindtap="switchFund">
+        <view class="cell-left">
+          <text class="cell-icon">💼</text>
+          <text class="cell-label">切换基金</text>
+        </view>
+        <view class="cell-right">
+          <text class="cell-value">{{fundInfo.name || '未选择'}}</text>
+          <text class="cell-arrow">›</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 系统信息 -->
+  <view class="section">
+    <view class="section-title">系统信息</view>
+    <view class="cell-group">
+      <view class="cell-item">
+        <view class="cell-left">
+          <text class="cell-icon">🌐</text>
+          <text class="cell-label">服务器状态</text>
+        </view>
+        <view class="cell-right">
+          <view class="status-tag status-tag-{{serverStatus}}">
+            <view class="status-tag-dot"></view>
+            <text wx:if="{{serverStatus === 'checking'}}">连接中...</text>
+            <text wx:if="{{serverStatus === 'connected'}}">已连接</text>
+            <text wx:if="{{serverStatus === 'disconnected'}}">未连接</text>
+          </view>
+        </view>
+      </view>
+      <view class="cell-item">
+        <view class="cell-left">
+          <text class="cell-icon">💼</text>
+          <text class="cell-label">当前基金</text>
+        </view>
+        <view class="cell-right">
+          <text class="cell-value">{{fundInfo.name || '-'}}</text>
+        </view>
+      </view>
+      <view class="cell-item">
+        <view class="cell-left">
+          <text class="cell-icon">⚙️</text>
+          <text class="cell-label">运行模式</text>
+        </view>
+        <view class="cell-right">
+          <text class="cell-value">{{fundInfo.mode || '-'}}</text>
+        </view>
+      </view>
+      <view class="cell-item">
+        <view class="cell-left">
+          <text class="cell-icon">📱</text>
+          <text class="cell-label">版本号</text>
+        </view>
+        <view class="cell-right">
+          <text class="cell-value">v{{version}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 操作 -->
+  <view class="section">
+    <view class="action-buttons">
+      <view class="action-btn action-btn-clear" bindtap="clearCache">
+        <text>🗑️ 清除缓存</text>
+      </view>
+      <view class="action-btn action-btn-about" bindtap="showAbout">
+        <text>ℹ️ 关于</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 关于弹窗 -->
+  <view class="modal-mask" wx:if="{{showAboutModal}}" bindtap="hideAbout">
+    <view class="modal-content" catchtap="">
+      <view class="modal-title">关于 FundGPT</view>
+      <view class="modal-body">
+        <view class="about-row">
+          <text>AI 驱动的基金管理助手</text>
+        </view>
+        <view class="about-row">
+          <text>版本: v{{version}}</text>
+        </view>
+        <view class="about-row">
+          <text>集成多Agent协作、记忆系统、智能决策</text>
+        </view>
+        <view class="about-row about-copyright">
+          <text>© 2026 FundGPT Team</text>
+        </view>
+      </view>
+      <view class="modal-footer" bindtap="hideAbout">
+        <text>关闭</text>
+      </view>
+    </view>
+  </view>
+
+</view>

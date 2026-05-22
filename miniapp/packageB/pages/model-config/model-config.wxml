@@ -1,0 +1,268 @@
+<!--packageB/pages/model-config/model-config.wxml - 模型配置-->
+<view class="page-container">
+
+  <!-- 模型选择区 - 关键决策 -->
+  <view class="section">
+    <view class="tier-header">
+      <view class="tier-title-row">
+        <view class="tier-dot tier-dot-critical"></view>
+        <text class="tier-title">{{tierDescriptions.critical.title}}</text>
+      </view>
+      <text class="tier-desc">{{tierDescriptions.critical.desc}}</text>
+      <text class="tier-steps">应用步骤：{{tierDescriptions.critical.steps}}</text>
+    </view>
+    <view class="model-list">
+      <view
+        class="model-item {{currentTierConfig.critical === item.id ? 'model-item-selected' : ''}}"
+        wx:for="{{platformModels}}"
+        wx:key="id"
+        wx:if="{{item.tiers.indexOf('critical') > -1}}"
+        bindtap="selectModelForTier"
+        data-tier="critical"
+        data-model="{{item.id}}"
+      >
+        <view class="model-radio">
+          <view class="radio-outer">
+            <view class="radio-inner" wx:if="{{currentTierConfig.critical === item.id}}"></view>
+          </view>
+        </view>
+        <view class="model-info">
+          <view class="model-name-row">
+            <text class="model-name">{{item.name}}</text>
+            <view class="model-recommend-badge" wx:if="{{item.recommended}}">推荐</view>
+          </view>
+          <view class="model-meta">
+            <text class="model-provider">{{item.provider}}</text>
+            <text class="model-price">{{item.priceLabel}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+    <view class="tier-custom-key" bindtap="toggleUseCustomKey" data-tier="critical">
+      <text>使用自带 API Key</text>
+      <view class="toggle-switch {{useCustomKey.critical ? 'toggle-on' : ''}}">
+        <view class="toggle-knob"></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 模型选择区 - 日常任务 -->
+  <view class="section">
+    <view class="tier-header">
+      <view class="tier-title-row">
+        <view class="tier-dot tier-dot-standard"></view>
+        <text class="tier-title">{{tierDescriptions.standard.title}}</text>
+      </view>
+      <text class="tier-desc">{{tierDescriptions.standard.desc}}</text>
+      <text class="tier-steps">应用步骤：{{tierDescriptions.standard.steps}}</text>
+    </view>
+    <view class="model-list">
+      <view
+        class="model-item {{currentTierConfig.standard === item.id ? 'model-item-selected' : ''}}"
+        wx:for="{{platformModels}}"
+        wx:key="id"
+        wx:if="{{item.tiers.indexOf('standard') > -1}}"
+        bindtap="selectModelForTier"
+        data-tier="standard"
+        data-model="{{item.id}}"
+      >
+        <view class="model-radio">
+          <view class="radio-outer">
+            <view class="radio-inner" wx:if="{{currentTierConfig.standard === item.id}}"></view>
+          </view>
+        </view>
+        <view class="model-info">
+          <view class="model-name-row">
+            <text class="model-name">{{item.name}}</text>
+            <view class="model-recommend-badge" wx:if="{{item.recommended}}">推荐</view>
+          </view>
+          <view class="model-meta">
+            <text class="model-provider">{{item.provider}}</text>
+            <text class="model-price">{{item.priceLabel}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+    <view class="tier-custom-key" bindtap="toggleUseCustomKey" data-tier="standard">
+      <text>使用自带 API Key</text>
+      <view class="toggle-switch {{useCustomKey.standard ? 'toggle-on' : ''}}">
+        <view class="toggle-knob"></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 模型选择区 - 简单任务 -->
+  <view class="section">
+    <view class="tier-header">
+      <view class="tier-title-row">
+        <view class="tier-dot tier-dot-simple"></view>
+        <text class="tier-title">{{tierDescriptions.simple.title}}</text>
+      </view>
+      <text class="tier-desc">{{tierDescriptions.simple.desc}}</text>
+      <text class="tier-steps">应用步骤：{{tierDescriptions.simple.steps}}</text>
+    </view>
+    <view class="model-list">
+      <view
+        class="model-item {{currentTierConfig.simple === item.id ? 'model-item-selected' : ''}}"
+        wx:for="{{platformModels}}"
+        wx:key="id"
+        wx:if="{{item.tiers.indexOf('simple') > -1}}"
+        bindtap="selectModelForTier"
+        data-tier="simple"
+        data-model="{{item.id}}"
+      >
+        <view class="model-radio">
+          <view class="radio-outer">
+            <view class="radio-inner" wx:if="{{currentTierConfig.simple === item.id}}"></view>
+          </view>
+        </view>
+        <view class="model-info">
+          <view class="model-name-row">
+            <text class="model-name">{{item.name}}</text>
+            <view class="model-recommend-badge" wx:if="{{item.recommended}}">推荐</view>
+          </view>
+          <view class="model-meta">
+            <text class="model-provider">{{item.provider}}</text>
+            <text class="model-price">{{item.priceLabel}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+    <view class="tier-custom-key" bindtap="toggleUseCustomKey" data-tier="simple">
+      <text>使用自带 API Key</text>
+      <view class="toggle-switch {{useCustomKey.simple ? 'toggle-on' : ''}}">
+        <view class="toggle-knob"></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 自定义端点 -->
+  <view class="section">
+    <view class="section-title">自定义端点</view>
+    <view class="custom-list" wx:if="{{userConfigs.length > 0}}">
+      <view class="custom-card" wx:for="{{userConfigs}}" wx:key="id">
+        <view class="custom-card-top">
+          <view class="custom-card-info">
+            <text class="custom-card-provider">{{item.provider}}</text>
+            <text class="custom-card-model">{{item.modelName}}</text>
+          </view>
+          <view class="custom-card-status custom-card-status-{{item.status}}">
+            <text>{{item.status === 'active' ? '正常' : '异常'}}</text>
+          </view>
+        </view>
+        <view class="custom-card-url">{{item.baseURL}}</view>
+        <view class="custom-card-actions">
+          <view class="custom-card-delete" bindtap="deleteConfig" data-id="{{item.id}}">删除</view>
+        </view>
+      </view>
+    </view>
+    <view class="empty-hint" wx:else>
+      <text>暂无自定义端点</text>
+    </view>
+    <view class="add-custom-btn" bindtap="showAddCustom">
+      <text>+ 添加自定义端点</text>
+    </view>
+  </view>
+
+  <!-- 费用预估 -->
+  <view class="section">
+    <view class="section-title">月度费用预估</view>
+    <view class="cost-card">
+      <view class="cost-circle">
+        <view class="cost-circle-inner">
+          <text class="cost-number">¥{{estimatedCost || '0.00'}}</text>
+          <text class="cost-label">预估月费</text>
+        </view>
+      </view>
+      <view class="cost-breakdown">
+        <view class="cost-row">
+          <view class="cost-row-left">
+            <view class="cost-dot cost-dot-critical"></view>
+            <text>关键决策</text>
+          </view>
+          <text class="cost-row-value">¥{{estimatedCostDetail.critical}}</text>
+        </view>
+        <view class="cost-row">
+          <view class="cost-row-left">
+            <view class="cost-dot cost-dot-standard"></view>
+            <text>日常任务</text>
+          </view>
+          <text class="cost-row-value">¥{{estimatedCostDetail.standard}}</text>
+        </view>
+        <view class="cost-row">
+          <view class="cost-row-left">
+            <view class="cost-dot cost-dot-simple"></view>
+            <text>简单任务</text>
+          </view>
+          <text class="cost-row-value">¥{{estimatedCostDetail.simple}}</text>
+        </view>
+      </view>
+      <view class="cost-compare">
+        <text class="cost-compare-label">默认配置费用</text>
+        <text class="cost-compare-value">¥{{estimatedCostDetail.defaultTotal}}</text>
+      </view>
+      <view class="cost-saved" wx:if="{{estimatedCostDetail.saved > 0}}">
+        <text>比默认配置节省 ¥{{estimatedCostDetail.saved}}</text>
+      </view>
+      <view class="cost-saved cost-over" wx:if="{{estimatedCostDetail.saved < 0}}">
+        <text>比默认配置多花 ¥{{0 - estimatedCostDetail.saved}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 自定义端点弹窗 -->
+  <view class="modal-mask" wx:if="{{showCustomModal}}" bindtap="hideCustomModal">
+    <view class="modal-content" catchtap="">
+      <view class="modal-title">添加自定义端点</view>
+      <view class="modal-body">
+        <!-- 供应商选择 -->
+        <view class="form-group">
+          <text class="form-label">供应商</text>
+          <picker mode="selector" range="{{providerOptions}}" value="{{providerIndex}}" bindchange="onProviderChange">
+            <view class="form-picker">
+              <text>{{providerOptions[providerIndex]}}</text>
+              <text class="picker-arrow">▼</text>
+            </view>
+          </picker>
+        </view>
+        <!-- 模型名称 -->
+        <view class="form-group">
+          <text class="form-label">模型名称</text>
+          <input class="form-input" placeholder="如 gpt-4o, claude-3-sonnet" value="{{customForm.modelName}}" bindinput="onModelNameInput" />
+        </view>
+        <!-- API 地址 -->
+        <view class="form-group">
+          <text class="form-label">API 地址</text>
+          <input class="form-input" placeholder="https://api.openai.com" value="{{customForm.baseURL}}" bindinput="onBaseURLInput" />
+        </view>
+        <!-- API Key -->
+        <view class="form-group">
+          <text class="form-label">API Key</text>
+          <input class="form-input" placeholder="sk-..." password="{{true}}" value="{{customForm.apiKey}}" bindinput="onApiKeyInput" />
+        </view>
+        <!-- 测试连接 -->
+        <view class="test-section">
+          <view class="test-btn" bindtap="testConnection">
+            <text>测试连接</text>
+          </view>
+          <view class="test-result" wx:if="{{testResult}}">
+            <view wx:if="{{testResult.status === 'testing'}}" class="test-result-testing">
+              <text>测试中...</text>
+            </view>
+            <view wx:if="{{testResult.status === 'success'}}" class="test-result-success">
+              <text>✓ 连接成功 ({{testResult.latency}}ms)</text>
+            </view>
+            <view wx:if="{{testResult.status === 'fail'}}" class="test-result-fail">
+              <text>✗ 连接失败: {{testResult.error}}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+      <view class="modal-footer">
+        <view class="modal-btn modal-btn-cancel" bindtap="hideCustomModal">取消</view>
+        <view class="modal-btn modal-btn-save" bindtap="saveCustomEndpoint">保存</view>
+      </view>
+    </view>
+  </view>
+
+</view>

@@ -1,0 +1,286 @@
+.page {
+  min-height: 100vh;
+  background: #f5f6fa;
+  padding-bottom: 60rpx;
+}
+
+.empty-state {
+  margin: 160rpx 32rpx 0;
+  padding: 48rpx 32rpx;
+  border-radius: 20rpx;
+  background: #fff;
+  color: #999;
+  font-size: 28rpx;
+  text-align: center;
+}
+
+.empty-section {
+  padding: 24rpx 0;
+  color: #999;
+  font-size: 26rpx;
+  text-align: center;
+}
+
+/* 头部 */
+.header {
+  background: linear-gradient(135deg, #1a1a2e, #16213e);
+  padding: 60rpx 30rpx 50rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-radius: 0 0 30rpx 30rpx;
+}
+.avatar-big {
+  width: 140rpx;
+  height: 140rpx;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 72rpx;
+  line-height: 140rpx;
+  text-align: center;
+  margin-bottom: 16rpx;
+}
+.agent-name {
+  font-size: 40rpx;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 8rpx;
+}
+.agent-role {
+  font-size: 28rpx;
+  color: rgba(255,255,255,0.7);
+  margin-bottom: 16rpx;
+}
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+}
+.status-light {
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+}
+.status-online {
+  background: #43a047;
+  box-shadow: 0 0 8rpx #43a047;
+}
+.status-offline {
+  background: #999;
+}
+.status-busy {
+  background: #ff9800;
+  box-shadow: 0 0 8rpx #ff9800;
+}
+.status-text {
+  font-size: 24rpx;
+  color: rgba(255,255,255,0.8);
+}
+
+/* 卡片 */
+.card {
+  background: #fff;
+  margin: 24rpx 24rpx 0;
+  border-radius: 20rpx;
+  padding: 30rpx;
+  box-shadow: 0 2rpx 12rpx rgba(0,0,0,0.05);
+}
+.card-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 24rpx;
+  padding-bottom: 16rpx;
+  border-bottom: 1rpx solid #f0f0f0;
+}
+
+/* 基本信息 */
+.info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16rpx;
+}
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.info-label {
+  font-size: 26rpx;
+  color: #999;
+}
+.info-value {
+  font-size: 26rpx;
+  color: #333;
+  font-weight: 500;
+}
+
+/* 能力指标 */
+.capability-list {
+  display: flex;
+  flex-direction: column;
+  gap: 24rpx;
+}
+.cap-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10rpx;
+}
+.cap-header {
+  display: flex;
+  justify-content: space-between;
+}
+.cap-name {
+  font-size: 26rpx;
+  color: #666;
+}
+.cap-value {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #333;
+}
+.progress-bar {
+  height: 16rpx;
+  background: #f0f0f0;
+  border-radius: 8rpx;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 8rpx;
+  transition: width 0.5s ease;
+}
+
+/* 技能列表 */
+.skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+.skill-item {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding: 16rpx;
+  background: #fafbfe;
+  border-radius: 12rpx;
+}
+.skill-icon {
+  font-size: 40rpx;
+  flex-shrink: 0;
+}
+.skill-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+}
+.skill-name {
+  font-size: 28rpx;
+  font-weight: 500;
+  color: #333;
+}
+.skill-desc {
+  font-size: 22rpx;
+  color: #999;
+}
+
+/* 活动日志 */
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+.act-item {
+  display: flex;
+  gap: 16rpx;
+}
+.act-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: #667eea;
+  margin-top: 12rpx;
+  flex-shrink: 0;
+}
+.act-content {
+  flex: 1;
+  border-bottom: 1rpx solid #f5f5f5;
+  padding-bottom: 16rpx;
+}
+.act-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6rpx;
+}
+.act-action {
+  font-size: 26rpx;
+  font-weight: 500;
+  color: #333;
+}
+.act-time {
+  font-size: 22rpx;
+  color: #bbb;
+}
+.act-detail {
+  font-size: 24rpx;
+  color: #999;
+  line-height: 1.5;
+}
+
+/* 个人记忆 */
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16rpx;
+}
+.mem-item {
+  padding: 16rpx;
+  background: #fafbfe;
+  border-radius: 12rpx;
+  border-left: 6rpx solid #667eea;
+}
+.mem-key {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: #667eea;
+  display: block;
+  margin-bottom: 6rpx;
+}
+.mem-summary {
+  font-size: 24rpx;
+  color: #666;
+  line-height: 1.6;
+}
+
+/* 操作按钮 */
+.actions {
+  margin: 30rpx 24rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 16rpx;
+}
+.btn-action {
+  border: none;
+  border-radius: 16rpx;
+  height: 84rpx;
+  line-height: 84rpx;
+  font-size: 28rpx;
+  font-weight: 500;
+}
+.btn-model {
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: #fff;
+}
+.btn-style {
+  background: #fff;
+  color: #667eea;
+  border: 2rpx solid #667eea;
+}
+.btn-dismiss {
+  background: #fff;
+  color: #e53935;
+  border: 2rpx solid #e53935;
+}

@@ -1,0 +1,142 @@
+<view class="page">
+  <view class="empty-state" wx:if="{{loading}}">加载中...</view>
+  <view class="empty-state" wx:elif="{{!roundtable}}">{{errorText || '暂无圆桌记录'}}</view>
+  <block wx:else>
+  <!-- 圆桌概况 -->
+  <view class="overview-header">
+    <view class="ov-top">
+      <text class="ov-date">{{roundtable.date}}</text>
+      <view class="consensus-badge {{roundtable.consensusReached ? 'consensus-yes' : 'consensus-no'}}">
+        {{roundtable.consensusStatus}}
+      </view>
+    </view>
+    <!-- 参与者头像列表 -->
+    <view class="participants-row">
+      <view class="participant" wx:for="{{roundtable.participants}}" wx:key="id"
+            bindtap="onAgentTap" data-id="{{item.id}}">
+        <text class="p-emoji">{{item.emoji}}</text>
+        <text class="p-name">{{item.name}}</text>
+      </view>
+    </view>
+    <view class="ov-stats">
+      <view class="ov-stat">
+        <text class="ov-stat-num">{{roundtable.totalRounds}}</text>
+        <text class="ov-stat-label">轮次</text>
+      </view>
+      <view class="ov-stat">
+        <text class="ov-stat-num">{{roundtable.participants.length}}</text>
+        <text class="ov-stat-label">参与者</text>
+      </view>
+      <view class="ov-stat">
+        <text class="ov-stat-num">{{roundtable.topics.length}}</text>
+        <text class="ov-stat-label">议题</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 议题列表 -->
+  <view class="card">
+    <view class="card-title">讨论议题</view>
+    <view class="topics-list">
+      <view class="topic-item" wx:for="{{roundtable.topics}}" wx:key="stock">
+        <text class="topic-stock">{{item.stock}}</text>
+        <text class="topic-question">{{item.question}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 逐轮展示 -->
+  <view class="round-section" wx:for="{{roundtable.rounds}}" wx:key="title" wx:for-index="roundIdx">
+    <view class="round-header">
+      <text class="round-title">{{item.title}}</text>
+      <text class="round-subtitle">{{item.subtitle}}</text>
+    </view>
+
+    <!-- 发言卡片 -->
+    <view class="speech-card" wx:for="{{item.speeches}}" wx:key="agentId" wx:for-item="speech" wx:for-index="speechIdx">
+      <view class="speech-header">
+        <view class="speech-agent" bindtap="onAgentTap" data-id="{{speech.agentId}}">
+          <text class="speech-emoji">{{speech.emoji}}</text>
+          <text class="speech-name">{{speech.name}}</text>
+        </view>
+        <view class="speech-meta">
+          <view class="direction-badge direction-{{speech.direction}}">{{speech.directionText}}</view>
+          <text class="speech-confidence">{{speech.confidence}}%</text>
+        </view>
+      </view>
+      <view class="speech-topic">
+        <text class="topic-tag">{{speech.topic}}</text>
+      </view>
+      <text class="speech-summary">{{speech.summary}}</text>
+      <view class="speech-expand" bindtap="onToggleSpeech" data-key="{{roundIdx}}-{{speechIdx}}">
+        <text class="expand-text">{{expandedSpeech[roundIdx + '-' + speechIdx] ? '收起详情 ▲' : '展开详情 ▼'}}</text>
+      </view>
+      <view class="speech-detail" wx:if="{{expandedSpeech[roundIdx + '-' + speechIdx]}}">
+        <text>{{speech.detail}}</text>
+      </view>
+    </view>
+
+    <!-- 该轮投票统计 -->
+    <view class="vote-stats">
+      <view class="vote-title">投票结果</view>
+      <view class="vote-bars">
+        <view class="vote-row">
+          <text class="vote-label">看多</text>
+          <view class="vote-bar-wrap">
+            <view class="vote-bar vote-bullish" style="width: {{item.votes.bullishPct}}%">
+              <text class="vote-num" wx:if="{{item.votes.bullish > 0}}">{{item.votes.bullish}}</text>
+            </view>
+          </view>
+        </view>
+        <view class="vote-row">
+          <text class="vote-label">看空</text>
+          <view class="vote-bar-wrap">
+            <view class="vote-bar vote-bearish" style="width: {{item.votes.bearishPct}}%">
+              <text class="vote-num" wx:if="{{item.votes.bearish > 0}}">{{item.votes.bearish}}</text>
+            </view>
+          </view>
+        </view>
+        <view class="vote-row">
+          <text class="vote-label">中性</text>
+          <view class="vote-bar-wrap">
+            <view class="vote-bar vote-neutral" style="width: {{item.votes.neutralPct}}%">
+              <text class="vote-num" wx:if="{{item.votes.neutral > 0}}">{{item.votes.neutral}}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 最终共识 -->
+  <view class="card consensus-card">
+    <view class="card-title">最终共识结论</view>
+    <view class="consensus-list">
+      <view class="consensus-item" wx:for="{{roundtable.consensus}}" wx:key="stock">
+        <view class="cs-left">
+          <text class="cs-stock">{{item.stock}}</text>
+          <view class="direction-badge direction-{{item.directionType}}">{{item.direction}}</view>
+        </view>
+        <view class="cs-center">
+          <text class="cs-action">{{item.action}}</text>
+        </view>
+        <view class="cs-right">
+          <text class="cs-confidence">{{item.confidence}}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="no-consensus" wx:if="{{roundtable.noConsensus.length > 0}}">
+      <text class="nc-title">未达成共识</text>
+      <view class="nc-item" wx:for="{{roundtable.noConsensus}}" wx:key="stock">
+        <text class="nc-stock">{{item.stock}}</text>
+        <text class="nc-reason">{{item.reason}}</text>
+      </view>
+    </view>
+
+    <view class="no-consensus-empty" wx:if="{{roundtable.noConsensus.length === 0}}">
+      <text class="nc-empty-text">所有议题均已达成共识</text>
+    </view>
+  </view>
+  </block>
+</view>

@@ -1,0 +1,155 @@
+groups:
+  - name: fundai-runtime
+    rules:
+      - alert: FundAIMetricsEndpointDown
+        expr: absent(fundai_http_requests_total)
+        for: 5m
+        labels:
+          severity: critical
+          component: observability
+        annotations:
+          summary: FundAI metrics endpoint is not being scraped
+          description: Prometheus has not seen fundai_http_requests_total for 5 minutes. Check /api/metrics, service health, and scrape configuration.
+
+      - alert: FundAIHighHTTP5xxRate
+        expr: |
+          sum(rate(fundai_http_requests_total{status=~"5.."}[5m]))
+            /
+          clamp_min(sum(rate(fundai_http_requests_total[5m])), 0.001) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: FundAI API 5xx rate is above 5%
+          description: More than 5% of API requests are returning 5xx responses for 10 minutes. Inspect app logs, database health, and recent deployments.
+
+      - alert: FundAIRecoveredPanics
+        expr: increase(fundai_http_panics_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: FundAI recovered at least one HTTP panic
+          description: A request panic was recovered in the last 5 minutes. Treat this as a correctness bug even if the process stayed alive.
+
+  - name: fundai-llm-workflow
+    rules:
+      - alert: FundAILLMFailureRateHigh
+        expr: |
+          sum(rate(fundai_llm_calls_total{status!="success",status!="budget_exceeded"}[10m]))
+            /
+          clamp_min(sum(rate(fundai_llm_calls_total[10m])), 0.001) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+          component: llm
+        annotations:
+          summary: FundAI LLM failure rate is above 10%
+          description: Non-budget LLM failures are elevated. Check provider outages, model configuration, API keys, and retry/fallback behavior.
+
+      - alert: FundAILLMBudgetExhausted
+        expr: sum(increase(fundai_llm_calls_total{status="budget_exceeded"}[15m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: llm
+        annotations:
+          summary: FundAI LLM budget limiter rejected calls
+          description: One or more owner/step budgets were exhausted in the last 15 minutes. Check workflow fan-out, cache hit rate, and plan-step prompts.
+
+      - alert: FundAIWorkflowFailedTransitions
+        expr: sum(increase(fundai_workflow_transitions_total{state=~"failed|cancelled"}[10m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: workflow
+        annotations:
+          summary: FundAI workflow entered a failed terminal state
+          description: At least one workflow transitioned to failed or cancelled. Inspect the workflow run, agent step logs, LLM provider status, and DB errors.
+
+      - alert: FundAIWorkflowNoProgress
+        expr: sum(increase(fundai_workflow_transitions_total[2h])) == 0
+        for: 30m
+        labels:
+          severity: warning
+          component: workflow
+        annotations:
+          summary: FundAI workflows have no observed progress
+          description: No workflow transition has been observed for 2 hours. During trading windows this may indicate scheduler, lease, or market-calendar issues.
+
+      - alert: FundAIHardRiskRejections
+        expr: sum(increase(fundai_hard_risk_rejections_total[15m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: risk
+        annotations:
+          summary: FundAI hard risk gate rejected trades
+          description: The deterministic execution risk gate rejected one or more orders. Inspect fund hardRisk config, latest NAV, and proposed plan actions.
+
+  - name: fundai-database-scheduler-marketplace
+    rules:
+      - alert: FundAIDatabasePoolNearCapacity
+        expr: |
+          fundai_db_max_open_connections > 0
+            and
+          fundai_db_in_use_connections / fundai_db_max_open_connections > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: FundAI database pool is near capacity
+          description: More than 85% of configured DB connections are in use. Check slow queries, connection leaks, and pool sizing.
+
+      - alert: FundAIDatabaseConnectionWaits
+        expr: increase(fundai_db_wait_count_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: FundAI requests waited for DB connections
+          description: The sql.DB pool reported connection waits. Investigate pool saturation, query latency, and transaction lifetimes.
+
+      - alert: FundAISchedulerLeaseSplitBrain
+        expr: sum by (lease) (fundai_scheduler_leader_state) > 1
+        for: 1m
+        labels:
+          severity: critical
+          component: scheduler
+        annotations:
+          summary: FundAI scheduler lease has more than one leader
+          description: Multiple replicas report leadership for the same lease. Check DB clock/latency, lease TTL, and replica health immediately.
+
+      - alert: FundAISchedulerLeaseMissingLeader
+        expr: sum by (lease) (fundai_scheduler_leader_state) == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: scheduler
+        annotations:
+          summary: FundAI scheduler lease has no leader
+          description: No replica reports leadership for a scheduler lease. Background workflows or marketplace reconciliation may be stalled.
+
+      - alert: FundAIMarketplaceReconcilerFailures
+        expr: increase(fundai_marketplace_reconciliations_total{status="failed"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: marketplace
+        annotations:
+          summary: FundAI marketplace reconciler failed
+          description: The marketplace reconciler returned an error. Pending orders may not converge until the next successful pass.
+
+      - alert: FundAIMarketplaceUnresolvedFindings
+        expr: fundai_marketplace_reconciliation_last{kind=~"unresolved|errored"} > 0
+        for: 10m
+        labels:
+          severity: critical
+          component: marketplace
+        annotations:
+          summary: FundAI marketplace reconciliation has unresolved findings
+          description: The latest reconciler pass reported unresolved or errored items. Inspect agent marketplace orders and reconcile findings.

@@ -1,0 +1,97 @@
+<!-- 团队管理页面 -->
+<view class="page">
+
+  <!-- ===== 1. 团队概览头部 ===== -->
+  <view class="team-overview">
+    <view class="overview-top">
+      <text class="overview-title">团队成员</text>
+      <text class="overview-count">{{teamCount}} 人</text>
+    </view>
+    <!-- 角色分布统计条 -->
+    <view class="role-bar">
+      <view
+        class="role-bar-segment"
+        wx:for="{{roleStats}}"
+        wx:key="role"
+        style="width: {{item.percent}}%; background: {{item.color}};"
+      ></view>
+    </view>
+    <view class="role-legend">
+      <view class="legend-item" wx:for="{{roleStats}}" wx:key="role">
+        <view class="legend-dot" style="background: {{item.color}};"></view>
+        <text class="legend-label">{{item.name}}</text>
+        <text class="legend-count">{{item.count}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- ===== 2. Agent 列表 ===== -->
+  <view class="agent-list">
+    <view class="agent-item" wx:for="{{team}}" wx:key="id">
+      <agent-card agent="{{item}}" bind:tap="onAgentTap" />
+      <!-- 解雇按钮（长按或侧滑太复杂，用小按钮） -->
+      <view class="fire-btn" catchtap="fireAgent" data-id="{{item.id}}">
+        <text class="fire-btn-text">解雇</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 底部占位，防止被按钮遮挡 -->
+  <view class="bottom-placeholder"></view>
+
+  <!-- ===== 3. 招聘按钮（固定底部） ===== -->
+  <view class="hire-btn-wrap">
+    <button class="hire-btn" bindtap="showHire">+ 招聘新成员</button>
+  </view>
+
+  <!-- ===== 4. 招聘弹窗（半屏，从底部弹出） ===== -->
+  <view class="modal-mask {{showHireModal ? 'modal-mask--show' : ''}}" catchtap="hideHire" catchtouchmove="preventScroll">
+    <view class="modal-content {{showHireModal ? 'modal-content--show' : ''}}" catchtap="preventScroll">
+      <!-- 弹窗头部 -->
+      <view class="modal-header">
+        <text class="modal-title">招聘新成员</text>
+        <view class="modal-close" bindtap="hideHire">✕</view>
+      </view>
+
+      <!-- 选择角色 -->
+      <view class="modal-section">
+        <text class="modal-label">选择角色</text>
+        <radio-group bindchange="onRoleChange" class="role-radio-group">
+          <label class="role-radio-item {{selectedRole === item.value ? 'role-radio-item--active' : ''}}" wx:for="{{roles}}" wx:key="value">
+            <radio value="{{item.value}}" checked="{{selectedRole === item.value}}" color="#6366f1" />
+            <text class="role-radio-text">{{item.label}}</text>
+          </label>
+        </radio-group>
+      </view>
+
+      <!-- 选择模型 -->
+      <view class="modal-section">
+        <text class="modal-label">选择模型</text>
+        <picker bindchange="onModelChange" value="{{modelIndex}}" range="{{availableModels}}">
+          <view class="picker-display">
+            <text class="picker-value">{{selectedModel}}</text>
+            <text class="picker-arrow">▼</text>
+          </view>
+        </picker>
+      </view>
+
+      <!-- 选择风格 -->
+      <view class="modal-section">
+        <text class="modal-label">投资风格（可选）</text>
+        <picker bindchange="onStyleChange" value="{{selectedStyleIndex}}" range="{{styles}}" range-key="label">
+          <view class="picker-display">
+            <text class="picker-value">{{styles[selectedStyleIndex].label}}</text>
+            <text class="picker-arrow">▼</text>
+          </view>
+        </picker>
+      </view>
+
+      <!-- 按钮组 -->
+      <view class="modal-actions">
+        <button class="modal-btn modal-btn--cancel" bindtap="hideHire">取消</button>
+        <button class="modal-btn modal-btn--confirm" bindtap="confirmHire">确认招聘</button>
+      </view>
+    </view>
+  </view>
+
+</view>

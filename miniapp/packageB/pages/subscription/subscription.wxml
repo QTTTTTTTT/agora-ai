@@ -1,0 +1,130 @@
+<!--packageB/pages/subscription/subscription.wxml - 订阅管理-->
+<view class="page-container">
+
+  <!-- 当前订阅卡片 -->
+  <view class="current-plan-card plan-bg-{{currentPlan}}">
+    <view class="plan-card-header">
+      <text class="plan-card-label">当前订阅</text>
+      <view class="plan-card-badge" wx:if="{{subscription}}">
+        <text>{{subscription.autoRenew ? '自动续费' : '手动续费'}}</text>
+      </view>
+    </view>
+    <view class="plan-card-name">
+      <text wx:for="{{plans}}" wx:key="tier" wx:if="{{item.tier === currentPlan}}">{{item.name}}</text>
+    </view>
+    <view class="plan-card-info" wx:if="{{subscription}}">
+      <view class="plan-card-row">
+        <text class="plan-card-info-label">到期日</text>
+        <text class="plan-card-info-value">{{subscription.expireDate || '永久'}}</text>
+      </view>
+      <view class="plan-card-row">
+        <text class="plan-card-info-label">自动续费</text>
+        <text class="plan-card-info-value">{{subscription.autoRenew ? '已开启' : '未开启'}}</text>
+      </view>
+    </view>
+    <view class="plan-card-actions" wx:if="{{currentPlan !== 'free'}}">
+      <view class="plan-card-btn plan-card-btn-cancel" bindtap="cancelSubscription">取消订阅</view>
+    </view>
+  </view>
+
+  <!-- 计划对比卡片 -->
+  <view class="section">
+    <view class="section-title">选择计划</view>
+    <view class="plans-list">
+      <view
+        class="plan-item {{item.recommended ? 'plan-item-recommended' : ''}} {{item.tier === currentPlan ? 'plan-item-current' : ''}}"
+        wx:for="{{plans}}"
+        wx:key="tier"
+      >
+        <!-- 推荐标签 -->
+        <view class="plan-recommend-tag" wx:if="{{item.recommended}}">
+          <text>推荐</text>
+        </view>
+        <!-- 当前标签 -->
+        <view class="plan-current-tag" wx:if="{{item.tier === currentPlan}}">
+          <text>当前</text>
+        </view>
+
+        <view class="plan-item-header">
+          <text class="plan-item-name">{{item.name}}</text>
+          <text class="plan-item-price">{{item.priceLabel}}</text>
+        </view>
+
+        <view class="plan-item-features">
+          <view class="plan-feature-row" wx:for="{{item.featureList}}" wx:for-item="feat" wx:key="*this">
+            <text class="plan-feature-icon">{{feat.indexOf('不支持') > -1 ? '✗' : '✓'}}</text>
+            <text class="plan-feature-text {{feat.indexOf('不支持') > -1 ? 'disabled' : ''}}">{{feat}}</text>
+          </view>
+        </view>
+
+        <view class="plan-item-action" wx:if="{{item.tier !== currentPlan}}">
+          <view
+            class="plan-subscribe-btn plan-subscribe-btn-{{item.tier}}"
+            bindtap="subscribe"
+            data-tier="{{item.tier}}"
+          >
+            <text>{{item.tier === 'enterprise' ? '联系我们' : '升级'}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 功能对比表 -->
+  <view class="section">
+    <view class="section-title">功能对比</view>
+    <scroll-view class="compare-table-scroll" scroll-x enable-flex>
+      <view class="compare-table">
+        <!-- 表头 -->
+        <view class="compare-row compare-header">
+          <view class="compare-cell compare-label-cell">
+            <text>功能</text>
+          </view>
+          <view class="compare-cell" wx:for="{{plans}}" wx:key="tier">
+            <text class="compare-plan-name">{{item.name}}</text>
+          </view>
+        </view>
+        <!-- 数据行 -->
+        <view class="compare-row" wx:for="{{compareData}}" wx:key="label">
+          <view class="compare-cell compare-label-cell">
+            <text>{{item.label}}</text>
+          </view>
+          <view class="compare-cell" wx:for="{{item.values}}" wx:for-item="val" wx:key="*this">
+            <text class="compare-value {{val === '✗' ? 'compare-value-no' : ''}} {{val === '✓' ? 'compare-value-yes' : ''}}">{{val}}</text>
+          </view>
+        </view>
+      </view>
+    </scroll-view>
+  </view>
+
+  <!-- 支付方式选择 -->
+  <view class="section" wx:if="{{currentPlan === 'free'}}">
+    <view class="section-title">支付方式</view>
+    <view class="pay-methods">
+      <view
+        class="pay-method-item {{payMethod === 'wechat' ? 'pay-method-active' : ''}}"
+        bindtap="selectPayMethod"
+        data-method="wechat"
+      >
+        <text class="pay-method-icon">💚</text>
+        <text class="pay-method-label">微信支付</text>
+        <view class="pay-method-check" wx:if="{{payMethod === 'wechat'}}">✓</view>
+      </view>
+      <view
+        class="pay-method-item {{payMethod === 'alipay' ? 'pay-method-active' : ''}}"
+        bindtap="selectPayMethod"
+        data-method="alipay"
+      >
+        <text class="pay-method-icon">💙</text>
+        <text class="pay-method-label">支付宝</text>
+        <view class="pay-method-check" wx:if="{{payMethod === 'alipay'}}">✓</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- loading -->
+  <view class="loading-mask" wx:if="{{loading}}">
+    <view class="loading-spinner"></view>
+  </view>
+
+</view>

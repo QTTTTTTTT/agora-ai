@@ -1,0 +1,182 @@
+<view class="page" wx:if="{{fund}}">
+  <!-- 头部：渐变背景 -->
+  <view class="header {{fund.isUp ? 'header-up' : 'header-down'}}">
+    <view class="header-content">
+      <text class="fund-name">{{fund.name}}</text>
+      <view class="nav-row">
+        <text class="nav-value">{{fund.nav}}</text>
+        <view class="daily-change {{fund.isUp ? 'change-up' : 'change-down'}}">
+          <text>{{fund.isUp ? '+' : ''}}{{fund.dailyChange}}</text>
+          <text class="change-percent">({{fund.isUp ? '+' : ''}}{{fund.dailyChangePercent}}%)</text>
+        </view>
+      </view>
+      <text class="nav-date">净值日期: {{fund.navDate}}</text>
+    </view>
+  </view>
+
+  <!-- 自动决策卡片 -->
+  <view class="card auto-exec-card">
+    <view class="auto-exec-header">
+      <view class="auto-exec-title-block">
+        <text class="card-title-inline">自动决策执行</text>
+        <text class="auto-exec-state {{fund.autoExecuteSummary.enabled ? 'state-on' : 'state-off'}}">{{fund.autoExecuteSummary.enabledLabel}}</text>
+      </view>
+      <switch checked="{{fund.autoExecuteSummary.enabled}}" bindchange="onAutoExecuteQuickToggle" color="#5664f5" />
+    </view>
+    <view class="auto-exec-meta">
+      <text>单笔 ≤ {{fund.autoExecuteSummary.maxOrderPctText}} NAV · 日累计 ≤ {{fund.autoExecuteSummary.maxDailyPctText}} NAV · 置信度 ≥ {{fund.autoExecuteSummary.minConfidenceText}}</text>
+    </view>
+    <view class="auto-exec-actions">
+      <button class="btn-link" bindtap="onAutoExecuteOpenSheet">查看适用范围与详细设置</button>
+    </view>
+  </view>
+
+  <!-- 基本信息卡片 -->
+  <view class="card">
+    <view class="card-title">基本信息</view>
+    <view class="info-grid">
+      <view class="info-item">
+        <text class="info-label">初始资本</text>
+        <text class="info-value">¥{{fund.initialCapital}}</text>
+      </view>
+      <view class="info-item">
+        <text class="info-label">AUM</text>
+        <text class="info-value">¥{{fund.aum}}</text>
+      </view>
+      <view class="info-item">
+        <text class="info-label">交易模式</text>
+        <text class="info-value mode-badge mode-{{fund.tradingMode}}">{{fund.tradingMode}}</text>
+      </view>
+      <view class="info-item">
+        <text class="info-label">创建日期</text>
+        <text class="info-value">{{fund.createdDate}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 详细指标卡片 -->
+  <view class="card">
+    <view class="card-title">详细指标</view>
+    <view class="metrics-grid">
+      <view class="metric-item">
+        <text class="metric-label">总收益率</text>
+        <text class="metric-value {{fund.metrics.totalReturn >= 0 ? 'text-up' : 'text-down'}}">{{fund.metrics.totalReturn >= 0 ? '+' : ''}}{{fund.metrics.totalReturn}}%</text>
+      </view>
+      <view class="metric-item">
+        <text class="metric-label">年化收益</text>
+        <text class="metric-value {{fund.metrics.annualizedReturn >= 0 ? 'text-up' : 'text-down'}}">{{fund.metrics.annualizedReturn >= 0 ? '+' : ''}}{{fund.metrics.annualizedReturn}}%</text>
+      </view>
+      <view class="metric-item">
+        <text class="metric-label">夏普比率</text>
+        <text class="metric-value">{{fund.metrics.sharpeRatio}}</text>
+      </view>
+      <view class="metric-item">
+        <text class="metric-label">最大回撤</text>
+        <text class="metric-value text-down">{{fund.metrics.maxDrawdown}}%</text>
+      </view>
+      <view class="metric-item">
+        <text class="metric-label">波动率</text>
+        <text class="metric-value">{{fund.metrics.volatility}}%</text>
+      </view>
+      <view class="metric-item">
+        <text class="metric-label">胜率</text>
+        <text class="metric-value text-up">{{fund.metrics.winRate}}%</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 团队概览 -->
+  <view class="card">
+    <view class="card-title">团队概览</view>
+    <view class="agents-list">
+      <view class="agent-row" wx:for="{{agents}}" wx:key="id" bindtap="onAgentTap" data-id="{{item.id}}">
+        <text class="agent-emoji">{{item.emoji}}</text>
+        <view class="agent-info">
+          <text class="agent-name">{{item.name}}</text>
+          <text class="agent-role">{{item.role}}</text>
+        </view>
+        <view class="agent-arrow">›</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 操作按钮 -->
+  <view class="actions-card">
+    <button class="btn-secondary" bindtap="onShowModeSelector">切换交易模式</button>
+  </view>
+
+  <!-- 模式选择弹窗 -->
+  <view class="modal-mask" wx:if="{{showModeSelector}}" bindtap="onHideModeSelector">
+    <view class="modal-content" catchtap="">
+      <view class="modal-title">选择交易模式</view>
+      <view class="mode-option {{fund.tradingMode === item ? 'mode-active' : ''}}"
+            wx:for="{{tradingModes}}" wx:key="*this"
+            bindtap="onSwitchMode" data-mode="{{item}}">
+        <text class="mode-name">{{item}}</text>
+        <text class="mode-desc" wx:if="{{item === 'simulation'}}">模拟盘 - 无真实资金</text>
+        <text class="mode-desc" wx:if="{{item === 'paper'}}">纸上交易 - 实时数据模拟执行</text>
+        <text class="mode-desc" wx:if="{{item === 'live'}}">实盘 - 真实资金交易</text>
+        <text class="mode-check" wx:if="{{fund.tradingMode === item}}">✓</text>
+      </view>
+      <button class="btn-cancel" bindtap="onHideModeSelector">取消</button>
+    </view>
+  </view>
+
+  <!-- 自动决策设置弹窗 -->
+  <view class="modal-mask" wx:if="{{showAutoExecuteSheet}}" bindtap="onAutoExecuteCloseSheet">
+    <view class="modal-content auto-exec-sheet" catchtap="">
+      <view class="modal-title">自动决策设置</view>
+
+      <view class="auto-exec-row">
+        <text class="auto-exec-row-label">启用自动决策执行</text>
+        <switch checked="{{autoExecuteDraft.enabled}}" bindchange="onAutoExecuteDraftToggle" color="#5664f5" />
+      </view>
+
+      <view class="auto-exec-scope">
+        <text class="auto-exec-scope-title">适用范围</text>
+        <text class="auto-exec-scope-item">· 仅对单笔不超过设定 NAV 比例的方案自动放行（超过仍需人工审批）</text>
+        <text class="auto-exec-scope-item">· 单日累计自动放行不超过设定 NAV 比例（超过自动退回人工）</text>
+        <text class="auto-exec-scope-item">· PM 决策置信度需 ≥ 设定值才放行</text>
+        <text class="auto-exec-scope-item">· 滑点超出阈值时按所选策略处理（默认退回人工）</text>
+        <text class="auto-exec-scope-item">· 不影响硬风控规则（手数、T+1、单笔 NAV 上限、滑点 guard 等照常生效）</text>
+        <text class="auto-exec-scope-item">· 可随时关闭，已生成但未执行的方案不受影响</text>
+      </view>
+
+      <view class="auto-exec-field">
+        <text class="auto-exec-field-label">单笔上限（% NAV，默认 5%）</text>
+        <input class="auto-exec-input" type="digit" value="{{autoExecuteDraft.maxOrderPctOfAssets * 100}}" bindinput="onAutoExecuteDraftMaxOrderInput" />
+      </view>
+      <view class="auto-exec-field">
+        <text class="auto-exec-field-label">单日累计上限（% NAV，默认 20%）</text>
+        <input class="auto-exec-input" type="digit" value="{{autoExecuteDraft.maxDailyPctOfAssets * 100}}" bindinput="onAutoExecuteDraftMaxDailyInput" />
+      </view>
+      <view class="auto-exec-field">
+        <text class="auto-exec-field-label">置信度下限（0~1，默认 0.60）</text>
+        <input class="auto-exec-input" type="digit" value="{{autoExecuteDraft.minConfidence}}" bindinput="onAutoExecuteDraftMinConfidenceInput" />
+      </view>
+      <view class="auto-exec-field">
+        <text class="auto-exec-field-label">滑点超阈值策略</text>
+        <picker mode="selector" range="{{autoExecutePolicies}}" range-key="label" value="{{autoExecuteSlippageIndex}}" bindchange="onAutoExecuteDraftPolicyChange">
+          <view class="auto-exec-picker">{{autoExecutePolicies[autoExecuteSlippageIndex].label}}</view>
+        </picker>
+      </view>
+      <view class="auto-exec-field">
+        <text class="auto-exec-field-label">市场白名单（可选，逗号分隔）</text>
+        <input class="auto-exec-input" placeholder="留空 = 不限制；如 a_share, us_equity" value="{{autoExecuteAllowedMarketsText}}" bindinput="onAutoExecuteDraftMarketsInput" />
+      </view>
+
+      <view class="auto-exec-field auto-exec-field-tier">
+        <text class="auto-exec-field-label">研究深度</text>
+        <picker mode="selector" range="{{researchTierOptions}}" range-key="label" value="{{researchTierIndex}}" bindchange="onResearchTierDraftChange">
+          <view class="auto-exec-picker">{{researchTierOptions[researchTierIndex].label}}</view>
+        </picker>
+        <text class="auto-exec-field-hint">深度辩论：Bull / Bear / Quant 三个研究员对每个标的辩论 2 轮后再交给 PM，LLM 调用约为标准模式 3~5 倍。</text>
+      </view>
+
+      <view class="auto-exec-buttons">
+        <button class="btn-cancel" bindtap="onAutoExecuteCloseSheet">取消</button>
+        <button class="btn-primary" bindtap="onAutoExecuteSave">保存设置</button>
+      </view>
+    </view>
+  </view>
+</view>

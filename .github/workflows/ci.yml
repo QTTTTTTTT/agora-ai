@@ -1,0 +1,293 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: Commit hygiene scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Scan tracked files for large/binary/secret candidates
+        env:
+          RUN_CORE: "0"
+          HYGIENE_SCOPE: tracked
+        run: bash scripts/verify.sh
+
+  backend:
+    name: Backend tests, vet, vulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.10"
+          cache-dependency-path: server/go.sum
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  frontend:
+    name: Frontend audit, build, lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run lint
+        run: npm run lint
+
+  miniapp:
+    name: Miniapp static validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate miniapp files
+        run: node scripts/validate-miniapp.mjs miniapp
+
+  api-contract:
+    name: API contract validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate frontend and miniapp API routes
+        run: node scripts/validate-api-contract.mjs .
+
+  observability:
+    name: Prometheus alert validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate alert rules
+        run: python3 scripts/validate-prometheus-alerts.py prometheus/alerts.yml
+
+  release-hygiene:
+    name: Release hygiene validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release metadata and git hygiene
+        env:
+          RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: python3 scripts/validate-release-hygiene.py .
+
+  docker:
+    name: Docker build and Compose smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [hygiene, backend, frontend, miniapp, api-contract, observability, release-hygiene]
+    env:
+      BUILD_VERSION: ${{ github.ref_name }}
+      BUILD_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Compose config
+        run: docker compose config --quiet
+
+      - name: Build app image
+        run: docker build --build-arg BUILD_VERSION="$BUILD_VERSION" --build-arg BUILD_COMMIT="$BUILD_COMMIT" -f Dockerfile -t fundai-simulator:ci .
+
+      - name: Build web-search MCP image
+        run: docker build -f Dockerfile.web-search-mcp -t fundai-web-search-mcp:ci .
+
+      - name: Start Compose stack
+        run: docker compose up -d --build postgres web-search-mcp app
+
+      - name: Smoke health endpoints
+        run: |
+          python3 - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          checks = [
+              ("app", "http://localhost:8080/api/health"),
+              ("web-search-mcp", "http://localhost:3004/health"),
+          ]
+
+          for name, url in checks:
+              last_error = None
+              for _ in range(60):
+                  try:
+                      with urllib.request.urlopen(url, timeout=2) as response:
+                          body = response.read().decode("utf-8", errors="replace")
+                          print(json.dumps({"service": name, "status": response.status, "body": body[:500]}))
+                          if response.status == 200:
+                              break
+                  except Exception as exc:  # noqa: BLE001 - CI diagnostics
+                      last_error = repr(exc)
+                      time.sleep(2)
+              else:
+                  raise SystemExit(f"{name} health check failed: {last_error}")
+          PY
+
+      - name: Dump Compose diagnostics
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color postgres web-search-mcp app
+
+      - name: Stop Compose stack
+        if: always()
+        run: docker compose down -v
+
+  e2e:
+    name: Playwright E2E against Compose app
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: docker
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Start Compose stack
+        working-directory: .
+        run: docker compose up -d --build postgres web-search-mcp app
+
+      - name: Wait for health endpoints
+        working-directory: .
+        run: |
+          python3 - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          checks = [
+              ("app", "http://localhost:8080/api/health"),
+              ("web-search-mcp", "http://localhost:3004/health"),
+          ]
+
+          for name, url in checks:
+              last_error = None
+              for _ in range(60):
+                  try:
+                      with urllib.request.urlopen(url, timeout=2) as response:
+                          body = response.read().decode("utf-8", errors="replace")
+                          print(json.dumps({"service": name, "status": response.status, "body": body[:500]}))
+                          if response.status == 200:
+                              break
+                  except Exception as exc:  # noqa: BLE001 - CI diagnostics
+                      last_error = repr(exc)
+                      time.sleep(2)
+              else:
+                  raise SystemExit(f"{name} health check failed: {last_error}")
+          PY
+
+      - name: Run Playwright E2E
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:8080
+          PLAYWRIGHT_API_URL: http://localhost:8080
+          PLAYWRIGHT_SKIP_WEBSERVER: "1"
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          if-no-files-found: ignore
+
+      - name: Dump Compose diagnostics
+        if: failure()
+        working-directory: .
+        run: |
+          docker compose ps
+          docker compose logs --no-color postgres web-search-mcp app
+
+      - name: Stop Compose stack
+        if: always()
+        working-directory: .
+        run: docker compose down -v

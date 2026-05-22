@@ -1,0 +1,71 @@
+.metric-card {
+  background: #ffffff;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.metric-header {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.metric-icon {
+  font-size: 28rpx;
+}
+
+.metric-label {
+  font-size: 24rpx;
+  color: #8c8c8c;
+  line-height: 1.4;
+}
+
+.metric-body {
+  display: flex;
+  align-items: baseline;
+  gap: 12rpx;
+  flex-wrap: wrap;
+}
+
+.metric-value {
+  font-size: 40rpx;
+  font-weight: 600;
+  color: #262626;
+  line-height: 1.2;
+}
+
+.metric-trend {
+  display: flex;
+  align-items: center;
+  gap: 4rpx;
+}
+
+.trend-arrow {
+  font-size: 24rpx;
+  font-weight: 600;
+}
+
+.sub-value {
+  font-size: 24rpx;
+  font-weight: 500;
+}
+
+/* 趋势颜色类 */
+.trend-up .trend-arrow,
+.trend-up .sub-value {
+  color: #ff4d4f;
+}
+
+.trend-down .trend-arrow,
+.trend-down .sub-value {
+  color: #52c41a;
+}
+
+.trend-flat .trend-arrow,
+.trend-flat .sub-value {
+  color: #999999;
+}

@@ -1,0 +1,104 @@
+<view class="page">
+  <view class="empty-state" wx:if="{{loading}}">加载中...</view>
+  <view class="empty-state" wx:elif="{{!agent}}">{{errorText || '暂无 Agent 详情'}}</view>
+  <block wx:else>
+  <!-- 头部 -->
+  <view class="header">
+    <view class="avatar-big">{{agent.emoji}}</view>
+    <text class="agent-name">{{agent.name}}</text>
+    <text class="agent-role">{{agent.role}}</text>
+    <view class="status-row">
+      <view class="status-light status-{{agent.status}}"></view>
+      <text class="status-text">{{agent.statusText}}</text>
+    </view>
+  </view>
+
+  <!-- 基本信息 -->
+  <view class="card">
+    <view class="card-title">基本信息</view>
+    <view class="info-list">
+      <view class="info-row">
+        <text class="info-label">模型</text>
+        <text class="info-value">{{agent.model}}</text>
+      </view>
+      <view class="info-row">
+        <text class="info-label">投资风格</text>
+        <text class="info-value">{{agent.investStyle}}</text>
+      </view>
+      <view class="info-row">
+        <text class="info-label">创建时间</text>
+        <text class="info-value">{{agent.createdTime}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 能力指标 -->
+  <view class="card">
+    <view class="card-title">能力指标</view>
+    <view class="empty-section" wx:if="{{capabilities.length === 0}}">暂无能力指标</view>
+    <view class="capability-list" wx:else>
+      <view class="cap-item" wx:for="{{capabilities}}" wx:key="name">
+        <view class="cap-header">
+          <text class="cap-name">{{item.name}}</text>
+          <text class="cap-value">{{item.valueText}}</text>
+        </view>
+        <view class="progress-bar">
+          <view class="progress-fill" style="width: {{item.value}}%; background: {{item.color}};"></view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 技能列表 -->
+  <view class="card">
+    <view class="card-title">已安装技能</view>
+    <view class="empty-section" wx:if="{{skills.length === 0}}">暂无已配置技能</view>
+    <view class="skills-list" wx:else>
+      <view class="skill-item" wx:for="{{skills}}" wx:key="name">
+        <text class="skill-icon">{{item.icon}}</text>
+        <view class="skill-info">
+          <text class="skill-name">{{item.name}}</text>
+          <text class="skill-desc">{{item.desc}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 最近活动 -->
+  <view class="card">
+    <view class="card-title">最近活动</view>
+    <view class="empty-section" wx:if="{{activities.length === 0}}">暂无最近活动</view>
+    <view class="activity-list" wx:else>
+      <view class="act-item" wx:for="{{activities}}" wx:key="action">
+        <view class="act-dot"></view>
+        <view class="act-content">
+          <view class="act-header">
+            <text class="act-action">{{item.action}}</text>
+            <text class="act-time">{{item.time}}</text>
+          </view>
+          <text class="act-detail">{{item.detail}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 个人记忆 -->
+  <view class="card">
+    <view class="card-title">个人记忆</view>
+    <view class="empty-section" wx:if="{{memories.length === 0}}">暂无个人记忆</view>
+    <view class="memory-list" wx:else>
+      <view class="mem-item" wx:for="{{memories}}" wx:key="key">
+        <text class="mem-key">{{item.key}}</text>
+        <text class="mem-summary">{{item.summary}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 操作按钮 -->
+  <view class="actions">
+    <button class="btn-action btn-model" bindtap="onChangeModel">更换模型</button>
+    <button class="btn-action btn-style" bindtap="onChangeStyle">调整风格</button>
+    <button class="btn-action btn-dismiss" bindtap="onDismiss">解雇</button>
+  </view>
+  </block>
+</view>

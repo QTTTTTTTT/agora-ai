@@ -1,0 +1,364 @@
+/* packageB/pages/subscription/subscription.wxss */
+.page-container {
+  padding: 24rpx;
+  background: #f5f5f5;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+/* === 当前计划卡片 === */
+.current-plan-card {
+  border-radius: 24rpx;
+  padding: 40rpx 32rpx;
+  margin-bottom: 32rpx;
+  color: #fff;
+  position: relative;
+  overflow: hidden;
+}
+
+.plan-bg-free {
+  background: linear-gradient(135deg, #6b7280, #9ca3af);
+}
+.plan-bg-pro {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+}
+.plan-bg-premium {
+  background: linear-gradient(135deg, #8b5cf6, #a855f7);
+}
+.plan-bg-enterprise {
+  background: linear-gradient(135deg, #d97706, #f59e0b);
+}
+
+.plan-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16rpx;
+}
+
+.plan-card-label {
+  font-size: 26rpx;
+  opacity: 0.85;
+}
+
+.plan-card-badge {
+  background: rgba(255, 255, 255, 0.25);
+  padding: 6rpx 18rpx;
+  border-radius: 20rpx;
+  font-size: 22rpx;
+}
+
+.plan-card-name {
+  font-size: 48rpx;
+  font-weight: 700;
+  margin-bottom: 24rpx;
+}
+
+.plan-card-info {
+  margin-bottom: 24rpx;
+}
+
+.plan-card-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8rpx;
+  font-size: 26rpx;
+}
+
+.plan-card-info-label {
+  opacity: 0.8;
+}
+
+.plan-card-info-value {
+  font-weight: 500;
+}
+
+.plan-card-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 16rpx;
+}
+
+.plan-card-btn {
+  padding: 12rpx 32rpx;
+  border-radius: 16rpx;
+  font-size: 26rpx;
+  text-align: center;
+}
+
+.plan-card-btn-cancel {
+  background: rgba(255, 255, 255, 0.2);
+  border: 1rpx solid rgba(255, 255, 255, 0.4);
+}
+
+.plan-card-btn-restore {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+/* === section === */
+.section {
+  margin-bottom: 32rpx;
+}
+
+.section-title {
+  font-size: 32rpx;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 20rpx;
+}
+
+/* === 计划卡片列表 === */
+.plans-list {
+  display: flex;
+  flex-direction: column;
+  gap: 24rpx;
+}
+
+.plan-item {
+  background: #fff;
+  border-radius: 20rpx;
+  padding: 32rpx;
+  position: relative;
+  border: 2rpx solid #e5e7eb;
+}
+
+.plan-item-recommended {
+  border-color: #6366f1;
+  box-shadow: 0 4rpx 24rpx rgba(99, 102, 241, 0.15);
+}
+
+.plan-item-current {
+  border-color: #10b981;
+}
+
+.plan-recommend-tag {
+  position: absolute;
+  top: 0;
+  right: 32rpx;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  padding: 6rpx 24rpx;
+  border-radius: 0 0 12rpx 12rpx;
+  font-size: 22rpx;
+  font-weight: 600;
+}
+
+.plan-current-tag {
+  position: absolute;
+  top: 0;
+  left: 32rpx;
+  background: #10b981;
+  color: #fff;
+  padding: 6rpx 24rpx;
+  border-radius: 0 0 12rpx 12rpx;
+  font-size: 22rpx;
+  font-weight: 600;
+}
+
+.plan-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24rpx;
+  padding-top: 8rpx;
+}
+
+.plan-item-name {
+  font-size: 34rpx;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.plan-item-price {
+  font-size: 34rpx;
+  font-weight: 700;
+  color: #6366f1;
+}
+
+.plan-item-features {
+  margin-bottom: 24rpx;
+}
+
+.plan-feature-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+
+.plan-feature-icon {
+  width: 36rpx;
+  font-size: 26rpx;
+  margin-right: 12rpx;
+  color: #10b981;
+}
+
+.plan-feature-row .plan-feature-icon {
+  color: #10b981;
+}
+
+.plan-feature-text {
+  font-size: 26rpx;
+  color: #374151;
+}
+
+.plan-feature-text.disabled {
+  color: #9ca3af;
+  text-decoration: line-through;
+}
+
+.plan-item-action {
+  margin-top: 8rpx;
+}
+
+.plan-subscribe-btn {
+  width: 100%;
+  text-align: center;
+  padding: 20rpx 0;
+  border-radius: 16rpx;
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #fff;
+}
+
+.plan-subscribe-btn-free {
+  background: #6b7280;
+}
+.plan-subscribe-btn-pro {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+}
+.plan-subscribe-btn-premium {
+  background: linear-gradient(135deg, #8b5cf6, #a855f7);
+}
+.plan-subscribe-btn-enterprise {
+  background: linear-gradient(135deg, #d97706, #f59e0b);
+}
+
+/* === 功能对比表 === */
+.compare-table-scroll {
+  background: #fff;
+  border-radius: 20rpx;
+  padding: 16rpx;
+  white-space: nowrap;
+}
+
+.compare-table {
+  display: flex;
+  flex-direction: column;
+  min-width: 900rpx;
+}
+
+.compare-row {
+  display: flex;
+  border-bottom: 1rpx solid #f3f4f6;
+}
+
+.compare-row:last-child {
+  border-bottom: none;
+}
+
+.compare-header {
+  background: #f9fafb;
+  border-radius: 12rpx;
+  font-weight: 600;
+}
+
+.compare-cell {
+  flex: 1;
+  padding: 20rpx 12rpx;
+  font-size: 24rpx;
+  color: #4b5563;
+  text-align: center;
+  min-width: 160rpx;
+}
+
+.compare-label-cell {
+  flex: 1.2;
+  text-align: left;
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.compare-plan-name {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: #4f46e5;
+}
+
+.compare-value-yes {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.compare-value-no {
+  color: #ef4444;
+}
+
+/* === 支付方式 === */
+.pay-methods {
+  display: flex;
+  gap: 20rpx;
+}
+
+.pay-method-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12rpx;
+  background: #fff;
+  border: 2rpx solid #e5e7eb;
+  border-radius: 16rpx;
+  padding: 28rpx 0;
+  position: relative;
+}
+
+.pay-method-active {
+  border-color: #6366f1;
+  background: #f5f3ff;
+}
+
+.pay-method-icon {
+  font-size: 36rpx;
+}
+
+.pay-method-label {
+  font-size: 28rpx;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.pay-method-check {
+  position: absolute;
+  top: 8rpx;
+  right: 12rpx;
+  font-size: 24rpx;
+  color: #6366f1;
+  font-weight: 700;
+}
+
+/* === loading === */
+.loading-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.6);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 999;
+}
+
+.loading-spinner {
+  width: 64rpx;
+  height: 64rpx;
+  border: 6rpx solid #e5e7eb;
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

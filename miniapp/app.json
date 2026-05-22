@@ -1,0 +1,79 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/team/team",
+    "pages/decision/decision",
+    "pages/memory/memory",
+    "pages/more/more"
+  ],
+  "subPackages": [
+    {
+      "root": "packageA",
+      "name": "fund",
+      "pages": [
+        "pages/fund-detail/fund-detail",
+        "pages/trades/trades",
+        "pages/plan-detail/plan-detail"
+      ]
+    },
+    {
+      "root": "packageB",
+      "name": "agent",
+      "pages": [
+        "pages/abtest/abtest",
+        "pages/agent-detail/agent-detail",
+        "pages/roundtable/roundtable",
+        "pages/subscription/subscription",
+        "pages/model-config/model-config",
+        "pages/usage/usage"
+      ]
+    }
+  ],
+  "window": {
+    "navigationBarBackgroundColor": "#4f46e5",
+    "navigationBarTitleText": "AI基金平台",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f5f5f5",
+    "backgroundTextStyle": "dark"
+  },
+  "tabBar": {
+    "color": "#8c8c8c",
+    "selectedColor": "#4f46e5",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "text": "首页",
+        "iconPath": "assets/icons/tab-home.png",
+        "selectedIconPath": "assets/icons/tab-home-active.png"
+      },
+      {
+        "pagePath": "pages/team/team",
+        "text": "团队",
+        "iconPath": "assets/icons/tab-team.png",
+        "selectedIconPath": "assets/icons/tab-team-active.png"
+      },
+      {
+        "pagePath": "pages/decision/decision",
+        "text": "决策",
+        "iconPath": "assets/icons/tab-decision.png",
+        "selectedIconPath": "assets/icons/tab-decision-active.png"
+      },
+      {
+        "pagePath": "pages/memory/memory",
+        "text": "记忆",
+        "iconPath": "assets/icons/tab-memory.png",
+        "selectedIconPath": "assets/icons/tab-memory-active.png"
+      },
+      {
+        "pagePath": "pages/more/more",
+        "text": "更多",
+        "iconPath": "assets/icons/tab-more.png",
+        "selectedIconPath": "assets/icons/tab-more-active.png"
+      }
+    ]
+  },
+  "sitemapLocation": "sitemap.json",
+  "style": "v2"
+}

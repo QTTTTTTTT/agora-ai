@@ -1,0 +1,104 @@
+<view class="page">
+  <!-- 顶部筛选栏 -->
+  <view class="filter-bar">
+    <view class="date-filters">
+      <picker mode="date" value="{{dateStart}}" bindchange="onDateStartChange">
+        <view class="date-picker">{{dateStart}}</view>
+      </picker>
+      <text class="date-sep">至</text>
+      <picker mode="date" value="{{dateEnd}}" bindchange="onDateEndChange">
+        <view class="date-picker">{{dateEnd}}</view>
+      </picker>
+    </view>
+    <view class="filter-tabs">
+      <view class="tab {{filterTab === 'all' ? 'tab-active' : ''}}" bindtap="onFilterTab" data-tab="all">全部</view>
+      <view class="tab {{filterTab === 'buy' ? 'tab-active' : ''}}" bindtap="onFilterTab" data-tab="buy">买入</view>
+      <view class="tab {{filterTab === 'sell' ? 'tab-active' : ''}}" bindtap="onFilterTab" data-tab="sell">卖出</view>
+    </view>
+    <view class="search-box">
+      <input class="search-input" placeholder="搜索股票代码/名称" value="{{searchKey}}" bindinput="onSearchInput" />
+    </view>
+  </view>
+
+  <!-- 交易统计 -->
+  <view class="stats-bar">
+    <view class="stat-item">
+      <text class="stat-num">{{stats.total}}</text>
+      <text class="stat-label">总交易数</text>
+    </view>
+    <view class="stat-item">
+      <text class="stat-num stat-buy">{{stats.buyCount}}</text>
+      <text class="stat-label">买入</text>
+    </view>
+    <view class="stat-item">
+      <text class="stat-num stat-sell">{{stats.sellCount}}</text>
+      <text class="stat-label">卖出</text>
+    </view>
+    <view class="stat-item">
+      <text class="stat-num">¥{{stats.totalFee}}</text>
+      <text class="stat-label">总手续费</text>
+    </view>
+  </view>
+
+  <!-- 交易列表 -->
+  <scroll-view class="trade-list" scroll-y enhanced show-scrollbar="{{false}}">
+    <view class="trade-item" wx:for="{{filteredTrades}}" wx:key="id">
+      <view class="trade-main" bindtap="onToggleExpand" data-id="{{item.id}}">
+        <view class="trade-left">
+          <view class="trade-datetime">
+            <text class="trade-date">{{item.date}}</text>
+            <text class="trade-time">{{item.time}}</text>
+          </view>
+          <view class="trade-badge badge-{{item.type}}">{{item.typeText}}</view>
+        </view>
+        <view class="trade-center">
+          <view class="stock-info">
+            <text class="stock-code">{{item.stockCode}}</text>
+            <text class="stock-name">{{item.stockName}}</text>
+          </view>
+          <view class="trade-nums">
+            <text class="trade-qty">{{item.quantity}}股</text>
+            <text class="trade-price">@{{item.price}}</text>
+          </view>
+        </view>
+        <view class="trade-right">
+          <text class="trade-amount">¥{{item.amount}}</text>
+          <text class="trade-fee">手续费: ¥{{item.fee}}</text>
+          <text class="trade-status">{{item.status}}</text>
+        </view>
+      </view>
+
+      <!-- 展开详情 -->
+      <view class="trade-detail" wx:if="{{expandedId === item.id}}">
+        <view class="detail-row">
+          <text class="detail-label">执行策略</text>
+          <text class="detail-value">{{item.strategy}}</text>
+        </view>
+        <view class="detail-row">
+          <text class="detail-label">滑点</text>
+          <text class="detail-value">{{item.slippage}}</text>
+        </view>
+        <view class="detail-row">
+          <text class="detail-label">子订单数</text>
+          <text class="detail-value">{{item.subOrders}}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="empty-tip" wx:if="{{filteredTrades.length === 0}}">
+      <text>暂无匹配的交易记录</text>
+    </view>
+  </scroll-view>
+
+  <!-- 底部统计 -->
+  <view class="bottom-stats">
+    <view class="bottom-stat">
+      <text class="bottom-label">总成交金额</text>
+      <text class="bottom-value">¥{{totalAmount}}</text>
+    </view>
+    <view class="bottom-stat">
+      <text class="bottom-label">总手续费</text>
+      <text class="bottom-value">¥{{totalFees}}</text>
+    </view>
+  </view>
+</view>

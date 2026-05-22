@@ -1,0 +1,160 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
+import { exportFundAuditLogsCSV, fetchFundAuditLogs, formatApiError, type AuditLogEntry } from "../lib/api";
+import { formatDateTimeForLanguage, useAppPreferences } from "../lib/preferences";
+
+function humanize(value?: string): string {
+  if (!value) return "-";
+  return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+const AuditLog: React.FC = () => {
+  const { fundId } = useParams<{ fundId: string }>();
+  const { language } = useAppPreferences();
+  const [entries, setEntries] = useState<AuditLogEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const copy = useMemo(
+    () =>
+      language === "en-US"
+        ? {
+            title: "Unified audit log",
+            subtitle: "Review fund-scoped data access, marketplace snapshots, memory reads, and other auditable actions in one timeline.",
+            loading: "Loading audit trail...",
+            loadError: "Failed to load audit logs",
+            exportError: "Failed to export audit logs",
+            retry: "Retry",
+            exportCsv: "Export CSV",
+            exporting: "Exporting...",
+            emptyTitle: "No audit events yet",
+            emptyDescription: "Auditable events will appear here after protected data is read, exported, snapshotted, or shared.",
+            columns: { time: "Time", action: "Action", resource: "Resource", details: "Details" },
+          }
+        : {
+            title: "统一审计日志",
+            subtitle: "在一条时间线中查看基金相关的数据访问、市场快照、记忆读取和其他可审计动作。",
+            loading: "正在加载审计轨迹...",
+            loadError: "加载审计日志失败",
+            exportError: "导出审计日志失败",
+            retry: "重试",
+            exportCsv: "导出 CSV",
+            exporting: "导出中...",
+            emptyTitle: "暂无审计事件",
+            emptyDescription: "当受保护数据被读取、导出、生成快照或共享后，相关事件会出现在这里。",
+            columns: { time: "时间", action: "动作", resource: "资源", details: "详情" },
+          },
+    [language],
+  );
+
+  const load = useCallback(async () => {
+    if (!fundId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetchFundAuditLogs(fundId, 100);
+      setEntries(response.entries ?? []);
+    } catch (err) {
+      setError(formatApiError(err, copy.loadError));
+    } finally {
+      setLoading(false);
+    }
+  }, [copy.loadError, fundId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleExport = useCallback(async () => {
+    if (!fundId || exporting) return;
+    setExporting(true);
+    setError(null);
+    try {
+      const csv = await exportFundAuditLogsCSV(fundId, 200);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `audit-log-${fundId}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      await load();
+    } catch (err) {
+      setError(formatApiError(err, copy.exportError));
+    } finally {
+      setExporting(false);
+    }
+  }, [copy.exportError, exporting, fundId, load]);
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-2xl bg-gradient-to-r from-slate-900 to-slate-700 p-6 text-white shadow-sm">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-300">Audit</p>
+            <h1 className="mt-2 text-2xl font-bold">{copy.title}</h1>
+            <p className="mt-2 max-w-3xl text-sm text-slate-200">{copy.subtitle}</p>
+          </div>
+          <button
+            onClick={() => void handleExport()}
+            disabled={exporting}
+            className="inline-flex items-center justify-center rounded-lg bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {exporting ? copy.exporting : copy.exportCsv}
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500 shadow-sm">{copy.loading}</div>
+      ) : error ? (
+        <div className="rounded-xl border border-red-100 bg-red-50 p-6 text-sm text-red-700">
+          <p>{error}</p>
+          <button onClick={() => void load()} className="mt-3 rounded-lg bg-red-600 px-4 py-2 text-white hover:bg-red-700">
+            {copy.retry}
+          </button>
+        </div>
+      ) : entries.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white p-10 text-center shadow-sm">
+          <h2 className="text-lg font-semibold text-gray-900">{copy.emptyTitle}</h2>
+          <p className="mt-2 text-sm text-gray-500">{copy.emptyDescription}</p>
+        </div>
+      ) : (
+        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+          <table className="min-w-full divide-y divide-gray-200 text-sm">
+            <thead className="bg-gray-50 text-xs uppercase tracking-wider text-gray-500">
+              <tr>
+                <th className="px-4 py-3 text-left">{copy.columns.time}</th>
+                <th className="px-4 py-3 text-left">{copy.columns.action}</th>
+                <th className="px-4 py-3 text-left">{copy.columns.resource}</th>
+                <th className="px-4 py-3 text-left">{copy.columns.details}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {entries.map((entry) => (
+                <tr key={entry.id} className="align-top hover:bg-gray-50">
+                  <td className="whitespace-nowrap px-4 py-3 text-gray-500">{formatDateTimeForLanguage(entry.createdAt, language)}</td>
+                  <td className="px-4 py-3">
+                    <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">{humanize(entry.action)}</span>
+                  </td>
+                  <td className="px-4 py-3 text-gray-700">
+                    <div className="font-medium">{humanize(entry.resourceType)}</div>
+                    <div className="mt-1 max-w-[220px] truncate font-mono text-[11px] text-gray-400">{entry.resourceId}</div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <pre className="max-w-xl overflow-x-auto rounded-lg bg-gray-50 p-3 text-[11px] leading-relaxed text-gray-600">{JSON.stringify(entry.details ?? {}, null, 2)}</pre>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default AuditLog;

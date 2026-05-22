@@ -1,0 +1,6 @@
+{
+  "navigationBarTitleText": "团队管理",
+  "usingComponents": {
+    "agent-card": "/components/agent-card/agent-card"
+  }
+}

@@ -1,0 +1,24 @@
+package main
+
+import (
+	"fmt"
+	"github.com/fundai/server/internal/marketcalendar"
+)
+
+func main() {
+	svc := marketcalendar.NewService()
+	cases := []marketcalendar.Profile{
+		{},
+		{Market: "crypto"},
+		{AssetClass: "crypto"},
+		{Exchange: "BINANCE"},
+		{Market: "crypto", AssetClass: "crypto", Exchange: "BINANCE"},
+		{Market: "crypto", CalendarCode: "US-XNAS"},
+		{Market: "us_equity"},
+		{},
+	}
+	for _, p := range cases {
+		out, err := svc.NormalizeProfile(p)
+		fmt.Printf("IN=%+v -> OUT=%+v err=%v\n", p, out, err)
+	}
+}

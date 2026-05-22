@@ -1,0 +1,384 @@
+.page {
+  min-height: 100vh;
+  background: #f5f6fa;
+  padding-bottom: 60rpx;
+}
+
+.empty-state {
+  margin: 160rpx 32rpx 0;
+  padding: 48rpx 32rpx;
+  border-radius: 20rpx;
+  background: #fff;
+  color: #999;
+  font-size: 28rpx;
+  text-align: center;
+}
+
+/* 概况头部 */
+.overview-header {
+  background: linear-gradient(135deg, #1a1a2e, #16213e);
+  padding: 50rpx 30rpx 40rpx;
+  border-radius: 0 0 30rpx 30rpx;
+  color: #fff;
+}
+.ov-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24rpx;
+}
+.ov-date {
+  font-size: 28rpx;
+  opacity: 0.8;
+}
+.consensus-badge {
+  padding: 8rpx 20rpx;
+  border-radius: 20rpx;
+  font-size: 24rpx;
+  font-weight: 500;
+}
+.consensus-yes {
+  background: rgba(76,175,80,0.2);
+  color: #81c784;
+  border: 1rpx solid rgba(76,175,80,0.4);
+}
+.consensus-no {
+  background: rgba(255,152,0,0.2);
+  color: #ffb74d;
+  border: 1rpx solid rgba(255,152,0,0.4);
+}
+.participants-row {
+  display: flex;
+  gap: 24rpx;
+  margin-bottom: 24rpx;
+  overflow-x: auto;
+}
+.participant {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6rpx;
+  flex-shrink: 0;
+}
+.p-emoji {
+  width: 80rpx;
+  height: 80rpx;
+  background: rgba(255,255,255,0.1);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 40rpx;
+  line-height: 80rpx;
+  text-align: center;
+}
+.p-name {
+  font-size: 22rpx;
+  opacity: 0.8;
+}
+.ov-stats {
+  display: flex;
+  justify-content: space-around;
+}
+.ov-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4rpx;
+}
+.ov-stat-num {
+  font-size: 40rpx;
+  font-weight: 700;
+}
+.ov-stat-label {
+  font-size: 22rpx;
+  opacity: 0.7;
+}
+
+/* 卡片 */
+.card {
+  background: #fff;
+  margin: 24rpx 24rpx 0;
+  border-radius: 20rpx;
+  padding: 28rpx;
+  box-shadow: 0 2rpx 12rpx rgba(0,0,0,0.05);
+}
+.card-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 20rpx;
+}
+
+/* 议题 */
+.topics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+.topic-item {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding: 16rpx;
+  background: #fafbfe;
+  border-radius: 12rpx;
+}
+.topic-stock {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: #667eea;
+  min-width: 80rpx;
+}
+.topic-question {
+  font-size: 26rpx;
+  color: #666;
+}
+
+/* 轮次 */
+.round-section {
+  margin-top: 30rpx;
+}
+.round-header {
+  padding: 0 30rpx;
+  margin-bottom: 16rpx;
+}
+.round-title {
+  font-size: 34rpx;
+  font-weight: 700;
+  color: #1a1a2e;
+  display: block;
+}
+.round-subtitle {
+  font-size: 24rpx;
+  color: #999;
+}
+
+/* 发言卡片 */
+.speech-card {
+  background: #fff;
+  margin: 12rpx 24rpx;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0,0,0,0.04);
+}
+.speech-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+.speech-agent {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+.speech-emoji {
+  font-size: 36rpx;
+}
+.speech-name {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #333;
+}
+.speech-meta {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+.direction-badge {
+  padding: 4rpx 14rpx;
+  border-radius: 8rpx;
+  font-size: 22rpx;
+  font-weight: 500;
+}
+.direction-bullish {
+  background: #fce4ec;
+  color: #e53935;
+}
+.direction-bearish {
+  background: #e8f5e9;
+  color: #43a047;
+}
+.direction-neutral {
+  background: #f5f5f5;
+  color: #999;
+}
+.speech-confidence {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: #667eea;
+}
+.speech-topic {
+  margin-bottom: 10rpx;
+}
+.topic-tag {
+  font-size: 22rpx;
+  background: #e8eaf6;
+  color: #3f51b5;
+  padding: 4rpx 12rpx;
+  border-radius: 6rpx;
+}
+.speech-summary {
+  font-size: 26rpx;
+  color: #555;
+  line-height: 1.6;
+}
+.speech-expand {
+  margin-top: 12rpx;
+  text-align: center;
+}
+.expand-text {
+  font-size: 24rpx;
+  color: #667eea;
+}
+.speech-detail {
+  margin-top: 12rpx;
+  padding: 16rpx;
+  background: #fafbfe;
+  border-radius: 10rpx;
+  font-size: 24rpx;
+  color: #666;
+  line-height: 1.8;
+}
+
+/* 投票统计 */
+.vote-stats {
+  background: #fff;
+  margin: 12rpx 24rpx 0;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0,0,0,0.04);
+}
+.vote-title {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 16rpx;
+}
+.vote-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+.vote-row {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+.vote-label {
+  font-size: 24rpx;
+  color: #666;
+  width: 60rpx;
+}
+.vote-bar-wrap {
+  flex: 1;
+  height: 32rpx;
+  background: #f5f5f5;
+  border-radius: 8rpx;
+  overflow: hidden;
+}
+.vote-bar {
+  height: 100%;
+  border-radius: 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  transition: width 0.3s;
+}
+.vote-bullish {
+  background: linear-gradient(90deg, #e53935, #ff7043);
+}
+.vote-bearish {
+  background: linear-gradient(90deg, #43a047, #66bb6a);
+}
+.vote-neutral {
+  background: linear-gradient(90deg, #bbb, #ddd);
+}
+.vote-num {
+  font-size: 20rpx;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* 共识 */
+.consensus-card {
+  margin-top: 30rpx;
+}
+.consensus-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16rpx;
+}
+.consensus-item {
+  display: flex;
+  align-items: center;
+  padding: 16rpx;
+  background: #fafbfe;
+  border-radius: 12rpx;
+}
+.cs-left {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  min-width: 150rpx;
+}
+.cs-stock {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: #333;
+}
+.cs-center {
+  flex: 1;
+}
+.cs-action {
+  font-size: 26rpx;
+  color: #555;
+}
+.cs-right {
+  min-width: 80rpx;
+  text-align: right;
+}
+.cs-confidence {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #667eea;
+}
+
+/* 未达成共识 */
+.no-consensus {
+  margin-top: 24rpx;
+  padding-top: 20rpx;
+  border-top: 1rpx solid #f0f0f0;
+}
+.nc-title {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #e65100;
+  display: block;
+  margin-bottom: 12rpx;
+}
+.nc-item {
+  padding: 12rpx 0;
+}
+.nc-stock {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #333;
+  margin-right: 12rpx;
+}
+.nc-reason {
+  font-size: 24rpx;
+  color: #999;
+}
+.no-consensus-empty {
+  margin-top: 20rpx;
+  padding-top: 16rpx;
+  border-top: 1rpx solid #f0f0f0;
+  text-align: center;
+}
+.nc-empty-text {
+  font-size: 26rpx;
+  color: #43a047;
+}

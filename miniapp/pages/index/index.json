@@ -1,0 +1,8 @@
+{
+  "navigationBarTitleText": "AI基金平台",
+  "usingComponents": {
+    "nav-chart": "/components/nav-chart/nav-chart",
+    "metric-card": "/components/metric-card/metric-card"
+  },
+  "enablePullDownRefresh": true
+}

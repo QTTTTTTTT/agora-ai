@@ -1,0 +1,149 @@
+<view class="page">
+  <view class="empty-state" wx:if="{{loading}}">加载中...</view>
+  <view class="empty-state" wx:elif="{{!plan}}">{{errorText || '暂无方案详情'}}</view>
+  <block wx:else>
+  <!-- 方案头部 -->
+  <view class="header">
+    <view class="header-top">
+      <text class="plan-title">{{plan.title}}</text>
+      <view class="status-badge status-{{plan.status}}">{{plan.statusText}}</view>
+    </view>
+    <view class="header-meta">
+      <text class="plan-date">{{plan.date}}</text>
+      <view class="confidence-row">
+        <text class="confidence-label">置信度</text>
+        <view class="confidence-bar">
+          <view class="confidence-fill" style="width: {{plan.confidencePercent}}%"></view>
+        </view>
+        <text class="confidence-num">{{plan.confidencePercent}}%</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- PM推理说明 -->
+  <view class="card">
+    <view class="card-title" bindtap="onToggleReasoning">
+      <text>PM推理说明</text>
+      <text class="expand-icon">{{expandReasoning ? '收起 ▲' : '展开 ▼'}}</text>
+    </view>
+    <view class="reasoning-text {{expandReasoning ? 'expanded' : 'collapsed'}}">
+      <text>{{plan.reasoning}}</text>
+    </view>
+  </view>
+
+  <!-- 操作列表 -->
+  <view class="card">
+    <view class="card-title">操作列表</view>
+    <view class="empty-section" wx:if="{{plan.actions.length === 0}}">暂无操作</view>
+    <view class="action-table">
+      <view class="table-header">
+        <text class="col-type">操作</text>
+        <text class="col-stock">代码</text>
+        <text class="col-pos">目标仓位</text>
+        <text class="col-qty">数量</text>
+        <text class="col-price">价格</text>
+      </view>
+      <view class="table-row" wx:for="{{plan.actions}}" wx:key="id">
+        <view class="row-main">
+          <view class="col-type">
+            <view class="action-badge action-{{item.type}}">{{item.typeText}}</view>
+          </view>
+          <text class="col-stock">{{item.stockCode}}</text>
+          <text class="col-pos">{{item.targetPosition}}</text>
+          <text class="col-qty">{{item.quantity}}</text>
+          <text class="col-price">${{item.price}}</text>
+        </view>
+        <view class="row-reason">
+          <text class="reason-label">理由: </text>
+          <text class="reason-text">{{item.reason}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 风控审查结果 -->
+  <view class="card">
+    <view class="card-title">
+      <text>风控审查</text>
+      <view class="overall-badge overall-{{plan.riskReview.overall}}">{{plan.riskReview.overallText}}</view>
+    </view>
+    <view class="empty-section" wx:if="{{plan.riskReview.checks.length === 0}}">暂无风控明细</view>
+    <view class="checks-list">
+      <view class="check-item" wx:for="{{plan.riskReview.checks}}" wx:key="name">
+        <view class="check-header">
+          <view class="check-status check-{{item.status}}">{{item.statusText}}</view>
+          <text class="check-name">{{item.name}}</text>
+        </view>
+        <text class="check-detail">{{item.detail}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 审批操作 -->
+  <view class="card" wx:if="{{plan.status === 'pending' || plan.status === 'pending_user'}}">
+    <view class="card-title">审批操作</view>
+    <textarea class="comment-input" placeholder="请输入审批意见（拒绝时必填）"
+              value="{{approvalComment}}" bindinput="onCommentInput"
+              maxlength="200" auto-height></textarea>
+    <view class="approval-btns">
+      <button class="btn-approve" bindtap="onApprove" disabled="{{refreshing}}">审批通过</button>
+      <button class="btn-reject" bindtap="onReject" disabled="{{refreshing}}">拒绝</button>
+      <!--
+        Refresh-quote is always visible while the plan is awaiting user
+        sign-off. It used to be a remediation-only button (only shown
+        when the plan-generation quote had failed); since the
+        SlippageGuard rollout it doubles as a "pre-approval sanity
+        check" so the user can pull current market prices before
+        committing. The price-diff dialog (if any drift > 0.3%) is
+        fired by onRefreshQuote in JS, not gated here.
+      -->
+      <button class="btn-refresh" bindtap="onRefreshQuote" loading="{{refreshing}}" disabled="{{refreshing}}">刷新报价</button>
+    </view>
+  </view>
+
+  <!-- 审批结果显示 -->
+  <view class="card result-card" wx:if="{{plan.status !== 'pending' && plan.status !== 'pending_user'}}">
+    <view class="result-badge status-{{plan.status}}">{{plan.statusText}}</view>
+    <text class="result-comment" wx:if="{{approvalComment}}">意见: {{approvalComment}}</text>
+  </view>
+
+  <!-- 关联圆桌 -->
+  <view class="card roundtable-card" wx:if="{{plan.relatedRoundtable}}">
+    <view class="card-title">关联圆桌记录</view>
+    <view class="rt-info">
+      <view class="rt-detail">
+        <text class="rt-title">{{plan.relatedRoundtable.title}}</text>
+        <text class="rt-meta">{{plan.relatedRoundtable.date}} · {{plan.relatedRoundtable.consensus}}</text>
+      </view>
+      <button class="btn-goto" bindtap="onGoRoundtable">查看</button>
+    </view>
+  </view>
+  </block>
+
+  <!--
+    Price-refresh confirmation modal. Surfaces per-action price drift
+    after a successful refresh-quote call so the user can re-confirm
+    before approving. Purely informational; approval is not blocked.
+  -->
+  <view class="modal-mask" wx:if="{{priceRefreshDialogOpen}}" bindtap="onClosePriceRefreshDialog">
+    <view class="modal-card" catchtap="">
+      <view class="modal-title">价格自您打开此计划后发生了变动</view>
+      <view class="modal-subtitle">以下动作的价格变动超过 0.3%，请确认后再通过计划。</view>
+      <view class="diff-table">
+        <view class="diff-header">
+          <text class="diff-col diff-sym">标的</text>
+          <text class="diff-col diff-old">原价格</text>
+          <text class="diff-col diff-new">新价格</text>
+          <text class="diff-col diff-drift">变动</text>
+        </view>
+        <view class="diff-row" wx:for="{{priceRefreshRows}}" wx:key="key">
+          <text class="diff-col diff-sym">{{item.symbol}}</text>
+          <text class="diff-col diff-old">{{item.oldPrice}}</text>
+          <text class="diff-col diff-new">{{item.newPrice}}</text>
+          <text class="diff-col diff-drift drift-{{item.driftClass}}">{{item.driftText}}</text>
+        </view>
+      </view>
+      <button class="btn-ack" bindtap="onClosePriceRefreshDialog">我已确认价格变动</button>
+    </view>
+  </view>
+</view>

@@ -1,0 +1,299 @@
+/* pages/more/more.wxss - 更多/设置 */
+
+.page-container {
+  min-height: 100vh;
+  background: #f5f6fa;
+  padding-bottom: 80rpx;
+}
+
+/* ========== 通用分节 ========== */
+.section {
+  margin-bottom: 24rpx;
+}
+
+.section-title {
+  font-size: 26rpx;
+  color: #999;
+  padding: 24rpx 30rpx 12rpx;
+  font-weight: 500;
+}
+
+/* ========== 服务器配置 ========== */
+.config-card {
+  background: #fff;
+  margin: 0 24rpx;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.05);
+}
+
+.config-row {
+  margin-bottom: 20rpx;
+}
+
+.config-input-wrapper {
+  display: flex;
+  align-items: center;
+  background: #f5f6fa;
+  border-radius: 12rpx;
+  padding: 0 20rpx;
+  height: 80rpx;
+}
+
+.config-input {
+  flex: 1;
+  font-size: 28rpx;
+  color: #333;
+}
+
+.status-dot {
+  width: 20rpx;
+  height: 20rpx;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: 16rpx;
+}
+
+.status-checking {
+  background: #bbb;
+  animation: breathing 1.5s ease-in-out infinite;
+}
+
+.status-connected {
+  background: #2ecc71;
+  animation: breathing 2s ease-in-out infinite;
+}
+
+.status-disconnected {
+  background: #e74c3c;
+}
+
+@keyframes breathing {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+}
+
+.config-actions {
+  display: flex;
+  gap: 16rpx;
+}
+
+.config-btn {
+  flex: 1;
+  text-align: center;
+  padding: 16rpx 0;
+  border-radius: 12rpx;
+  font-size: 26rpx;
+  font-weight: 500;
+}
+
+.config-btn-save {
+  background: #1a73e8;
+  color: #fff;
+}
+
+.config-btn-test {
+  background: rgba(26, 115, 232, 0.1);
+  color: #1a73e8;
+}
+
+.config-btn-copy {
+  background: #f0f2f5;
+  color: #555;
+}
+
+/* ========== Cell 列表 ========== */
+.cell-group {
+  background: #fff;
+  margin: 0 24rpx;
+  border-radius: 16rpx;
+  overflow: hidden;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.05);
+}
+
+.cell-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 28rpx 30rpx;
+  position: relative;
+}
+
+.cell-item:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 90rpx;
+  right: 30rpx;
+  height: 1rpx;
+  background: #f0f0f0;
+}
+
+.cell-left {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+}
+
+.cell-icon {
+  font-size: 36rpx;
+  width: 44rpx;
+  text-align: center;
+}
+
+.cell-label {
+  font-size: 30rpx;
+  color: #333;
+}
+
+.cell-right {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.cell-value {
+  font-size: 26rpx;
+  color: #999;
+}
+
+.cell-arrow {
+  font-size: 36rpx;
+  color: #ccc;
+  font-weight: 300;
+}
+
+/* 状态标签 */
+.status-tag {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  font-size: 24rpx;
+  padding: 6rpx 16rpx;
+  border-radius: 20rpx;
+}
+
+.status-tag-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+}
+
+.status-tag-checking {
+  background: rgba(187, 187, 187, 0.15);
+  color: #999;
+}
+
+.status-tag-checking .status-tag-dot {
+  background: #bbb;
+  animation: breathing 1.5s ease-in-out infinite;
+}
+
+.status-tag-connected {
+  background: rgba(46, 204, 113, 0.15);
+  color: #27ae60;
+}
+
+.status-tag-connected .status-tag-dot {
+  background: #2ecc71;
+  animation: breathing 2s ease-in-out infinite;
+}
+
+.status-tag-disconnected {
+  background: rgba(231, 76, 60, 0.15);
+  color: #e74c3c;
+}
+
+.status-tag-disconnected .status-tag-dot {
+  background: #e74c3c;
+}
+
+/* ========== 操作按钮 ========== */
+.action-buttons {
+  display: flex;
+  gap: 20rpx;
+  padding: 0 24rpx;
+}
+
+.action-btn {
+  flex: 1;
+  text-align: center;
+  padding: 24rpx 0;
+  border-radius: 16rpx;
+  font-size: 28rpx;
+  font-weight: 500;
+}
+
+.action-btn-clear {
+  background: #fff;
+  color: #e74c3c;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.05);
+}
+
+.action-btn-about {
+  background: #fff;
+  color: #555;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.05);
+}
+
+/* ========== 弹窗 ========== */
+.modal-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.modal-content {
+  width: 600rpx;
+  background: #fff;
+  border-radius: 24rpx;
+  overflow: hidden;
+}
+
+.modal-title {
+  font-size: 34rpx;
+  font-weight: 700;
+  text-align: center;
+  padding: 40rpx 30rpx 20rpx;
+  color: #1a1a2e;
+}
+
+.modal-body {
+  padding: 20rpx 40rpx 30rpx;
+}
+
+.about-row {
+  font-size: 28rpx;
+  color: #666;
+  text-align: center;
+  padding: 10rpx 0;
+  line-height: 1.6;
+}
+
+.about-copyright {
+  margin-top: 20rpx;
+  font-size: 24rpx;
+  color: #999;
+}
+
+.modal-footer {
+  text-align: center;
+  padding: 24rpx;
+  border-top: 1rpx solid #f0f0f0;
+  font-size: 30rpx;
+  color: #1a73e8;
+  font-weight: 500;
+}

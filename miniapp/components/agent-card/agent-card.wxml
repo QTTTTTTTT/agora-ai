@@ -1,0 +1,29 @@
+<view class="agent-card" bindtap="onTap" hover-class="agent-card-hover">
+  <!-- 头像区域 -->
+  <view class="agent-avatar">
+    <text class="avatar-emoji">{{roleIcon}}</text>
+    <view class="status-dot" style="background-color: {{statusColor}};"></view>
+  </view>
+
+  <!-- 信息区域 -->
+  <view class="agent-info">
+    <view class="agent-name-row">
+      <text class="agent-name">{{agent.name}}</text>
+      <view class="role-badge">{{roleName}}</view>
+    </view>
+    <view class="agent-meta">
+      <text class="agent-model">{{agent.model}}</text>
+      <text class="agent-divider">·</text>
+      <text class="agent-style">{{styleName}}</text>
+    </view>
+    <view class="agent-status-row">
+      <view class="status-indicator" style="background-color: {{statusColor}};"></view>
+      <text class="status-text">{{statusText}}</text>
+    </view>
+  </view>
+
+  <!-- 箭头 -->
+  <view class="agent-arrow">
+    <text class="arrow-icon">›</text>
+  </view>
+</view>

@@ -1,0 +1,313 @@
+# =============================================================================
+# docker-compose.yml — AI Fund Company Simulator
+# Local development / acceptance runtime only: App + PostgreSQL + local web-search MCP, optional extra MCP profiles
+# Not a production deployment manifest.
+# =============================================================================
+#
+# Usage:
+#   docker compose up -d postgres                           # start PostgreSQL only for local dev
+#   docker compose up -d --build web-search-mcp app        # start app + postgres + local web search for local verification
+#   docker compose --profile market-data up -d             # include china-stock / akshare MCP
+#   docker compose --profile professional up -d            # include ta-lib MCP
+#   docker compose logs -f postgres web-search-mcp app     # tail database, local search, and app logs
+#   docker compose down -v                         # teardown + remove volumes
+
+name: fundai-simulator
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 — primary data store
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: fundai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fundai}
+      POSTGRES_USER: ${POSTGRES_USER:-fundai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_only_change_me}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - app-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-fundai} -d ${POSTGRES_DB:-fundai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # App — Go backend serving React frontend
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-dev}
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+    image: fundai-simulator:latest
+    container_name: fundai-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    environment:
+      # Database: defaults to the same-host Compose PostgreSQL service.
+      # To move DB off-host later, set APP_DATABASE_URL to the external PostgreSQL URL and use APP_DATABASE_SSLMODE=require/verify-full.
+      DATABASE_URL: ${APP_DATABASE_URL:-postgres://${POSTGRES_USER:-fundai}:${POSTGRES_PASSWORD:-local_dev_only_change_me}@postgres:5432/${POSTGRES_DB:-fundai}?sslmode=${APP_DATABASE_SSLMODE:-disable}}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-25}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-10}
+      DB_CONN_MAX_LIFETIME: ${DB_CONN_MAX_LIFETIME:-5m}
+      # Application
+      APP_PORT: "8080"
+      APP_ENV: ${APP_ENV:-development}
+      RUNNING_IN_CONTAINER: "1"
+      # Set to 1 only when APP_ENV=production and DATABASE_URL points to the private same-host Compose service `postgres`.
+      # Leave as 0 for external/off-host production databases, where TLS must be required.
+      ALLOW_INTERNAL_COMPOSE_DB: ${ALLOW_INTERNAL_COMPOSE_DB:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MIGRATIONS_PATH: /app/migrations
+      STATIC_FILES_PATH: /app/web/dist
+      # MCP server endpoints
+      MCP_CHINA_STOCK_URL: ${MCP_CHINA_STOCK_URL:-}
+      MCP_AKSHARE_URL: ${MCP_AKSHARE_URL:-}
+      MCP_TA_LIB_URL: "http://ta-lib-mcp:3003"
+      MCP_WEB_SEARCH_URL: ${MCP_WEB_SEARCH_URL:-http://web-search-mcp:3004}
+      # Market data
+      QUANTDINGER_URL: ${QUANTDINGER_URL:-}
+      MARKETDATA_QUOTE_PROVIDERS: ${MARKETDATA_QUOTE_PROVIDERS:-quantdinger}
+      # Default chain matches main.go: eastmoney + sina go first for A-share
+      # instruments (zero-key, Chinese-native), then the search-engine
+      # providers cover everything else. Operators can still narrow the chain
+      # via .env, but the docker default should NOT exclude the A-share
+      # native sources (which is what produced the "新闻一直是 Seeking Alpha
+      # 老英文文" symptom we tracked down in Phase 1.2).
+      MARKETDATA_NEWS_PROVIDERS: ${MARKETDATA_NEWS_PROVIDERS:-eastmoney,sina,local-search,web-search}
+      MARKETDATA_QUOTE_TTL: ${MARKETDATA_QUOTE_TTL:-10s}
+      MARKETDATA_NEWS_TTL: ${MARKETDATA_NEWS_TTL:-2m}
+      MARKETDATA_PROVIDER_TIMEOUT: ${MARKETDATA_PROVIDER_TIMEOUT:-5s}
+      SERPAPI_KEYS: ${SERPAPI_KEYS:-}
+      TAVILY_API_KEYS: ${TAVILY_API_KEYS:-}
+      SERPAPI_BASE_URL: ${SERPAPI_BASE_URL:-}
+      TAVILY_BASE_URL: ${TAVILY_BASE_URL:-}
+      # News translator (F32): when configured, the news digest auto-fills
+      # titleZh/titleEn/summaryZh/summaryEn so the bilingual UI renders
+      # in the user's preferred language without manual switching.
+      MARKETDATA_TRANSLATOR_PROVIDER: ${MARKETDATA_TRANSLATOR_PROVIDER:-none}
+      MARKETDATA_TRANSLATOR_BASE_URL: ${MARKETDATA_TRANSLATOR_BASE_URL:-}
+      MARKETDATA_TRANSLATOR_API_KEY: ${MARKETDATA_TRANSLATOR_API_KEY:-}
+      MARKETDATA_TRANSLATOR_MODEL: ${MARKETDATA_TRANSLATOR_MODEL:-}
+      MARKETDATA_TRANSLATOR_TIMEOUT: ${MARKETDATA_TRANSLATOR_TIMEOUT:-10s}
+      # AI / LLM
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_CRITICAL_PROVIDER: ${LLM_CRITICAL_PROVIDER:-}
+      LLM_CRITICAL_MODEL: ${LLM_CRITICAL_MODEL:-}
+      LLM_CRITICAL_BASE_URL: ${LLM_CRITICAL_BASE_URL:-}
+      LLM_CRITICAL_API_KEY: ${LLM_CRITICAL_API_KEY:-}
+      LLM_STANDARD_PROVIDER: ${LLM_STANDARD_PROVIDER:-}
+      LLM_STANDARD_MODEL: ${LLM_STANDARD_MODEL:-}
+      LLM_STANDARD_BASE_URL: ${LLM_STANDARD_BASE_URL:-}
+      LLM_STANDARD_API_KEY: ${LLM_STANDARD_API_KEY:-}
+      LLM_SIMPLE_PROVIDER: ${LLM_SIMPLE_PROVIDER:-}
+      LLM_SIMPLE_MODEL: ${LLM_SIMPLE_MODEL:-}
+      LLM_SIMPLE_BASE_URL: ${LLM_SIMPLE_BASE_URL:-}
+      LLM_SIMPLE_API_KEY: ${LLM_SIMPLE_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-}
+      CLAUDE_BASE_URL: ${CLAUDE_BASE_URL:-https://api.anthropic.com/v1}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen-max}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_MODEL: ${GOOGLE_MODEL:-}
+      GOOGLE_BASE_URL: ${GOOGLE_BASE_URL:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # Security (development defaults only; production must override all of these)
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-do-not-use-in-prod}
+      MODEL_CONFIG_API_KEY_SECRET: ${MODEL_CONFIG_API_KEY_SECRET:-change_me_to_a_random_64_char_string_min_32_chars_model_cfg}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    volumes:
+      - app-data:/app/data
+    networks:
+      - app-net
+      - mcp-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # MCP Servers — optional market-data profile
+  # ---------------------------------------------------------------------------
+
+  # China A-stock market data via MCP
+  china-stock-mcp:
+    image: ghcr.io/fundai/china-stock-mcp:latest
+    container_name: fundai-china-stock-mcp
+    restart: unless-stopped
+    profiles:
+      - market-data
+    environment:
+      MCP_PORT: "3001"
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - mcp-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # AKShare financial data via MCP
+  akshare-mcp:
+    image: ghcr.io/fundai/akshare-mcp:latest
+    container_name: fundai-akshare-mcp
+    restart: unless-stopped
+    profiles:
+      - market-data
+    environment:
+      MCP_PORT: "3002"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - mcp-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # MCP Servers — P1 (professional profile, opt-in)
+  # ---------------------------------------------------------------------------
+
+  # Technical analysis (TA-Lib) via MCP
+  ta-lib-mcp:
+    image: ghcr.io/fundai/ta-lib-mcp:latest
+    container_name: fundai-ta-lib-mcp
+    restart: unless-stopped
+    profiles:
+      - professional
+    environment:
+      MCP_PORT: "3003"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - mcp-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # Web search via MCP
+  web-search-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.web-search-mcp
+    image: fundai-web-search-mcp:latest
+    container_name: fundai-web-search-mcp
+    restart: unless-stopped
+    environment:
+      MCP_PORT: "3004"
+      WEB_SEARCH_FEED_URL: ${WEB_SEARCH_FEED_URL:-https://news.google.com/rss/search}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - mcp-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "${WEB_SEARCH_MCP_PORT:-3004}:3004"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres-data:
+    driver: local
+    name: fundai-postgres-data
+  app-data:
+    driver: local
+    name: fundai-app-data
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  # App ↔ PostgreSQL (isolated from MCP servers)
+  app-net:
+    driver: bridge
+    name: fundai-app-net
+  # App ↔ MCP servers (isolated from PostgreSQL)
+  mcp-net:
+    driver: bridge
+    name: fundai-mcp-net

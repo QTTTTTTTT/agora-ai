@@ -1,0 +1,19 @@
+FROM golang:1.25.10-alpine AS builder
+
+WORKDIR /app
+COPY server/go.mod server/go.sum ./server/
+WORKDIR /app/server
+RUN go mod download && go mod verify
+COPY server/ ./
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /web-search-mcp ./cmd/websearchmcp
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates tzdata curl && update-ca-certificates
+RUN addgroup -S fundai && adduser -S fundai -G fundai
+WORKDIR /app
+COPY --from=builder /web-search-mcp ./web-search-mcp
+RUN chown -R fundai:fundai /app
+USER fundai
+ENV MCP_PORT=3004
+EXPOSE 3004
+ENTRYPOINT ["./web-search-mcp"]

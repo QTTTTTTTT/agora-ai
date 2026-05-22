@@ -1,0 +1,110 @@
+<!--pages/decision/decision.wxml - 决策中心-->
+<view class="page-container">
+
+  <!-- 统计头部 -->
+  <view class="stats-header">
+    <view class="stat-card stat-pending">
+      <view class="stat-number">{{stats.pending}}</view>
+      <view class="stat-label">待审批</view>
+    </view>
+    <view class="stat-card stat-approved">
+      <view class="stat-number">{{stats.approved}}</view>
+      <view class="stat-label">已通过</view>
+    </view>
+    <view class="stat-card stat-rejected">
+      <view class="stat-number">{{stats.rejected}}</view>
+      <view class="stat-label">已拒绝</view>
+    </view>
+  </view>
+
+  <!-- Tab栏 -->
+  <view class="tab-bar">
+    <view
+      class="tab-item {{currentTab === item.key ? 'tab-active' : ''}}"
+      wx:for="{{tabs}}"
+      wx:key="key"
+      data-key="{{item.key}}"
+      bindtap="switchTab"
+    >
+      <text>{{item.label}}</text>
+    </view>
+    <view class="tab-indicator" style="transform: translateX({{currentTabIndex * 100}}%)"></view>
+  </view>
+
+  <!-- 方案列表 -->
+  <view class="plan-list" wx:if="{{filteredPlans.length > 0}}">
+    <view
+      class="plan-card plan-card-{{item.status}}"
+      wx:for="{{filteredPlans}}"
+      wx:key="id"
+    >
+      <!-- 左侧状态条 -->
+      <view class="plan-status-bar plan-bar-{{item.status}}"></view>
+
+      <view class="plan-content">
+        <!-- 标题行 -->
+        <view class="plan-header">
+          <text class="plan-title">{{item.title}}</text>
+          <text class="plan-date">{{item.date}}</text>
+        </view>
+
+        <!-- 操作摘要 -->
+        <view class="plan-operations">
+          <view class="op-tag op-buy" wx:if="{{item.buyCount > 0}}">
+            <text>买入 {{item.buyCount}} 只</text>
+          </view>
+          <view class="op-tag op-sell" wx:if="{{item.sellCount > 0}}">
+            <text>卖出 {{item.sellCount}} 只</text>
+          </view>
+          <view class="op-tag op-adjust" wx:if="{{item.adjustCount > 0}}">
+            <text>调仓 {{item.adjustCount}} 只</text>
+          </view>
+        </view>
+
+        <!-- 摘要文本 -->
+        <view class="plan-summary">
+          <text>{{item.summary}}</text>
+        </view>
+
+        <!-- 风控评估 + 置信度 -->
+        <view class="plan-metrics">
+          <view class="risk-badge risk-{{item.riskStatus}}">
+            <text>风控: {{item.riskLabel}}</text>
+          </view>
+          <view class="confidence-wrapper">
+            <text class="confidence-label">置信度 {{item.confidencePct}}%</text>
+            <view class="confidence-bar">
+              <view class="confidence-fill" style="width: {{item.confidencePct}}%"></view>
+            </view>
+          </view>
+        </view>
+
+        <!-- 按钮行 -->
+        <view class="plan-actions">
+          <view class="btn btn-detail" data-id="{{item.id}}" bindtap="viewPlanDetail">
+            <text>查看详情</text>
+          </view>
+          <view class="btn btn-roundtable" data-id="{{item.id}}" bindtap="viewRoundtable">
+            <text>圆桌回放</text>
+          </view>
+          <block wx:if="{{item.status === 'pending'}}">
+            <view class="btn btn-approve" data-id="{{item.id}}" bindtap="approvePlan">
+              <text>批准</text>
+            </view>
+            <view class="btn btn-reject" data-id="{{item.id}}" bindtap="rejectPlan">
+              <text>拒绝</text>
+            </view>
+          </block>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 空状态 -->
+  <view class="empty-state" wx:if="{{filteredPlans.length === 0}}">
+    <view class="empty-icon">📋</view>
+    <view class="empty-text">暂无{{tabs[currentTabIndex].label}}的方案</view>
+    <view class="empty-hint">方案会在Agent分析完成后自动出现</view>
+  </view>
+
+</view>

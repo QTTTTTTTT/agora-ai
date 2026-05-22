@@ -1,0 +1,160 @@
+<!-- 首页 Dashboard -->
+<view class="page">
+
+  <!-- ===== 1. 基金头部卡片 ===== -->
+  <view class="fund-header" bindtap="goToFundDetail">
+    <view class="fund-header-top">
+      <view class="fund-name-wrap">
+        <text class="fund-name">{{fund.name}}</text>
+        <view class="mode-badge mode-badge--{{fund.status === 'active' ? 'live' : 'simulation'}}">
+          {{fund.status === 'active' ? 'LIVE' : 'SIM'}}
+        </view>
+      </view>
+      <text class="company-name">{{fund.company_name}}</text>
+    </view>
+    <view class="fund-header-body">
+      <text class="nav-big">{{navDisplay}}</text>
+      <view class="nav-change-wrap">
+        <text class="nav-change {{isUp ? 'color-up' : 'color-down'}}">{{navChangeDisplay}}</text>
+        <text class="nav-change-pct {{isUp ? 'color-up' : 'color-down'}}">{{navChangePctDisplay}}</text>
+      </view>
+    </view>
+    <text class="fund-header-label">单位净值 (NAV)</text>
+  </view>
+
+  <!-- ===== 2. 快捷指标行 ===== -->
+  <scroll-view class="metrics-row" scroll-x enable-flex>
+    <metric-card
+      label="总资产"
+      value="{{totalAumDisplay}}"
+      icon="💰"
+      trend="flat"
+    />
+    <metric-card
+      label="日P&L"
+      value="{{dailyPnlDisplay}}"
+      icon="📈"
+      trend="{{isUp ? 'up' : 'down'}}"
+      sub-value="{{navChangePctDisplay}}"
+    />
+    <metric-card
+      label="夏普比率"
+      value="{{sharpeDisplay}}"
+      icon="⚡"
+      trend="{{fund.sharpe_ratio >= 1.5 ? 'up' : 'flat'}}"
+    />
+    <metric-card
+      label="最大回撤"
+      value="{{maxDrawdownDisplay}}"
+      icon="🛡️"
+      trend="down"
+    />
+  </scroll-view>
+
+  <!-- ===== 3. NAV 走势 ===== -->
+  <view class="section">
+    <view class="section-header">
+      <text class="section-title">NAV 走势（近30天）</text>
+    </view>
+    <view class="chart-wrap">
+      <nav-chart data="{{navHistory}}" width="{{340}}" height="{{200}}" />
+    </view>
+  </view>
+
+  <!-- ===== 4. 持仓列表（横向滚动） ===== -->
+  <view class="section">
+    <view class="section-header">
+      <text class="section-title">当前持仓</text>
+      <text class="section-more" bindtap="goToFundDetail">查看全部 ›</text>
+    </view>
+    <scroll-view class="positions-scroll" scroll-x enable-flex>
+      <view class="position-card" wx:for="{{positions}}" wx:key="id">
+        <view class="pos-top">
+          <text class="pos-symbol">{{item.symbol}}</text>
+          <text class="pos-name">{{item.name}}</text>
+        </view>
+        <view class="pos-mid">
+          <text class="pos-quantity">{{item.quantity}} 股</text>
+          <text class="pos-market-value">¥{{item.marketValue}}</text>
+        </view>
+        <view class="pos-bottom">
+          <text class="pos-pnl {{item.isUp ? 'color-up' : 'color-down'}}">{{item.pnlPct}}</text>
+        </view>
+      </view>
+    </scroll-view>
+  </view>
+
+  <!-- ===== 5. 最近交易 ===== -->
+  <view class="section">
+    <view class="section-header">
+      <text class="section-title">最近交易</text>
+      <text class="section-more" bindtap="goToTrades">更多 ›</text>
+    </view>
+    <view class="trade-list">
+      <view class="trade-row" wx:for="{{recentTrades}}" wx:key="id">
+        <text class="trade-time">{{item.time}}</text>
+        <view class="trade-action-badge {{item.isBuy ? 'badge-buy' : 'badge-sell'}}">
+          {{item.actionText}}
+        </view>
+        <text class="trade-symbol">{{item.symbol}}</text>
+        <text class="trade-quantity">{{item.quantity}}股</text>
+        <text class="trade-price">¥{{item.price}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- ===== 6. 工作流状态 ===== -->
+  <view class="section">
+    <view class="section-header">
+      <text class="section-title">工作流状态</text>
+      <view class="wf-status-tag wf-status--{{workflowStatus}}">{{workflowStatus === 'running' ? '运行中' : workflowStatus === 'completed' ? '已完成' : '空闲'}}</view>
+    </view>
+    <!-- 步骤条 -->
+    <view class="workflow-steps">
+      <view
+        class="wf-step {{currentStepIndex > index ? 'wf-step--done' : currentStepIndex === index ? 'wf-step--active' : ''}}"
+        wx:for="{{workflowSteps}}"
+        wx:key="index"
+      >
+        <view class="wf-step-dot"></view>
+        <text class="wf-step-label">{{item}}</text>
+      </view>
+    </view>
+    <view class="workflow-action">
+      <button
+        class="wf-btn {{workflowStatus === 'running' ? 'wf-btn--pause' : 'wf-btn--start'}}"
+        bindtap="startWorkflow"
+      >
+        {{workflowStatus === 'running' ? '暂停工作流' : '启动工作流'}}
+      </button>
+    </view>
+  </view>
+
+  <!-- ===== 7. 快捷入口 ===== -->
+  <view class="section">
+    <view class="section-header">
+      <text class="section-title">快捷入口</text>
+    </view>
+    <view class="shortcuts-grid">
+      <view class="shortcut-item" bindtap="goToTeam">
+        <view class="shortcut-icon">👥</view>
+        <text class="shortcut-label">团队管理</text>
+      </view>
+      <view class="shortcut-item" bindtap="goToDecision">
+        <view class="shortcut-icon">🧠</view>
+        <text class="shortcut-label">决策中心</text>
+      </view>
+      <view class="shortcut-item" bindtap="goToTrades">
+        <view class="shortcut-icon">📋</view>
+        <text class="shortcut-label">交易记录</text>
+      </view>
+      <view class="shortcut-item" bindtap="goToFundDetail">
+        <view class="shortcut-icon">📊</view>
+        <text class="shortcut-label">更多</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 底部安全区 -->
+  <view class="safe-bottom"></view>
+</view>

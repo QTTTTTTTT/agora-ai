@@ -1,0 +1,54 @@
+# ============================================================
+# Docker build context ignore rules
+# ============================================================
+
+# Version control
+.git
+.github
+.gitignore
+
+# Documentation
+*.md
+LICENSE
+docs/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Environment files (secrets — never bake into image)
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+web/node_modules
+web/.cache
+web/coverage
+
+# Go
+server/vendor
+server/tmp
+
+# Docker
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# Testing
+**/*_test.go
+**/test/
+**/tests/
+**/__tests__/
+coverage/
+
+# Build artifacts
+**/dist
+**/build

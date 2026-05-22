@@ -1,0 +1,460 @@
+/* ===== 首页 Dashboard 样式 ===== */
+
+.page {
+  background: #f5f6fa;
+  min-height: 100vh;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ---------- 1. 基金头部卡片 ---------- */
+.fund-header {
+  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+  padding: 48rpx 32rpx 40rpx;
+  color: #ffffff;
+  position: relative;
+  overflow: hidden;
+}
+
+.fund-header::after {
+  content: '';
+  position: absolute;
+  top: -60rpx;
+  right: -40rpx;
+  width: 240rpx;
+  height: 240rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.fund-header-top {
+  margin-bottom: 24rpx;
+}
+
+.fund-name-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin-bottom: 8rpx;
+}
+
+.fund-name {
+  font-size: 36rpx;
+  font-weight: 700;
+  letter-spacing: 1rpx;
+}
+
+.mode-badge {
+  font-size: 20rpx;
+  font-weight: 600;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  letter-spacing: 2rpx;
+}
+
+.mode-badge--live {
+  background: rgba(255, 77, 79, 0.85);
+  color: #ffffff;
+}
+
+.mode-badge--simulation {
+  background: rgba(250, 173, 20, 0.85);
+  color: #ffffff;
+}
+
+.company-name {
+  font-size: 24rpx;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.fund-header-body {
+  display: flex;
+  align-items: baseline;
+  gap: 20rpx;
+  margin-bottom: 8rpx;
+}
+
+.nav-big {
+  font-size: 72rpx;
+  font-weight: 800;
+  letter-spacing: 2rpx;
+  line-height: 1.1;
+}
+
+.nav-change-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2rpx;
+}
+
+.nav-change {
+  font-size: 28rpx;
+  font-weight: 600;
+}
+
+.nav-change-pct {
+  font-size: 24rpx;
+  font-weight: 500;
+}
+
+.color-up {
+  color: #ff6b6b;
+}
+
+.color-down {
+  color: #51cf66;
+}
+
+/* 头部内的涨跌色使用亮色 */
+.fund-header .color-up {
+  color: #ffa8a8;
+}
+
+.fund-header .color-down {
+  color: #8ce99a;
+}
+
+.fund-header-label {
+  font-size: 22rpx;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* ---------- 2. 快捷指标行 ---------- */
+.metrics-row {
+  display: flex;
+  padding: 24rpx 32rpx 12rpx;
+  gap: 16rpx;
+  white-space: nowrap;
+}
+
+.metrics-row metric-card {
+  display: inline-block;
+  min-width: 240rpx;
+  flex-shrink: 0;
+}
+
+/* ---------- 通用 Section ---------- */
+.section {
+  background: #ffffff;
+  margin: 20rpx 24rpx;
+  border-radius: 20rpx;
+  padding: 28rpx 28rpx 24rpx;
+  box-shadow: 0 2rpx 16rpx rgba(0, 0, 0, 0.04);
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24rpx;
+}
+
+.section-title {
+  font-size: 30rpx;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+.section-more {
+  font-size: 24rpx;
+  color: #6366f1;
+}
+
+/* ---------- 3. NAV 走势 ---------- */
+.chart-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 8rpx 0;
+}
+
+/* ---------- 4. 持仓列表横向滚动 ---------- */
+.positions-scroll {
+  display: flex;
+  gap: 20rpx;
+  white-space: nowrap;
+  padding-bottom: 8rpx;
+}
+
+.position-card {
+  display: inline-flex;
+  flex-direction: column;
+  width: 260rpx;
+  min-width: 260rpx;
+  background: #fafbff;
+  border-radius: 16rpx;
+  padding: 24rpx 20rpx;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.05);
+  gap: 12rpx;
+  flex-shrink: 0;
+}
+
+.pos-top {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.pos-symbol {
+  font-size: 26rpx;
+  font-weight: 700;
+  color: #1a1a2e;
+  font-family: monospace;
+}
+
+.pos-name {
+  font-size: 22rpx;
+  color: #8c8c8c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pos-mid {
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+}
+
+.pos-quantity {
+  font-size: 22rpx;
+  color: #8c8c8c;
+}
+
+.pos-market-value {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #262626;
+}
+
+.pos-bottom {
+  margin-top: 4rpx;
+}
+
+.pos-pnl {
+  font-size: 28rpx;
+  font-weight: 700;
+}
+
+/* ---------- 5. 最近交易 ---------- */
+.trade-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4rpx;
+}
+
+.trade-row {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding: 18rpx 0;
+  border-bottom: 1rpx solid #f5f5f5;
+}
+
+.trade-row:last-child {
+  border-bottom: none;
+}
+
+.trade-time {
+  font-size: 22rpx;
+  color: #999;
+  width: 140rpx;
+  flex-shrink: 0;
+}
+
+.trade-action-badge {
+  font-size: 20rpx;
+  font-weight: 600;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  flex-shrink: 0;
+}
+
+.badge-buy {
+  background: #fff1f0;
+  color: #ff4d4f;
+  border: 1rpx solid #ffccc7;
+}
+
+.badge-sell {
+  background: #f6ffed;
+  color: #52c41a;
+  border: 1rpx solid #b7eb8f;
+}
+
+.trade-symbol {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #262626;
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+.trade-quantity {
+  font-size: 24rpx;
+  color: #666;
+  flex: 1;
+}
+
+.trade-price {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #262626;
+  flex-shrink: 0;
+}
+
+/* ---------- 6. 工作流状态 ---------- */
+.wf-status-tag {
+  font-size: 20rpx;
+  font-weight: 600;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+}
+
+.wf-status--idle {
+  background: #f0f0f0;
+  color: #999;
+}
+
+.wf-status--running {
+  background: #e6f7ff;
+  color: #1890ff;
+}
+
+.wf-status--completed {
+  background: #f6ffed;
+  color: #52c41a;
+}
+
+.workflow-steps {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0 8rpx;
+  margin-bottom: 32rpx;
+}
+
+.wf-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10rpx;
+  flex: 1;
+  position: relative;
+}
+
+/* 连接线 */
+.wf-step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 14rpx;
+  left: calc(50% + 14rpx);
+  width: calc(100% - 28rpx);
+  height: 4rpx;
+  background: #e8e8e8;
+}
+
+.wf-step--done:not(:last-child)::after {
+  background: #6366f1;
+}
+
+.wf-step--active:not(:last-child)::after {
+  background: linear-gradient(90deg, #6366f1, #e8e8e8);
+}
+
+.wf-step-dot {
+  width: 28rpx;
+  height: 28rpx;
+  border-radius: 50%;
+  background: #e8e8e8;
+  border: 4rpx solid #ffffff;
+  position: relative;
+  z-index: 1;
+  transition: all 0.3s;
+}
+
+.wf-step--done .wf-step-dot {
+  background: #6366f1;
+}
+
+.wf-step--active .wf-step-dot {
+  background: #6366f1;
+  box-shadow: 0 0 0 8rpx rgba(99, 102, 241, 0.2);
+}
+
+.wf-step-label {
+  font-size: 20rpx;
+  color: #bfbfbf;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.wf-step--done .wf-step-label,
+.wf-step--active .wf-step-label {
+  color: #6366f1;
+  font-weight: 600;
+}
+
+.workflow-action {
+  display: flex;
+  justify-content: center;
+}
+
+.wf-btn {
+  width: 80%;
+  height: 80rpx;
+  line-height: 80rpx;
+  text-align: center;
+  font-size: 28rpx;
+  font-weight: 600;
+  border-radius: 40rpx;
+  border: none;
+  color: #ffffff;
+}
+
+.wf-btn--start {
+  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+}
+
+.wf-btn--pause {
+  background: linear-gradient(135deg, #faad14 0%, #ffc53d 100%);
+}
+
+.wf-btn::after {
+  border: none;
+}
+
+/* ---------- 7. 快捷入口 ---------- */
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 20rpx;
+}
+
+.shortcut-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12rpx;
+  padding: 20rpx 0;
+}
+
+.shortcut-icon {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 24rpx;
+  background: #f0f0ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 40rpx;
+}
+
+.shortcut-label {
+  font-size: 24rpx;
+  color: #595959;
+  text-align: center;
+}
+
+/* ---------- 底部安全区 ---------- */
+.safe-bottom {
+  height: 40rpx;
+}

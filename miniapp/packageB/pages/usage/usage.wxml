@@ -1,0 +1,272 @@
+<!--packageB/pages/usage/usage.wxml - 用量与账单-->
+<view class="page-container">
+
+  <!-- Tab 栏 -->
+  <view class="tab-bar">
+    <view
+      class="tab-item {{activeTab === item.key ? 'tab-active' : ''}}"
+      wx:for="{{tabs}}"
+      wx:key="key"
+      bindtap="switchTab"
+      data-tab="{{item.key}}"
+    >
+      <text>{{item.label}}</text>
+    </view>
+  </view>
+
+  <!-- ========== 今日概览 ========== -->
+  <view class="tab-content" wx:if="{{activeTab === 'today'}}">
+    <block wx:if="{{todaySummary}}">
+      <!-- 概览数字 -->
+      <view class="summary-cards">
+        <view class="summary-card">
+          <text class="summary-value">{{todaySummary.totalCalls}}</text>
+          <text class="summary-label">总调用</text>
+        </view>
+        <view class="summary-card">
+          <text class="summary-value">{{todaySummary.totalTokens >= 1000 ? (todaySummary.totalTokens / 1000) + 'K' : todaySummary.totalTokens}}</text>
+          <text class="summary-label">总 Tokens</text>
+        </view>
+        <view class="summary-card summary-card-highlight">
+          <text class="summary-value">¥{{todaySummary.costCents}}</text>
+          <text class="summary-label">今日费用</text>
+        </view>
+      </view>
+
+      <!-- 模型分布 -->
+      <view class="section">
+        <view class="section-title">模型分布</view>
+        <view class="bar-chart">
+          <view class="bar-row" wx:for="{{todaySummary.byModel}}" wx:key="name">
+            <view class="bar-label">
+              <text class="bar-name">{{item.name}}</text>
+              <text class="bar-calls">{{item.calls}} 次</text>
+            </view>
+            <view class="bar-track">
+              <view class="bar-fill bar-fill-{{index}}" style="width: {{item.percent}}%"></view>
+            </view>
+            <text class="bar-percent">{{item.percent}}%</text>
+          </view>
+        </view>
+      </view>
+
+      <!-- 工作流步骤分布 -->
+      <view class="section">
+        <view class="section-title">工作流步骤分布</view>
+        <view class="bar-chart">
+          <view class="bar-row" wx:for="{{todaySummary.byStep}}" wx:key="name">
+            <view class="bar-label">
+              <text class="bar-name">{{item.name}}</text>
+              <text class="bar-calls">{{item.calls}} 次</text>
+            </view>
+            <view class="bar-track">
+              <view class="bar-fill bar-fill-step-{{index}}" style="width: {{item.percent}}%"></view>
+            </view>
+            <text class="bar-percent">{{item.percent}}%</text>
+          </view>
+        </view>
+      </view>
+
+      <!-- 实时用量曲线（按小时） -->
+      <view class="section">
+        <view class="section-title">今日用量趋势</view>
+        <scroll-view class="hourly-chart-scroll" scroll-x enable-flex wx:if="{{todayHourly.length > 0}}">
+          <view class="hourly-chart">
+            <view class="hourly-bar-group" wx:for="{{todayHourly}}" wx:key="hour">
+              <view class="hourly-bar" style="height: {{item.barHeight}}rpx;"></view>
+              <text class="hourly-label">{{item.hour}}</text>
+            </view>
+          </view>
+        </scroll-view>
+        <view class="empty-state" wx:else>
+          <text>暂无小时趋势</text>
+        </view>
+      </view>
+    </block>
+    <view class="empty-state" wx:else>
+      <text>暂无数据</text>
+    </view>
+  </view>
+
+  <!-- ========== 本月概览 ========== -->
+  <view class="tab-content" wx:if="{{activeTab === 'monthly'}}">
+    <!-- 月份选择 -->
+    <view class="month-picker-row">
+      <picker mode="date" fields="month" value="{{selectedMonth}}" bindchange="changeMonth">
+        <view class="month-picker-btn">
+          <text>{{selectedMonth}}</text>
+          <text class="picker-arrow">▼</text>
+        </view>
+      </picker>
+    </view>
+
+    <block wx:if="{{monthlySummary}}">
+      <!-- 月度汇总 -->
+      <view class="summary-cards">
+        <view class="summary-card summary-card-highlight">
+          <text class="summary-value">¥{{monthlySummary.totalCost}}</text>
+          <text class="summary-label">月度总费</text>
+        </view>
+        <view class="summary-card">
+          <text class="summary-value">{{monthlySummary.totalCalls}}</text>
+          <text class="summary-label">总调用</text>
+        </view>
+        <view class="summary-card">
+          <text class="summary-value">¥{{monthlySummary.avgDailyCost}}</text>
+          <text class="summary-label">日均费用</text>
+        </view>
+      </view>
+
+      <!-- 月历热力图 -->
+      <view class="section">
+        <view class="section-title">用量热力图</view>
+        <view class="heatmap-grid">
+          <view
+            class="heatmap-cell heatmap-level-{{item.level}}"
+            wx:for="{{monthlyCalendar}}"
+            wx:key="day"
+          >
+            <text class="heatmap-day">{{item.day}}</text>
+          </view>
+        </view>
+        <view class="heatmap-legend">
+          <text class="heatmap-legend-label">少</text>
+          <view class="heatmap-legend-cell heatmap-level-0"></view>
+          <view class="heatmap-legend-cell heatmap-level-1"></view>
+          <view class="heatmap-legend-cell heatmap-level-2"></view>
+          <view class="heatmap-legend-cell heatmap-level-3"></view>
+          <view class="heatmap-legend-cell heatmap-level-4"></view>
+          <text class="heatmap-legend-label">多</text>
+        </view>
+      </view>
+
+      <!-- 模型使用排行 -->
+      <view class="section">
+        <view class="section-title">模型使用排行</view>
+        <view class="rank-list">
+          <view class="rank-item" wx:for="{{monthlyModelRank}}" wx:key="name">
+            <view class="rank-index rank-index-{{index}}">{{index + 1}}</view>
+            <view class="rank-info">
+              <text class="rank-name">{{item.name}}</text>
+              <view class="rank-bar-track">
+                <view class="rank-bar-fill" style="width: {{item.percent}}%"></view>
+              </view>
+            </view>
+            <text class="rank-cost">¥{{item.totalCost}}</text>
+          </view>
+        </view>
+      </view>
+
+      <!-- 费用趋势 -->
+      <view class="section">
+        <view class="section-title">费用趋势</view>
+        <scroll-view class="trend-chart-scroll" scroll-x enable-flex wx:if="{{monthlyTrend.length > 0}}">
+          <view class="trend-chart">
+            <view class="trend-bar-group" wx:for="{{monthlyTrend}}" wx:key="day">
+              <view class="trend-bar" style="height: {{item.barHeight}}rpx;"></view>
+              <text class="trend-label">{{item.day}}</text>
+            </view>
+          </view>
+        </scroll-view>
+        <view class="empty-state" wx:else>
+          <text>暂无费用趋势</text>
+        </view>
+      </view>
+    </block>
+    <view class="empty-state" wx:else>
+      <text>暂无数据</text>
+    </view>
+  </view>
+
+  <!-- ========== 历史明细 ========== -->
+  <view class="tab-content" wx:if="{{activeTab === 'history'}}">
+    <view class="history-list" wx:if="{{usageHistory.length > 0}}">
+      <view class="history-header">
+        <text class="history-col history-col-time">时间</text>
+        <text class="history-col history-col-step">步骤</text>
+        <text class="history-col history-col-model">模型</text>
+        <text class="history-col history-col-tokens">Tokens</text>
+        <text class="history-col history-col-cost">费用</text>
+      </view>
+      <view class="history-row" wx:for="{{usageHistory}}" wx:key="id">
+        <text class="history-col history-col-time">{{item.time}}</text>
+        <text class="history-col history-col-step">{{item.step}}</text>
+        <text class="history-col history-col-model">{{item.model}}</text>
+        <text class="history-col history-col-tokens">{{item.tokens}}</text>
+        <text class="history-col history-col-cost">¥{{item.cost}}</text>
+      </view>
+    </view>
+    <view class="load-more" wx:if="{{hasMore && usageHistory.length > 0}}" bindtap="loadHistory">
+      <text>加载更多</text>
+    </view>
+    <view class="empty-state" wx:if="{{usageHistory.length === 0}}">
+      <text>暂无历史记录</text>
+    </view>
+  </view>
+
+  <!-- ========== 月度账单 ========== -->
+  <view class="tab-content" wx:if="{{activeTab === 'bill'}}">
+    <!-- 月份选择 -->
+    <view class="month-picker-row">
+      <picker mode="date" fields="month" value="{{selectedMonth}}" bindchange="changeMonth">
+        <view class="month-picker-btn">
+          <text>{{selectedMonth}}</text>
+          <text class="picker-arrow">▼</text>
+        </view>
+      </picker>
+    </view>
+
+    <block wx:if="{{bill}}">
+      <view class="bill-card">
+        <view class="bill-title">{{bill.month}} 账单</view>
+        <view class="bill-status bill-status-{{bill.status === '已支付' ? 'paid' : 'pending'}}">
+          <text>{{bill.status}}</text>
+        </view>
+
+        <view class="bill-rows">
+          <view class="bill-row">
+            <text class="bill-row-label">订阅费（{{bill.subscriptionPlan}}）</text>
+            <text class="bill-row-value">¥{{bill.subscriptionFee}}</text>
+          </view>
+          <view class="bill-row">
+            <text class="bill-row-label">模型使用费</text>
+            <text class="bill-row-value">¥{{bill.modelUsageFee}}</text>
+          </view>
+          <view class="bill-row bill-row-discount">
+            <text class="bill-row-label">自带 Key 抵扣</text>
+            <text class="bill-row-value">¥{{bill.customKeyDiscount}}</text>
+          </view>
+          <view class="bill-row bill-row-total">
+            <text class="bill-row-label">应付金额</text>
+            <text class="bill-row-value bill-total-value">¥{{bill.total}}</text>
+          </view>
+        </view>
+
+        <!-- 费用明细展开 -->
+        <view class="bill-detail-toggle" bindtap="toggleBillDetail">
+          <text>{{billExpanded ? '收起明细' : '展开明细'}}</text>
+          <text class="toggle-arrow">{{billExpanded ? '▲' : '▼'}}</text>
+        </view>
+        <view class="bill-details" wx:if="{{billExpanded}}">
+          <view class="bill-detail-row" wx:for="{{bill.details}}" wx:key="label">
+            <text class="bill-detail-label">{{item.label}}</text>
+            <text class="bill-detail-value {{item.amount < 0 ? 'bill-detail-discount' : ''}}">
+              {{item.amount < 0 ? '' : '¥'}}{{item.amount < 0 ? '-¥' + (0 - item.amount) : item.amount}}
+            </text>
+          </view>
+        </view>
+
+        <!-- 操作按钮 -->
+        <view class="bill-actions">
+          <view class="bill-action-btn" bindtap="exportBill">
+            <text>📋 导出账单</text>
+          </view>
+        </view>
+      </view>
+    </block>
+    <view class="empty-state" wx:else>
+      <text>暂无账单</text>
+    </view>
+  </view>
+
+</view>

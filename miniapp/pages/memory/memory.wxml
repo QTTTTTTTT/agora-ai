@@ -1,0 +1,109 @@
+<!--pages/memory/memory.wxml - 记忆中心-->
+<view class="page-container">
+
+  <!-- 层级Tab -->
+  <scroll-view class="layer-tabs" scroll-x enable-flex>
+    <view
+      class="layer-tab {{activeLayer === item.key ? 'layer-tab-active' : ''}}"
+      wx:for="{{layers}}"
+      wx:key="key"
+      data-key="{{item.key}}"
+      bindtap="switchLayer"
+    >
+      <text class="layer-icon">{{item.icon}}</text>
+      <text class="layer-label">{{item.label}}</text>
+    </view>
+  </scroll-view>
+
+  <!-- 搜索栏 -->
+  <view class="search-section">
+    <view class="search-toggle" bindtap="toggleSearch">
+      <text class="search-icon">🔍</text>
+      <text>{{showSearch ? '收起搜索' : '搜索记忆'}}</text>
+    </view>
+    <view class="search-bar {{showSearch ? 'search-bar-show' : ''}}">
+      <input
+        class="search-input"
+        placeholder="输入关键词搜索..."
+        value="{{searchQuery}}"
+        bindinput="onSearchInput"
+        bindconfirm="doSearch"
+      />
+      <view class="search-btn" bindtap="doSearch">
+        <text>搜索</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 记忆列表 -->
+  <view class="memory-list" wx:if="{{filteredEntries.length > 0}}">
+    <view
+      class="memory-card memory-layer-{{item.layer}}"
+      wx:for="{{filteredEntries}}"
+      wx:key="id"
+    >
+      <!-- 左侧层级色条 -->
+      <view class="memory-bar memory-bar-{{item.layer}}"></view>
+
+      <view class="memory-content">
+        <!-- 标题行 -->
+        <view class="memory-header" data-id="{{item.id}}" bindtap="viewEntry">
+          <view class="memory-title-row">
+            <text class="memory-title">{{item.title}}</text>
+            <text class="memory-expand-icon">{{item.expanded ? '▼' : '▶'}}</text>
+          </view>
+          <view class="memory-meta">
+            <text class="memory-source">{{item.source}}</text>
+            <text class="memory-date">{{item.date}}</text>
+          </view>
+        </view>
+
+        <!-- 标签列表 -->
+        <view class="memory-tags">
+          <view class="tag-badge" wx:for="{{item.tags}}" wx:for-item="tag" wx:key="*this">
+            <text>{{tag}}</text>
+          </view>
+          <view class="tag-badge tag-agent" wx:if="{{item.agent}}">
+            <text>🤖 {{item.agent}}</text>
+          </view>
+        </view>
+
+        <!-- 内容预览/展开 -->
+        <view class="memory-body {{item.expanded ? 'memory-body-expanded' : 'memory-body-collapsed'}}">
+          <rich-text class="memory-rich-content" nodes="{{item.content}}"></rich-text>
+          <text class="memory-raw-content">{{item.content}}</text>
+        </view>
+
+        <!-- 操作按钮 -->
+        <view class="memory-actions" wx:if="{{item.expanded}}">
+          <view class="action-btn" data-id="{{item.id}}" bindtap="copyContent">
+            <text>📋 复制内容</text>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 空状态 -->
+  <view class="empty-state" wx:if="{{filteredEntries.length === 0}}">
+    <view class="empty-icon">🗂️</view>
+    <view class="empty-text">暂无记忆条目</view>
+    <view class="empty-hint">记忆会随系统运行自动积累</view>
+  </view>
+
+  <!-- 统计面板 -->
+  <view class="stats-panel">
+    <view class="stats-inner">
+      <view class="stats-item">
+        <text class="stats-value">{{stats.total}}</text>
+        <text class="stats-label">总条数</text>
+      </view>
+      <view class="stats-divider"></view>
+      <view class="stats-item" wx:for="{{layers}}" wx:key="key">
+        <text class="stats-value">{{stats.byLayer[item.key] || 0}}</text>
+        <text class="stats-label">{{item.icon}} {{item.label}}</text>
+      </view>
+    </view>
+  </view>
+
+</view>

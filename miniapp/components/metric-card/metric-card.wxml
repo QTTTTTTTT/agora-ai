@@ -1,0 +1,13 @@
+<view class="metric-card">
+  <view class="metric-header">
+    <text wx:if="{{icon}}" class="metric-icon">{{icon}}</text>
+    <text class="metric-label">{{label}}</text>
+  </view>
+  <view class="metric-body">
+    <text class="metric-value">{{value}}</text>
+    <view class="metric-trend {{trendClass}}" wx:if="{{subValue || trend !== 'flat'}}">
+      <text class="trend-arrow" style="color: {{trendColor}};">{{trendArrow}}</text>
+      <text class="sub-value" style="color: {{trendColor}};" wx:if="{{subValue}}">{{subValue}}</text>
+    </view>
+  </view>
+</view>

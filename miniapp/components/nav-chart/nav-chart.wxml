@@ -1,0 +1,11 @@
+<view class="nav-chart-container" style="width: {{width}}px; height: {{height}}px;">
+  <canvas
+    id="navCanvas"
+    type="2d"
+    class="nav-canvas"
+    style="width: {{width}}px; height: {{height}}px;"
+  ></canvas>
+  <view wx:if="{{!data || data.length === 0}}" class="empty-tip">
+    暂无净值数据
+  </view>
+</view>
