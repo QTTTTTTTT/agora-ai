@@ -177,3 +177,115 @@ func TestSumFilledBuyTodayByInstrumentZeroDateSkipsBound(t *testing.T) {
 		t.Fatalf("mock expectations: %v", err)
 	}
 }
+
+// TestApplyMemoryDefaultsBackfillsCheckConstraintFields locks the
+// invariant that MemoryRepo.Create cannot send an empty string for
+// any field with a DB CHECK constraint, even if the caller forgot to
+// set it. The original bug: runtimeMemorySystem.writeLearningMemory
+// built Memory{} without OriginKind so every daily_review attempt for
+// every fund silently failed with
+//   "violates check constraint memories_origin_kind_check (23514)"
+// for 3+ days before someone audited the memories table and noticed
+// "agent learning" was a no-op end-to-end.
+//
+// The DB has DEFAULT 'native' on origin_kind, but because the INSERT
+// in MemoryRepo.Create lists every column explicitly, passing '' as
+// the parameter value beats the DEFAULT to the check constraint.
+// Centralising the default in the repo (applyMemoryDefaults) is the
+// last line of defence — any new caller that forgets a CHECK field
+// now still produces a valid row.
+func TestApplyMemoryDefaultsBackfillsCheckConstraintFields(t *testing.T) {
+	t.Run("nil memory is a safe no-op", func(t *testing.T) {
+		applyMemoryDefaults(nil) // must not panic
+	})
+
+	t.Run("empty CHECK fields get filled with DB-compatible defaults", func(t *testing.T) {
+		m := &Memory{FundID: "fund-1", Layer: "daily", Content: "{}"}
+		applyMemoryDefaults(m)
+		if m.OriginKind != "native" {
+			t.Errorf("OriginKind: expected 'native', got %q (this is the wedge — empty string violates memories_origin_kind_check)", m.OriginKind)
+		}
+		if m.Visibility != "private" {
+			t.Errorf("Visibility: expected 'private', got %q", m.Visibility)
+		}
+		if m.Sensitivity != "internal" {
+			t.Errorf("Sensitivity: expected 'internal', got %q", m.Sensitivity)
+		}
+	})
+
+	t.Run("whitespace-only fields treated as empty", func(t *testing.T) {
+		m := &Memory{OriginKind: "   ", Visibility: "\t", Sensitivity: " "}
+		applyMemoryDefaults(m)
+		if m.OriginKind != "native" || m.Visibility != "private" || m.Sensitivity != "internal" {
+			t.Fatalf("whitespace must be treated as empty, got origin=%q vis=%q sens=%q", m.OriginKind, m.Visibility, m.Sensitivity)
+		}
+	})
+
+	t.Run("explicit values are preserved", func(t *testing.T) {
+		m := &Memory{
+			OriginKind:  "imported_from_marketplace",
+			Visibility:  "marketplace",
+			Sensitivity: "public",
+		}
+		applyMemoryDefaults(m)
+		if m.OriginKind != "imported_from_marketplace" {
+			t.Errorf("OriginKind: explicit value clobbered, got %q", m.OriginKind)
+		}
+		if m.Visibility != "marketplace" {
+			t.Errorf("Visibility: explicit value clobbered, got %q", m.Visibility)
+		}
+		if m.Sensitivity != "public" {
+			t.Errorf("Sensitivity: explicit value clobbered, got %q", m.Sensitivity)
+		}
+	})
+}
+
+// TestMemoryRepoCreateFillsDefaultsBeforeInsert pins the SQL-level
+// behaviour: even if the caller hands Create a Memory with empty
+// CHECK fields, the INSERT must carry the backfilled defaults so
+// PostgreSQL doesn't reject the row. We assert the parameter VALUES
+// directly via sqlmock — if the defaults aren't applied, the mock
+// expectation will fail with "actual call was missing".
+func TestMemoryRepoCreateFillsDefaultsBeforeInsert(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock new: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewMemoryRepo(db)
+	in := &Memory{
+		FundID:      "fund-1",
+		Layer:       "daily",
+		Content:     `{"summary":"ok"}`,
+		TradingDate: sql.NullTime{Time: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC), Valid: true},
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags)`)).
+		WithArgs(
+			"fund-1",                        // fund_id
+			sql.NullString{},                // agent_id
+			sql.NullString{},                // owner_user_id
+			"private",                       // visibility ← backfilled
+			"internal",                      // sensitivity ← backfilled
+			"native",                        // origin_kind ← backfilled (the bug fix)
+			sql.NullString{},                // source_listing_id
+			"daily",                         // layer
+			sql.NullString{},                // title
+			`{"summary":"ok"}`,              // content
+			in.TradingDate,                  // trading_date
+			sqlmock.AnyArg(),                // tags (pq.Array wrapped, opaque)
+		).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("memory-1"))
+
+	id, err := repo.Create(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if id != "memory-1" {
+		t.Fatalf("expected id 'memory-1', got %q", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}

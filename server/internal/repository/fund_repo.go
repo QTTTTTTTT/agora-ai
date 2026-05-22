@@ -1625,6 +1625,7 @@ func (r *MemoryRepo) DB() *sql.DB {
 }
 
 func (r *MemoryRepo) Create(ctx context.Context, m *Memory) (string, error) {
+	applyMemoryDefaults(m)
 	var id string
 	err := r.db.QueryRowContext(ctx,
 		`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags)
@@ -1636,6 +1637,33 @@ func (r *MemoryRepo) Create(ctx context.Context, m *Memory) (string, error) {
 		return "", fmt.Errorf("memory_repo: create: %w", err)
 	}
 	return id, nil
+}
+
+// applyMemoryDefaults backfills constraint-required string fields when
+// the caller forgot to set them. The DB has DEFAULT clauses for these
+// columns, but because Create's INSERT lists every column explicitly,
+// passing an empty string bypasses the DEFAULT and hits the CHECK
+// constraint (e.g. "memories_origin_kind_check" rejecting '').
+//
+// This is the second-level defence behind the per-call-site fixes —
+// daily_review was silently failing for every fund because
+// runtimeMemorySystem.writeLearningMemory built Memory{} without
+// OriginKind / Visibility / Sensitivity, all three of which have
+// CHECK constraints on the table. Centralising the default keeps any
+// future caller from re-introducing the same wedge.
+func applyMemoryDefaults(m *Memory) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(m.OriginKind) == "" {
+		m.OriginKind = "native"
+	}
+	if strings.TrimSpace(m.Visibility) == "" {
+		m.Visibility = "private"
+	}
+	if strings.TrimSpace(m.Sensitivity) == "" {
+		m.Sensitivity = "internal"
+	}
 }
 
 func (r *MemoryRepo) ListByFund(ctx context.Context, fundID, layer string, limit int) ([]Memory, error) {
@@ -1721,6 +1749,7 @@ func (r *MemoryRepo) CreateWithTx(ctx context.Context, tx *sql.Tx, m *Memory) (s
 	if tx == nil {
 		return "", ErrNoTx
 	}
+	applyMemoryDefaults(m)
 	var id string
 	err := tx.QueryRowContext(ctx,
 		`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags)
