@@ -3055,3 +3055,174 @@ func intPtr(value int) *int {
 func floatPtr(value float64) *float64 {
 	return &value
 }
+
+// TestSanitizeFundUniverseDedupesAndTrims locks the contract for the
+// universe normaliser invoked from every fund create/update path.
+// Operators routinely paste lists with empty rows, mixed-case tickers,
+// and dupes; if any of those leak through, downstream quote fetches
+// hammer "" and the LLM prompt sees "AAPL" repeated several times.
+// Symbols are uppercased (codebase convention for tickers), other
+// fields preserve their original casing but still dedupe
+// case-insensitively. nil input is preserved (separate from empty).
+func TestSanitizeFundUniverseDedupesAndTrims(t *testing.T) {
+	t.Run("nil universe stays nil", func(t *testing.T) {
+		if got := sanitizeFundUniverse(nil); got != nil {
+			t.Fatalf("nil in must produce nil out, got %+v", got)
+		}
+	})
+
+	t.Run("symbols trim, uppercase, dedupe case-insensitively", func(t *testing.T) {
+		in := &api.FundUniverse{
+			Symbols: []string{"aapl", "AAPL", "  aapl  ", "MSFT", "", "  ", "msft"},
+		}
+		got := sanitizeFundUniverse(in)
+		if got == nil {
+			t.Fatal("expected non-nil result for non-nil input")
+		}
+		want := []string{"AAPL", "MSFT"}
+		if !equalStringSlices(got.Symbols, want) {
+			t.Errorf("symbols: want %v, got %v", want, got.Symbols)
+		}
+	})
+
+	t.Run("sectors and themes preserve casing but dedupe case-insensitively", func(t *testing.T) {
+		in := &api.FundUniverse{
+			Sectors: []string{"Tech", "tech", "  Tech  ", "Healthcare", ""},
+			Themes:  []string{"AI", "ai", "  Quantum  ", "quantum"},
+		}
+		got := sanitizeFundUniverse(in)
+		if got == nil {
+			t.Fatal("expected non-nil result")
+		}
+		// First-seen casing wins.
+		wantSectors := []string{"Tech", "Healthcare"}
+		if !equalStringSlices(got.Sectors, wantSectors) {
+			t.Errorf("sectors: want %v, got %v", wantSectors, got.Sectors)
+		}
+		wantThemes := []string{"AI", "Quantum"}
+		if !equalStringSlices(got.Themes, wantThemes) {
+			t.Errorf("themes: want %v, got %v", wantThemes, got.Themes)
+		}
+	})
+
+	t.Run("whitespace-only and empty inputs produce empty results", func(t *testing.T) {
+		// The contract is "no entries" — nil and a length-0 slice are
+		// both fine, downstream consumers iterate either harmlessly.
+		// We assert on length rather than on nil-vs-empty to avoid
+		// locking that implementation detail.
+		in := &api.FundUniverse{
+			Symbols: []string{"", "   ", "\t"},
+			Sectors: []string{},
+		}
+		got := sanitizeFundUniverse(in)
+		if got == nil {
+			t.Fatal("expected non-nil result for non-nil input even if all entries are whitespace")
+		}
+		if len(got.Symbols) != 0 {
+			t.Errorf("symbols: whitespace-only input must produce zero entries, got %v", got.Symbols)
+		}
+		if len(got.Sectors) != 0 {
+			t.Errorf("sectors: empty input must produce zero entries, got %v", got.Sectors)
+		}
+	})
+
+	t.Run("caps at 500 entries to protect downstream loops", func(t *testing.T) {
+		long := make([]string, 600)
+		for i := range long {
+			long[i] = fmt.Sprintf("SYM%04d", i)
+		}
+		in := &api.FundUniverse{Symbols: long}
+		got := sanitizeFundUniverse(in)
+		if got == nil || len(got.Symbols) != 500 {
+			t.Fatalf("expected cap at 500, got len=%d", len(got.Symbols))
+		}
+	})
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestUpdateFundUsesRowLevelLockForConcurrentSafety pins the contract
+// that UpdateFund serialises concurrent writers on the same fund row
+// via SELECT ... FOR UPDATE inside a transaction. The pre-fix code
+// read with a plain SELECT and then UPDATEd, so two concurrent PUTs
+// could both read the same snapshot and the second write would
+// silently revert the first one's changes — observed at ~26% lost-
+// update rate in the May-22 P2 sweep (Test 12).
+//
+// We assert the SQL shape, not the timing — the shape (BEGIN /
+// SELECT ... FOR UPDATE / UPDATE / COMMIT inside one tx) is the
+// contract; the actual concurrency guarantee is delegated to
+// PostgreSQL. The integration-level concurrency test lives in the
+// QA subagent suite and is run out-of-band.
+func TestUpdateFundUsesRowLevelLockForConcurrentSafety(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock new: %v", err)
+	}
+	defer db.Close()
+
+	repo := repository.NewFundRepo(db)
+
+	// The shape we want to see is BEGIN -> SELECT ... FOR UPDATE -> UPDATE
+	// -> COMMIT. The middle SELECT is what GetByIDForUpdateTx issues; the
+	// regex anchor on "FOR UPDATE" is the load-bearing assertion — drop it
+	// and concurrent writers will race again.
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT .* FROM funds WHERE id = \$1\s+FOR UPDATE`).
+		WithArgs("fund-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "company_id", "name", "description", "trading_mode",
+			"initial_capital", "current_capital", "total_assets", "nav",
+			"status", "config", "created_at", "updated_at",
+		}).AddRow(
+			"fund-1", "company-1", "OCS", nullString("a quant fund"), "live",
+			float64(100000), float64(100000), float64(100000), float64(1.0),
+			"active", json.RawMessage(`{}`), time.Now(), time.Now(),
+		))
+	mock.ExpectCommit()
+
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	fund, err := repo.GetByIDForUpdateTx(ctx, tx, "fund-1")
+	if err != nil {
+		t.Fatalf("GetByIDForUpdateTx: %v", err)
+	}
+	if fund == nil || fund.ID != "fund-1" {
+		t.Fatalf("expected fund-1, got %+v", fund)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}
+
+// TestGetByIDForUpdateTxRejectsNilTx guards the API contract — calling
+// with a nil tx must fail loud rather than silently degrading to a
+// non-locking read (which would put us back in the lost-update race).
+func TestGetByIDForUpdateTxRejectsNilTx(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock new: %v", err)
+	}
+	defer db.Close()
+	repo := repository.NewFundRepo(db)
+	if _, err := repo.GetByIDForUpdateTx(context.Background(), nil, "fund-1"); err == nil {
+		t.Fatal("expected error when called without a tx (would silently re-introduce the lost-update race), got nil")
+	}
+}

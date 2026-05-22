@@ -328,6 +328,51 @@ func TestMergeFundAutoExecutePreservesUnpatched(t *testing.T) {
 	}
 }
 
+// TestMergeFundAutoExecuteRejectsOutOfRangePatch is the contract that
+// out-of-range PATCH values must NEVER clobber a previously-valid
+// auto-execute guardrail. The original bug surfaced as "user PATCHes
+// minConfidence:1.5 -> field silently dropped during normalize ->
+// platform default 0.6 fills in -> auto-execute is now MORE permissive
+// than the user's last valid setting (0.7)", which is the security-
+// relevant inverse of what the user asked for.
+//
+// Per-field ranges (from normalizedRiskFloatPtr call sites in
+// mergeFundAutoExecute): MaxOrderPctOfAssets (0, 1], MaxDailyPctOfAssets
+// (0, 1], MinConfidence (0, 1]. Slippage policy: must be in
+// validAutoExecuteSlippagePolicies; unknown strings ignored.
+func TestMergeFundAutoExecuteRejectsOutOfRangePatch(t *testing.T) {
+	existing := &api.FundAutoExecuteConfig{
+		Enabled:              true,
+		MaxOrderPctOfAssets:  floatPtrLocal(0.07),
+		MaxDailyPctOfAssets:  floatPtrLocal(0.25),
+		MinConfidence:        floatPtrLocal(0.70),
+		SlippageBouncePolicy: "reject",
+	}
+	patch := &api.FundAutoExecuteConfig{
+		Enabled:              true,
+		MaxOrderPctOfAssets:  floatPtrLocal(1.50),         // out of range
+		MaxDailyPctOfAssets:  floatPtrLocal(-0.10),        // out of range
+		MinConfidence:        floatPtrLocal(1.50),         // out of range
+		SlippageBouncePolicy: "make_user_happy_somehow",   // unknown policy
+	}
+	merged := mergeFundAutoExecute(existing, patch)
+	if merged == nil {
+		t.Fatal("merged is nil")
+	}
+	if merged.MaxOrderPctOfAssets == nil || *merged.MaxOrderPctOfAssets != 0.07 {
+		t.Errorf("MaxOrderPctOfAssets: out-of-range 1.50 must NOT clobber existing 0.07, got %+v", merged.MaxOrderPctOfAssets)
+	}
+	if merged.MaxDailyPctOfAssets == nil || *merged.MaxDailyPctOfAssets != 0.25 {
+		t.Errorf("MaxDailyPctOfAssets: negative patch must NOT clobber existing 0.25, got %+v", merged.MaxDailyPctOfAssets)
+	}
+	if merged.MinConfidence == nil || *merged.MinConfidence != 0.70 {
+		t.Errorf("MinConfidence: out-of-range 1.50 must NOT clobber existing 0.70, got %+v (the security-relevant case: silently relaxing auto-execute)", merged.MinConfidence)
+	}
+	if merged.SlippageBouncePolicy != "reject" {
+		t.Errorf("SlippageBouncePolicy: unknown policy must NOT clobber existing 'reject', got %q", merged.SlippageBouncePolicy)
+	}
+}
+
 // resolveAutoExecuteConfig: a nil input returns a fully-populated
 // config so the gateway code never has to nil-check guardrails.
 func TestResolveAutoExecuteConfigBackfillsDefaults(t *testing.T) {
