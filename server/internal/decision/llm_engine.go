@@ -41,8 +41,23 @@ type LLMDecisionEngine struct {
 	// non-determinism just creates parser failures. The default 0.1
 	// works well across Anthropic / OpenAI / DeepSeek.
 	Temperature float64
-	// MaxTokens caps the reply size. Plans rarely exceed 5 actions →
-	// ~1500 tokens of JSON is plenty.
+	// MaxTokens caps the reply size. The literal JSON output is small
+	// (≤5 actions × ~200 tokens ≈ 1000 tokens), but reasoning-tier
+	// models (Gemini 3.x Pro Preview, OpenAI o-series, Claude
+	// extended-thinking) burn an internal "thoughts" budget *out of*
+	// this same MaxOutputTokens cap before they emit a single user-
+	// visible character. Observed thoughts ranged 600-3000 tokens on
+	// production prompts (long system instruction + universe + macro
+	// briefing + debate snippets); when MaxTokens=1500 the reasoning
+	// pass alone exhausted the budget and the response payload was
+	// either {} or a truncated "{stance: ..." string that failed JSON
+	// parse. The 8000 default leaves room for ~3000 tokens of
+	// reasoning *and* ~1500 tokens of JSON without forcing every
+	// caller to bump their config. Non-thinking providers are fine
+	// with the higher cap — they just stop earlier and only pay for
+	// what they emit. See agent-transcripts dce9e865 (2026-05-22) for
+	// the diagnosis: storage fund's 5 most recent plans all fell
+	// back to the deterministic engine because of this truncation.
 	MaxTokens int
 }
 
@@ -96,7 +111,7 @@ func (e *LLMDecisionEngine) maxTokens() int {
 	if e.MaxTokens > 0 {
 		return e.MaxTokens
 	}
-	return 1500
+	return 8000
 }
 
 func (e *LLMDecisionEngine) temperature() float64 {

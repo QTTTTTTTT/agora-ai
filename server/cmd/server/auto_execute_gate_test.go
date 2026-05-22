@@ -119,6 +119,91 @@ func TestRunAutoExecuteGuardrailsPerOrderCapExceeded(t *testing.T) {
 	}
 }
 
+// Watch-only / hold-only plans are deliberate PM "no-op today"
+// verdicts. They should bypass the confidence floor (and every other
+// capital-movement gate) entirely — gating them was a UX bug that
+// caused the storage fund's watch-only plans to surface as "已驳回"
+// in the Decision Center on 2026-05-22, even though the PM was
+// correctly choosing to monitor instead of trade. The fast path
+// returns passed=true with reasonCode="no_actionable_trade" so the
+// audit JSON makes the no-op explicit and downstream WaitForDecision
+// flows the plan through to completed.
+func TestRunAutoExecuteGuardrailsWatchOnlyPlanPassesWithNoActionableTradeCode(t *testing.T) {
+	gw := newGatewayWithFrozenClock()
+	fund, plan, _ := newAutoExecuteFixture()
+	// Replace the lone buy with a pair of watch / hold rows — no
+	// amount, no quantity, just audit records of the PM choosing to
+	// stand pat. Confidence is intentionally set BELOW the default
+	// floor (0.6) to prove the watch fast-path bypasses the
+	// confidence gate.
+	plan.RiskReview = json.RawMessage(`{"confidence":0.4}`)
+	actions := []repository.PlanAction{
+		{ID: "watch-1", PlanID: "plan-1", Symbol: "MU", Action: "watch", Market: sql.NullString{String: "us_equity", Valid: true}},
+		{ID: "hold-1", PlanID: "plan-1", Symbol: "SNDK", Action: "hold", Market: sql.NullString{String: "us_equity", Valid: true}},
+	}
+	cfg := resolveAutoExecuteConfig(&api.FundAutoExecuteConfig{Enabled: true})
+
+	d := gw.runAutoExecuteGuardrails(context.Background(), cfg, fund, plan, actions, fundMarketProfile{})
+
+	if !d.passed {
+		t.Fatalf("watch-only plan should pass the gate, got reasonCode=%q reason=%q", d.reasonCode, d.reason)
+	}
+	if d.reasonCode != "no_actionable_trade" {
+		t.Errorf("reasonCode = %q, want no_actionable_trade", d.reasonCode)
+	}
+	if !strings.Contains(d.reason, "观察") && !strings.Contains(d.reason, "watch") {
+		t.Errorf("reason should explain the no-op verdict, got %q", d.reason)
+	}
+}
+
+// Zero-amount buy/sell rows (e.g. quantity=0 because lot-size rounded
+// down to 0) are economically the same as watch — they don't move
+// any capital. Treat them as no-op so the plan doesn't get rejected
+// for a confidence-floor reason that's irrelevant.
+func TestRunAutoExecuteGuardrailsZeroAmountBuySkipsCapitalGates(t *testing.T) {
+	gw := newGatewayWithFrozenClock()
+	fund, plan, _ := newAutoExecuteFixture()
+	plan.RiskReview = json.RawMessage(`{"confidence":0.4}`)
+	actions := []repository.PlanAction{
+		{ID: "zero-buy", PlanID: "plan-1", Symbol: "MU", Action: "buy", Market: sql.NullString{String: "us_equity", Valid: true}, Amount: sql.NullFloat64{Float64: 0, Valid: true}, Quantity: sql.NullFloat64{Float64: 0, Valid: true}},
+	}
+	cfg := resolveAutoExecuteConfig(&api.FundAutoExecuteConfig{Enabled: true})
+
+	d := gw.runAutoExecuteGuardrails(context.Background(), cfg, fund, plan, actions, fundMarketProfile{})
+
+	if !d.passed {
+		t.Fatalf("zero-amount buy should be treated as no-op and pass, got reasonCode=%q reason=%q", d.reasonCode, d.reason)
+	}
+	if d.reasonCode != "no_actionable_trade" {
+		t.Errorf("reasonCode = %q, want no_actionable_trade", d.reasonCode)
+	}
+}
+
+// Gate reasons must describe the *cause* only, not the consequence —
+// the consequence ("已退回人工审批" vs "已自动驳回") is added later by
+// RequestApproval based on autoCfg.Enabled. Before this fix every
+// gate reason hard-coded "已退回人工审批" which lied to the user
+// whenever autoExecute was enabled (plan was actually rejected, not
+// pending approval). This test pins the new contract so a future
+// refactor doesn't quietly re-introduce the misleading suffix.
+func TestRunAutoExecuteGuardrailsReasonOmitsConsequenceSuffix(t *testing.T) {
+	gw := newGatewayWithFrozenClock()
+	fund, plan, actions := newAutoExecuteFixture()
+	plan.RiskReview = json.RawMessage(`{"confidence":0.4}`)
+	cfg := resolveAutoExecuteConfig(&api.FundAutoExecuteConfig{Enabled: true})
+
+	d := gw.runAutoExecuteGuardrails(context.Background(), cfg, fund, plan, actions, fundMarketProfile{})
+
+	if d.passed {
+		t.Fatal("expected refusal due to low confidence")
+	}
+	for _, forbidden := range []string{"已退回人工审批", "已自动驳回", "等待下次决策窗口"} {
+		if strings.Contains(d.reason, forbidden) {
+			t.Errorf("gate reason should NOT contain consequence suffix %q (RequestApproval appends it later), got %q", forbidden, d.reason)
+		}
+	}
+}
+
 // Confidence floor catches low-quality plans even when notional caps
 // pass.
 func TestRunAutoExecuteGuardrailsConfidenceFloor(t *testing.T) {

@@ -13833,8 +13833,21 @@ func (a *runtimeApprovalGateway) RequestApproval(ctx context.Context, plan *work
 
 	// Auto-execute either disabled or one of the guardrails fired.
 	// Persist the audit (reason + thresholds) so the UI's approval
-	// modal can explain why this plan didn't auto-approve.
+	// modal can explain why this plan didn't auto-approve. Before
+	// persisting, append an outcome suffix that matches what we
+	// actually do next — the runAutoExecuteGuardrails layer only
+	// describes the *cause* (e.g. "confidence_below_floor"); only
+	// here do we know whether the consequence is "auto-rejected and
+	// move on" (autoExecute enabled) or "wait for a human"
+	// (autoExecute disabled). Previously every cause text was
+	// hard-coded with "已退回人工审批" which lied to the user when
+	// autoExecute was on (plan was actually rejected, not pending).
 	if decision.reason != "" {
+		if autoCfg.Enabled {
+			decision.reason = decision.reason + "，已自动驳回，等待下次决策窗口"
+		} else {
+			decision.reason = decision.reason + "，已退回人工审批"
+		}
 		if err := a.persistAutoExecuteAudit(ctx, plan, dbPlan, autoCfg, decision, actions, fund); err != nil {
 			_ = err
 		}
@@ -13861,6 +13874,30 @@ func (a *runtimeApprovalGateway) RequestApproval(ctx context.Context, plan *work
 		return mapRepositoryError(a.planRepo.UpdateStatus(ctx, plan.ID, "rejected"))
 	}
 	return mapRepositoryError(a.planRepo.UpdateStatus(ctx, plan.ID, "pending_user"))
+}
+
+// planHasActionableTrade reports whether a plan has at least one
+// action that will move capital when executed. Watch / hold actions
+// and zero-amount/zero-quantity rows don't count — they're audit
+// records, not trades. The auto-execute gate consults this to skip
+// guardrails on watch-only plans (a deliberate PM "no-op today"
+// verdict shouldn't be marked rejected just because the LLM's
+// confidence happened to land below the floor).
+func planHasActionableTrade(actions []repository.PlanAction) bool {
+	for _, action := range actions {
+		switch strings.ToLower(strings.TrimSpace(action.Action)) {
+		case "buy", "sell", "reduce", "add":
+			// An action only moves capital if at least one of
+			// amount/quantity is non-zero. We check both because
+			// reduce/sell paths sometimes carry quantity without
+			// amount when the executor is expected to derive
+			// notional from live price at fill time.
+			if math.Abs(action.Amount.Float64) > 1e-6 || action.Quantity.Float64 > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // autoExecuteDecision is the structured outcome of evaluating the
@@ -13932,7 +13969,7 @@ func (a *runtimeApprovalGateway) evaluateAutoExecute(
 			enabled:    true,
 			passed:     false,
 			reasonCode: "plan_load_failed",
-			reason:     "无法加载方案数据，已退回人工审批",
+			reason:     "无法加载方案数据",
 		}
 	}
 	actions, err := a.planRepo.GetActions(ctx, plan.ID)
@@ -13941,7 +13978,7 @@ func (a *runtimeApprovalGateway) evaluateAutoExecute(
 			enabled:    true,
 			passed:     false,
 			reasonCode: "actions_load_failed",
-			reason:     "无法加载方案动作，已退回人工审批",
+			reason:     "无法加载方案动作",
 		}
 	}
 
@@ -13962,11 +13999,37 @@ func (a *runtimeApprovalGateway) runAutoExecuteGuardrails(
 	profile fundMarketProfile,
 ) autoExecuteDecision {
 	decision := autoExecuteDecision{enabled: true}
+
+	// 0) No-actionable-trade fast path. A plan whose actions are all
+	// watch/hold (or carry zero amount/qty) is a deliberate "monitor
+	// only today" verdict from the PM — there is literally no trade
+	// to gate. Subjecting it to the confidence floor / order caps /
+	// daily caps is wrong on two counts:
+	//   (a) Semantics: those gates exist to bound *capital movement*;
+	//       a zero-notional plan moves nothing.
+	//   (b) UX: forcing a watch-only plan through the confidence
+	//       gate caused it to be marked status="rejected" whenever
+	//       the LLM's plan-level confidence dipped under the floor
+	//       (the storage fund's 5 most-recent plans before this fix
+	//       all surfaced in the Decision Center as "已驳回" even
+	//       though the PM was correctly choosing to wait for a
+	//       cleaner setup). "Watch" should never read as "rejected"
+	//       to the operator.
+	// We early-return passed=true with a stable reasonCode so the
+	// audit JSON makes the no-op explicit; downstream
+	// trade_execution is a no-op for watch/hold actions anyway.
+	if !planHasActionableTrade(actions) {
+		decision.passed = true
+		decision.reasonCode = "no_actionable_trade"
+		decision.reason = "今日方案仅含观察/持有动作，无可执行交易（PM 主动选择观望）"
+		return decision
+	}
+
 	totalAssets := fund.TotalAssets
 	if totalAssets <= 0 {
 		// Without a NAV anchor we can't evaluate %-of-assets caps, so
 		// we conservatively refuse to bypass approval.
-		decision.reason = "基金净值未就绪，无法计算护栏阈值，已退回人工审批"
+		decision.reason = "基金净值未就绪，无法计算护栏阈值"
 		decision.reasonCode = "nav_unavailable"
 		return decision
 	}
@@ -13985,7 +14048,7 @@ func (a *runtimeApprovalGateway) runAutoExecuteGuardrails(
 		if fundMarket != "" {
 			if _, ok := allowed[fundMarket]; !ok {
 				decision.reasonCode = "market_not_allowed"
-				decision.reason = fmt.Sprintf("基金所属市场 %q 不在自动执行白名单内，已退回人工审批", profile.Market)
+				decision.reason = fmt.Sprintf("基金所属市场 %q 不在自动执行白名单内", profile.Market)
 				return decision
 			}
 		}
@@ -13996,7 +14059,7 @@ func (a *runtimeApprovalGateway) runAutoExecuteGuardrails(
 			}
 			if _, ok := allowed[am]; !ok {
 				decision.reasonCode = "market_not_allowed"
-				decision.reason = fmt.Sprintf("动作市场 %q 不在自动执行白名单内，已退回人工审批", action.Market.String)
+				decision.reason = fmt.Sprintf("动作市场 %q 不在自动执行白名单内", action.Market.String)
 				return decision
 			}
 		}
@@ -14019,7 +14082,7 @@ func (a *runtimeApprovalGateway) runAutoExecuteGuardrails(
 			decision.planNotional = planNotional
 			decision.planPctNAV = planNotional / totalAssets
 			decision.reasonCode = "order_pct_exceeded"
-			decision.reason = fmt.Sprintf("动作 %s 名义金额 %.2f 超过单笔自动执行上限 %.2f（%.1f%% NAV），已退回人工审批", action.Symbol, amt, maxOrderAbs, maxOrderPct*100)
+			decision.reason = fmt.Sprintf("动作 %s 名义金额 %.2f 超过单笔自动执行上限 %.2f（%.1f%% NAV）", action.Symbol, amt, maxOrderAbs, maxOrderPct*100)
 			return decision
 		}
 	}
@@ -14052,7 +14115,7 @@ func (a *runtimeApprovalGateway) runAutoExecuteGuardrails(
 	decision.dailyPctNAV = dailyTotal / totalAssets
 	if dailyTotal > maxDailyAbs+1e-6 {
 		decision.reasonCode = "daily_pct_exceeded"
-		decision.reason = fmt.Sprintf("加上本方案后今日自动执行累计 %.2f（%.1f%% NAV）将超过日累计上限 %.2f（%.1f%% NAV），已退回人工审批", dailyTotal, decision.dailyPctNAV*100, maxDailyAbs, maxDailyPct*100)
+		decision.reason = fmt.Sprintf("加上本方案后今日自动执行累计 %.2f（%.1f%% NAV）将超过日累计上限 %.2f（%.1f%% NAV）", dailyTotal, decision.dailyPctNAV*100, maxDailyAbs, maxDailyPct*100)
 		return decision
 	}
 
@@ -14071,7 +14134,7 @@ func (a *runtimeApprovalGateway) runAutoExecuteGuardrails(
 	}
 	if planConfidence < minConfidence-1e-9 {
 		decision.reasonCode = "confidence_below_floor"
-		decision.reason = fmt.Sprintf("方案置信度 %.2f 低于自动执行下限 %.2f，已退回人工审批", planConfidence, minConfidence)
+		decision.reason = fmt.Sprintf("方案置信度 %.2f 低于自动执行下限 %.2f", planConfidence, minConfidence)
 		return decision
 	}
 

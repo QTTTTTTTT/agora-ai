@@ -110,7 +110,17 @@ func (r *LLMResearcher) maxTokens() int {
 	if r.MaxTokens > 0 {
 		return r.MaxTokens
 	}
-	return 1200
+	// Reasoning-tier models (Gemini 3.x Pro Preview, Claude
+	// extended-thinking) consume a hidden "thoughts" budget from
+	// MaxOutputTokens *before* writing the bull/bear/quant case JSON.
+	// Observed thoughtsTokenCount on production debate rounds:
+	// 800–2500 with the full prompt (universe + macro + prior
+	// roundtable). At 1200 every round in the 2026-05-22 storage-
+	// fund run returned "unexpected end of JSON input" because the
+	// thoughts pass alone exhausted the budget. 6000 leaves a
+	// comfortable cushion for both reasoning *and* the multi-line
+	// JSON the parser expects.
+	return 6000
 }
 
 func (r *LLMResearcher) temperature() float64 {

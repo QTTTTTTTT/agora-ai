@@ -114,7 +114,16 @@ func (s *LLMScorer) maxTokens() int {
 	if s.MaxTokens > 0 {
 		return s.MaxTokens
 	}
-	return 1200
+	// Reasoning-tier models (Gemini 3.x Pro Preview etc.) burn an
+	// internal "thoughts" budget out of MaxOutputTokens before
+	// emitting a single visible char. At the old 1200 cap a 12-item
+	// sentiment batch returned an empty / truncated payload and the
+	// caller fell back to the legacy scorer ("primary sentiment
+	// scorer failed; trying fallback" / "unexpected end of JSON
+	// input" — see agent transcript dce9e865 2026-05-22). 6000
+	// leaves ~3-4k for thoughts and still keeps the per-call cost
+	// bounded for the largest realistic batch we send.
+	return 6000
 }
 
 func (s *LLMScorer) temperature() float64 {

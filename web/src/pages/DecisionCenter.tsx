@@ -40,6 +40,7 @@ import {
   parseRiskReview,
   pickLocalizedList,
   pickLocalizedText,
+  planEffectiveStatusKey,
 } from "./decisionCenter/helpers";
 import type { ApiPlan, ExecutionTraceView } from "./decisionCenter/types";
 
@@ -308,6 +309,8 @@ const DecisionCenter: React.FC = () => {
               pending_user: "Pending",
               approved: "Approved",
               rejected: "Rejected",
+              completed: "Completed",
+              watch_only: "Watch only",
             },
             actionType: {
               buy: "Buy",
@@ -541,6 +544,8 @@ const DecisionCenter: React.FC = () => {
               pending_user: "待审批",
               approved: "已通过",
               rejected: "已驳回",
+              completed: "已完成",
+              watch_only: "今日观望",
             },
             actionType: {
               buy: "买入",
@@ -579,17 +584,28 @@ const DecisionCenter: React.FC = () => {
   );
 
   const planStatusMeta = useCallback(
-    (status: string) => {
-      const normalized = status.toLowerCase();
+    (status: string, riskReview?: unknown) => {
+      // Synthesize "watch_only" when status=completed AND the
+      // auto-execute gate stamped reasonCode=no_actionable_trade.
+      // Without this, a deliberate PM "observe only today" verdict
+      // appears in the sidebar as just another "已完成" badge,
+      // indistinguishable from a plan that actually filled trades.
+      const effective = planEffectiveStatusKey(status, riskReview);
       const badgeMap: Record<string, string> = {
         pending: "bg-amber-50 text-amber-700 border-amber-200",
         pending_user: "bg-amber-50 text-amber-700 border-amber-200",
         approved: "bg-emerald-50 text-emerald-700 border-emerald-200",
         rejected: "bg-red-50 text-red-700 border-red-200",
+        completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+        // Watch-only deserves its own muted-blue palette so the
+        // operator can scan a long history list and immediately
+        // separate "PM chose to wait" rows from "trades executed"
+        // rows without reading the label.
+        watch_only: "bg-sky-50 text-sky-700 border-sky-200",
       };
       return {
-        label: copy.planStatus[normalized as keyof typeof copy.planStatus] ?? humanizeValue(status, copy.unknown),
-        badge: badgeMap[normalized] ?? "bg-gray-50 text-gray-600 border-gray-200",
+        label: copy.planStatus[effective as keyof typeof copy.planStatus] ?? humanizeValue(status, copy.unknown),
+        badge: badgeMap[effective] ?? "bg-gray-50 text-gray-600 border-gray-200",
       };
     },
     [copy],
@@ -1427,8 +1443,8 @@ const DecisionCenter: React.FC = () => {
                   <div>
                     <div className="flex flex-wrap items-center gap-3">
                       <h2 className="text-2xl font-bold text-gray-900">{planTitle(selected)}</h2>
-                      <span className={`rounded-full border px-3 py-1 text-sm font-medium ${planStatusMeta(selectedPlanDetail?.status ?? selected.status).badge}`}>
-                        {planStatusMeta(selectedPlanDetail?.status ?? selected.status).label}
+                      <span className={`rounded-full border px-3 py-1 text-sm font-medium ${planStatusMeta(selectedPlanDetail?.status ?? selected.status, selectedPlanDetail?.riskReview ?? selected.riskReview).badge}`}>
+                        {planStatusMeta(selectedPlanDetail?.status ?? selected.status, selectedPlanDetail?.riskReview ?? selected.riskReview).label}
                       </span>
                     </div>
                     <p className="mt-2 text-sm text-gray-500">

@@ -22,7 +22,7 @@ interface PlanListSidebarProps {
   showHistory: boolean;
   language: AppLanguage;
   labels: PlanListSidebarLabels;
-  planStatusMeta: (status: string) => { label: string; badge: string };
+  planStatusMeta: (status: string, riskReview?: unknown) => { label: string; badge: string };
   planTitle: (plan: ApiPlan) => string;
   riskScoreTone: (value?: number) => string;
   formatPercent: (value?: number, digits?: number) => string;
@@ -53,7 +53,7 @@ function PlanListSidebarInner({
         ) : (
           <div className="space-y-3">
             {pendingPlans.map((plan) => {
-              const meta = planStatusMeta(plan.status);
+              const meta = planStatusMeta(plan.status, plan.riskReview);
               const isSelected = selectedId === plan.id;
               return (
                 <button
@@ -103,7 +103,7 @@ function PlanListSidebarInner({
           ) : (
             <div className="mt-4 space-y-3">
               {historyPlans.map((plan) => {
-                const meta = planStatusMeta(plan.status);
+                const meta = planStatusMeta(plan.status, plan.riskReview);
                 const isSelected = selectedId === plan.id;
                 return (
                   <button

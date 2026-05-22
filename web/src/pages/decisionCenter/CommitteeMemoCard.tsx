@@ -31,7 +31,7 @@ interface CommitteeMemoCardProps {
   discussionSummary: string;
   language: AppLanguage;
   labels: CommitteeMemoCardLabels;
-  planStatusMeta: (status: string) => { label: string; badge: string };
+  planStatusMeta: (status: string, riskReview?: unknown) => { label: string; badge: string };
   riskVerdictMeta: (value: string) => { label: string; badge: string };
   actionMeta: (action: string) => { label: string; color: string };
 }

@@ -151,6 +151,41 @@ export function isPendingPlan(status: string): boolean {
   return status === "pending" || status === "pending_user";
 }
 
+// extractAutoExecuteReasonCode pulls the autoExecute.reasonCode value
+// from a plan's risk_review JSON. The server writes this field on
+// every plan that went through the auto-execute gate; downstream UI
+// uses it to disambiguate semantically different "completed" plans
+// (e.g. a PM "watch only today" verdict vs an actual filled trade)
+// without needing a new DB enum. Returns "" when the field is missing
+// or the JSON is shaped differently.
+export function extractAutoExecuteReasonCode(riskReview: unknown): string {
+  if (!riskReview || typeof riskReview !== "object") {
+    return "";
+  }
+  const auto = (riskReview as Record<string, unknown>).autoExecute;
+  if (!auto || typeof auto !== "object") {
+    return "";
+  }
+  const value = (auto as Record<string, unknown>).reasonCode;
+  return typeof value === "string" ? value : "";
+}
+
+// planEffectiveStatusKey collapses (plan.status, autoExecute.reasonCode)
+// into a single key that the i18n label map and badge class map can
+// look up directly. The only synthetic key today is "watch_only"
+// (status=completed + reasonCode=no_actionable_trade), which lets the
+// Decision Center render a PM "observe-only" verdict as its own row
+// instead of being lumped in with real filled trades under "已完成".
+// Add more synthetic keys here if/when the gate gains other reason
+// codes the UI needs to distinguish (e.g. partial fills, halted).
+export function planEffectiveStatusKey(status: string, riskReview: unknown): string {
+  const normalized = (status ?? "").toLowerCase();
+  if (normalized === "completed" && extractAutoExecuteReasonCode(riskReview) === "no_actionable_trade") {
+    return "watch_only";
+  }
+  return normalized;
+}
+
 export function canReviewPlan(status: string): boolean {
   return isPendingPlan(status);
 }

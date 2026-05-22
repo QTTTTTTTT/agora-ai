@@ -343,3 +343,31 @@ func TestFallbackEngineBuysFirstUniverseSymbol(t *testing.T) {
 		t.Errorf("expected 5%% NAV, got %v", out.Actions[0].QtyPct)
 	}
 }
+
+// Regression guard: reasoning-tier providers (Gemini 3.x Pro Preview,
+// OpenAI o-series, Claude extended thinking) burn an internal
+// "thoughts" budget *out of* the same MaxOutputTokens cap before
+// emitting a single visible token. On a real PM prompt the storage
+// fund observed ~600-3000 thoughtTokens; at the old 1500-token cap
+// the response was either {} (FinishReason=MAX_TOKENS) or a
+// truncated "{stance:..." that failed JSON parse and forced the
+// legacy fallback. The Engine.maxTokens default must stay >= 8000 so
+// every realistic PM call has room for both the reasoning pass and
+// the JSON body. Lowering the default again will silently break the
+// LLM decision path; bumping it deliberately is fine.
+func TestLLMDecisionEngineMaxTokensDefaultLeavesRoomForThinkingModels(t *testing.T) {
+	const minSafe = 8000
+	got := (&LLMDecisionEngine{}).maxTokens()
+	if got < minSafe {
+		t.Fatalf("LLMDecisionEngine.maxTokens() default = %d, want >= %d so reasoning-tier models have budget for thoughts + JSON output (see agent-transcript dce9e865 2026-05-22)", got, minSafe)
+	}
+
+	// And an explicit override (>0) must always win — we shouldn't
+	// quietly floor every caller to the default just because they
+	// asked for a smaller cap (some tests / cheap models legitimately
+	// want a small reply).
+	custom := (&LLMDecisionEngine{MaxTokens: 200}).maxTokens()
+	if custom != 200 {
+		t.Errorf("LLMDecisionEngine{MaxTokens:200}.maxTokens() = %d, want 200 — explicit override must win", custom)
+	}
+}
