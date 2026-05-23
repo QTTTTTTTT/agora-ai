@@ -23,6 +23,7 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/attribution"
 	"github.com/fundai/server/internal/audit"
+	"github.com/fundai/server/internal/cooldown"
 	"github.com/fundai/server/internal/debate"
 	"github.com/fundai/server/internal/decision"
 	"github.com/fundai/server/internal/exitmanager"
@@ -1323,6 +1324,12 @@ type runtimePMAgent struct {
 	// pre-Sprint-A behaviour for funds whose universe + history
 	// can't support a meaningful z-score.
 	ranker *ranking.Ranker
+	// cooldownSvc is the Sprint B #1 event-driven re-entry lock.
+	// Reads trade_executions for the fund's own recent fills and
+	// surfaces symbols still inside the cooldown window (default
+	// 24h after the last fill). nil = no cooldown wiring (legacy
+	// behaviour); the prompt block is then omitted.
+	cooldownSvc *cooldown.Service
 }
 
 type runtimeRiskAgent struct {
@@ -5568,6 +5575,15 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// — operators tuning these per-fund will go
 				// through a config knob in a follow-up PR.
 				quantSnapshot: quantsnapshot.NewBuilder(regimeSvc, s.ohlcFetcher, quantsnapshot.Options{}),
+				// Sprint B #1: per-symbol re-entry lock
+				// driven by trade_executions. NewService
+				// degrades gracefully on nil DB (no-op
+				// Lookup) so the constructor stays
+				// unconditional. We pass s.db rather than
+				// a repo so cooldown doesn't pull in the
+				// repository package and keep the cycle-free
+				// dependency graph intact.
+				cooldownSvc: cooldown.NewService(s.db, cooldown.Options{}),
 				// Sprint A #2: cross-sectional ranker shares
 				// the same OHLC fetcher so bars asked for
 				// by the quant snapshot pass come back from
@@ -13677,9 +13693,61 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		LessonReplay:        a.buildLessonReplay(ctx, fundID),
 		QuantSnapshots:      a.buildQuantSnapshots(ctx, profile.Market, universe, decisionPositions),
 		UniverseRanking:     a.buildUniverseRanking(ctx, profile.Market, universe, decisionPositions),
+		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
 	}
+}
+
+// buildCooldowns assembles the Sprint B #1 re-entry lock list. Same
+// universe ∪ positions candidate set as the Sprint A blocks so the
+// PM prompt sees a single coherent picture. Returns nil when the
+// cooldown service isn't wired, the fund has no fills inside the
+// window, or the candidate set is empty.
+//
+// SQL errors are downgraded to a warning log + nil result rather
+// than propagated: cooldown is advisory, and a transient DB hiccup
+// should never block a PM run.
+func (a *runtimePMAgent) buildCooldowns(ctx context.Context, fundID string, universe []string, positions []decision.DecisionPosition, now time.Time) []decision.SymbolCooldown {
+	if a == nil || a.cooldownSvc == nil {
+		return nil
+	}
+	if strings.TrimSpace(fundID) == "" {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	symbols := make([]string, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		symbols = append(symbols, key)
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		symbols = append(symbols, key)
+	}
+	if len(symbols) == 0 {
+		return nil
+	}
+	locks, err := a.cooldownSvc.Lookup(ctx, fundID, symbols, now)
+	if err != nil {
+		slog.Warn("cooldown lookup failed; treating as no active locks", "fund_id", fundID, "err", err)
+		return nil
+	}
+	return locks
 }
 
 // buildUniverseRanking assembles the Sprint A #2 cross-sectional

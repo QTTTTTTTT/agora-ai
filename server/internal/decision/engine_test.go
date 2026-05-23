@@ -597,3 +597,121 @@ func TestRound4SignedHandlesBothSigns(t *testing.T) {
 		}
 	}
 }
+
+// Sprint B #1: the system prompt must teach the PM the cooldown
+// veto rules. We assert on multiple stable substrings so a future
+// edit that loses one of the rules surfaces as a regression
+// rather than silently shipping a weaker prompt.
+func TestSystemPromptDocumentsCooldownRules(t *testing.T) {
+	prompt := systemPrompt()
+	required := []string{
+		"input.cooldowns",
+		"hoursRemaining",
+		"lastFillSide",
+		"watch",
+		"extreme catalyst",
+	}
+	for _, frag := range required {
+		if !strings.Contains(prompt, frag) {
+			t.Errorf("systemPrompt() missing %q — the cooldown rule has regressed", frag)
+		}
+	}
+}
+
+// The user prompt must serialise Cooldowns under the documented
+// JSON key with the fields the system prompt references.
+func TestUserPromptIncludesCooldownsBlock(t *testing.T) {
+	fillAt := time.Date(2026, 5, 24, 4, 0, 0, 0, time.UTC)
+	blockedUntil := fillAt.Add(24 * time.Hour)
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+		Cooldowns: []SymbolCooldown{
+			{
+				Symbol:         "AAPL",
+				LastFillSide:   "buy",
+				LastFillAt:     fillAt,
+				BlockedUntil:   blockedUntil,
+				HoursSinceFill: 8.0,
+				HoursRemaining: 16.0,
+			},
+		},
+	})
+	if !strings.Contains(prompt, `"cooldowns"`) {
+		t.Errorf("user prompt missing cooldowns key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"symbol": "AAPL"`) {
+		t.Errorf("AAPL symbol not surfaced under cooldowns:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"lastFillSide": "buy"`) {
+		t.Errorf("lastFillSide missing under cooldowns:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"hoursRemaining": 16`) {
+		t.Errorf("hoursRemaining missing under cooldowns:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"lastFillAt": "2026-05-24T04:00:00Z"`) {
+		t.Errorf("RFC-3339 lastFillAt missing under cooldowns:\n%s", prompt)
+	}
+}
+
+// Empty / nil Cooldowns → no key in prompt.
+func TestUserPromptOmitsCooldownsWhenEmpty(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+	})
+	if strings.Contains(prompt, `"cooldowns"`) {
+		t.Errorf("empty Cooldowns should not appear in prompt:\n%s", prompt)
+	}
+}
+
+// buildCooldownPromptItems drops blank-symbol Locks and rounds the
+// hour counts to one decimal. Locking this contract pins both the
+// safety filter and the prompt-size discipline.
+func TestBuildCooldownPromptItemsDropsBlankAndRounds(t *testing.T) {
+	got := buildCooldownPromptItems([]SymbolCooldown{
+		{Symbol: " ", HoursSinceFill: 1, HoursRemaining: 1},                                                                      // dropped
+		{Symbol: "AAPL", LastFillSide: "buy", HoursSinceFill: 8.273, HoursRemaining: 15.726, LastFillAt: time.Time{}, BlockedUntil: time.Time{}}, // ZERO times → no string
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 surviving row, got %d (%+v)", len(got), got)
+	}
+	if got[0].Symbol != "AAPL" {
+		t.Errorf("expected AAPL, got %q", got[0].Symbol)
+	}
+	if got[0].HoursSinceFill != 8.3 {
+		t.Errorf("HoursSinceFill not rounded to 1dp: got %v", got[0].HoursSinceFill)
+	}
+	if got[0].HoursRemaining != 15.7 {
+		t.Errorf("HoursRemaining not rounded to 1dp: got %v", got[0].HoursRemaining)
+	}
+	if got[0].LastFillAt != "" {
+		t.Errorf("zero LastFillAt should produce empty string, got %q", got[0].LastFillAt)
+	}
+	if got[0].BlockedUntil != "" {
+		t.Errorf("zero BlockedUntil should produce empty string, got %q", got[0].BlockedUntil)
+	}
+}
+
+// roundTenth never produces negative numbers — the cooldown service
+// can only emit non-negative durations, and we clamp here as defence
+// in depth so a defective Lock can't poison the prompt.
+func TestRoundTenthClampsAndRounds(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0, 0},
+		{1.0, 1.0},
+		{1.249, 1.2},
+		{1.25, 1.3}, // banker would round to 1.2; we use half-up
+		{-3.5, 0},
+	}
+	for _, c := range cases {
+		got := roundTenth(c.in)
+		if got != c.want {
+			t.Errorf("roundTenth(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}

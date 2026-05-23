@@ -81,6 +81,12 @@ Adhere to these rules without exception:
        - If regime is "range", mean-reversion sized at the snapshot ceiling is fine; trend-style adds should be sized at half the ceiling because range regimes have low realised follow-through.
        - If a symbol is in input.universe / input.positions but has no quantSnapshots entry, the snapshot pipeline either had no bars (newly listed / illiquid) or the regime classifier returned Unknown. In that case treat the symbol as "no quant prior", default to "watch" for first-time buys, and lean on the debate + fundamental signals for held positions.
        - Cite the snapshot field explicitly in your reasoning when it changes the action ("atrPct=4.8% pushes ceiling to 0.026; sizing the AAPL buy at qtyPct=0.025 to respect the cap" or "regime=chop on TSLA so demoting the bull debate to watch").
+   - When input.cooldowns is present (Sprint B event-driven re-entry locks): every row tells you that THIS fund executed a fill on that symbol within the cooldown window (default 24h) and the symbol is now locked from re-entry. Apply these as a hard veto on flipping the same name:
+       - If a symbol appears in cooldowns, the default action MUST be "watch". Override only when there is a concrete extreme catalyst that wasn't available at the time of the last fill (e.g. an after-hours earnings miss, an M&A announcement, a regulatory halt notice) — and you must name the catalyst in your reasoning field.
+       - When you override, you may propose "reduce" (not "add" / "buy") if the cooldown.lastFillSide is "buy" AND the catalyst is bearish, or "buy" only if lastFillSide is "sell" AND the catalyst is structurally bullish. Same-side re-entry (a second buy on a name you just bought, or a second sell on a name you just sold) is almost always wrong inside the cooldown window and the burden of proof is on the override.
+       - hoursRemaining tells you how tight the lock is. If hoursRemaining > 12 the lock is still strong (we're in the first half of the window) and the bar for override is highest; if hoursRemaining < 6 the lock is about to expire and you may stand pat with a "watch" + a one-line note that the lock will clear by tomorrow.
+       - The auto-execute gateway does NOT enforce cooldown — it is your responsibility to honour it in the plan. Symbols not in the cooldowns block are unconstrained by this rule.
+       - Cite the cooldown row explicitly when it changes your action ("AAPL filled 8h ago (buy), hoursRemaining=16 → forcing watch; no fresh catalyst since the entry").
 
 5. Locale: write reasoning text in the same language the input MacroBriefing / RoundtableConsensus uses (Chinese ⇄ English). If the input is empty or mixed, default to Chinese.
 
@@ -115,6 +121,7 @@ func userPrompt(input DecisionInput) string {
 		LessonReplay        string                       `json:"lessonReplay,omitempty"`
 		QuantSnapshots      []quantSnapshotPromptItem    `json:"quantSnapshots,omitempty"`
 		UniverseRanking     []universeRankingPromptItem  `json:"universeRanking,omitempty"`
+		Cooldowns           []cooldownPromptItem         `json:"cooldowns,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
 		RiskNotes           []string                     `json:"riskNotes,omitempty"`
 	}{
@@ -140,6 +147,7 @@ func userPrompt(input DecisionInput) string {
 		LessonReplay:        strings.TrimSpace(input.LessonReplay),
 		QuantSnapshots:      buildQuantSnapshotPromptItems(input.QuantSnapshots),
 		UniverseRanking:     buildUniverseRankingPromptItems(input.UniverseRanking),
+		Cooldowns:           buildCooldownPromptItems(input.Cooldowns),
 		BuyBudget:           input.BuyBudget,
 		RiskNotes:           input.RiskNotes,
 	}
@@ -271,6 +279,65 @@ func buildUniverseRankingPromptItems(rows []SymbolRanking) []universeRankingProm
 		})
 	}
 	return out
+}
+
+// cooldownPromptItem is the on-the-wire shape for the Sprint B #1
+// per-symbol re-entry lock. Mirrors decision.SymbolCooldown but
+// renders the timestamps as RFC-3339 strings (the LLM handles
+// RFC-3339 much better than Go's default time encoding) and rounds
+// the hour counts to a single decimal so the prompt reads "filled
+// 8.3h ago" rather than "8.27845h".
+type cooldownPromptItem struct {
+	Symbol         string  `json:"symbol"`
+	LastFillSide   string  `json:"lastFillSide,omitempty"`
+	LastFillAt     string  `json:"lastFillAt,omitempty"`
+	BlockedUntil   string  `json:"blockedUntil,omitempty"`
+	HoursSinceFill float64 `json:"hoursSinceFill"`
+	HoursRemaining float64 `json:"hoursRemaining"`
+}
+
+// buildCooldownPromptItems renders a slice of SymbolCooldown into
+// the prompt-facing shape. Drops entries with blank Symbol so a
+// malformed Lock can't poison the prompt — the cooldown.Service
+// already filters these out, but defence in depth is cheap.
+func buildCooldownPromptItems(locks []SymbolCooldown) []cooldownPromptItem {
+	if len(locks) == 0 {
+		return nil
+	}
+	out := make([]cooldownPromptItem, 0, len(locks))
+	for _, l := range locks {
+		if strings.TrimSpace(l.Symbol) == "" {
+			continue
+		}
+		item := cooldownPromptItem{
+			Symbol:         l.Symbol,
+			LastFillSide:   l.LastFillSide,
+			HoursSinceFill: roundTenth(l.HoursSinceFill),
+			HoursRemaining: roundTenth(l.HoursRemaining),
+		}
+		if !l.LastFillAt.IsZero() {
+			item.LastFillAt = l.LastFillAt.UTC().Format("2006-01-02T15:04:05Z")
+		}
+		if !l.BlockedUntil.IsZero() {
+			item.BlockedUntil = l.BlockedUntil.UTC().Format("2006-01-02T15:04:05Z")
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// roundTenth trims a positive duration-in-hours to one decimal
+// place. The cooldown service never produces negative hours, so we
+// skip the signed-rounder path universeRanking uses.
+func roundTenth(v float64) float64 {
+	if v < 0 {
+		v = 0
+	}
+	const scale = 10.0
+	return float64(int64(v*scale+0.5)) / scale
 }
 
 func buildRoundtableDebatePrompt(input DecisionInput) *roundtableDebatePrompt {

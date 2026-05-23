@@ -27,6 +27,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/fundai/server/internal/cooldown"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/ranking"
 )
@@ -44,6 +45,13 @@ type SymbolQuantSnapshot = quantsnapshot.Snapshot
 // so the decision package stays the single import point for
 // prompt-facing types.
 type SymbolRanking = ranking.SymbolRanking
+
+// SymbolCooldown is the prompt-facing shape for the Sprint B #1
+// event-driven cooldown locks. Alias for cooldown.Lock so the
+// decision package stays the single import point for prompt-facing
+// types. Each entry tells the PM "this symbol just had a fill —
+// don't flip it again unless the catalyst is extreme".
+type SymbolCooldown = cooldown.Lock
 
 // DecisionInput is the full context handed to the engine for one
 // decision call. Every field is optional from the engine's
@@ -164,6 +172,18 @@ type DecisionInput struct {
 	// universe size or OHLC unwired); the prompt simply omits the
 	// block.
 	UniverseRanking []SymbolRanking
+
+	// Sprint B #1 (event-driven cooldown). Per-symbol re-entry locks
+	// computed from the fund's own trade_executions: any symbol with
+	// a fill inside the rolling window (default 24h) shows up here
+	// with the rationale (side, hours since fill, hours remaining).
+	// The system prompt teaches the PM to force action=watch on
+	// those names unless an extreme catalyst overrides — directly
+	// suppressing the "buy Monday, reduce Tuesday, add back
+	// Wednesday" churn pattern the famous quant systems explicitly
+	// gate against. Empty / nil = no active cooldowns (or service
+	// unwired); the prompt omits the block.
+	Cooldowns []SymbolCooldown
 
 	// Phase 3A-10 lesson replay. A multi-line block rendered
 	// upstream by attribution.BuildLessonReplay that paraphrases
