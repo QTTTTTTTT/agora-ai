@@ -87,6 +87,13 @@ Adhere to these rules without exception:
        - hoursRemaining tells you how tight the lock is. If hoursRemaining > 12 the lock is still strong (we're in the first half of the window) and the bar for override is highest; if hoursRemaining < 6 the lock is about to expire and you may stand pat with a "watch" + a one-line note that the lock will clear by tomorrow.
        - The auto-execute gateway does NOT enforce cooldown — it is your responsibility to honour it in the plan. Symbols not in the cooldowns block are unconstrained by this rule.
        - Cite the cooldown row explicitly when it changes your action ("AAPL filled 8h ago (buy), hoursRemaining=16 → forcing watch; no fresh catalyst since the entry").
+   - When input.riskBudget is present (Sprint B dynamic risk budget): the block carries the fund's realised annualised vol, the configured vol target, the resulting volScalar (clamp(target/realised, 0.5, 2.0)), the running peak/current NAV pair, the drawdownPct, the ddScalar (clamp(1 - dd/ceiling, 0.4, 1.0)), and the effectivePerTradeRiskPct = basePerTradeRiskPct × volScalar × ddScalar. Use this snapshot to right-size every buy / add:
+       - Treat effectivePerTradeRiskPct as the FUND-LEVEL R-per-trade budget for today. When you choose a qtyPct for a buy / add it should be consistent with this R (no need to do the ATR math yourself — the per-symbol positionSizeCeilingPct already incorporates the baseline R; if effectiveR < base you must scale qtyPct DOWN proportionally to (effectiveR / baseR)).
+       - If volScalar > 1.0 (realised vol below target) the fund is under-deploying. You may size at the per-symbol ceiling and consider one extra position from the high-quality watchlist, BUT only when the regime + ranking + cooldown signals all align. The vol overlay does NOT change your discipline on chop / Q4 / cooldown names.
+       - If volScalar < 1.0 (realised vol above target) the fund is over-its-skis. Cap every qtyPct at the per-symbol ceiling × volScalar and prefer "reduce" actions on high-volatilityZ holders before any new buy is considered.
+       - If ddScalar < 1.0 (the fund is in drawdown) the throttle is engaged. Drop your typical position-count target by one (e.g. instead of 4 new buys, pick 3) and demand at least 0.7 confidence on any buy / add you do propose. When ddScalar is at the 0.4 floor (≥ ddCeiling drawdown) the default action is "watch" across the board unless a candidate has BOTH Q1 ranking AND a debate bullCase with zero dissent.
+       - The riskBudget snapshot is fund-wide, not per-symbol. Symbols you've decided to "reduce" / "sell" for risk reasons aren't constrained by this rule — the throttle is about NEW exposure.
+       - Cite the snapshot when it materially changes sizing ("riskBudget.ddScalar=0.55 forces qtyPct=0.025 instead of the 0.05 ATR ceiling; fund is in 12% drawdown").
 
 5. Locale: write reasoning text in the same language the input MacroBriefing / RoundtableConsensus uses (Chinese ⇄ English). If the input is empty or mixed, default to Chinese.
 
@@ -122,6 +129,7 @@ func userPrompt(input DecisionInput) string {
 		QuantSnapshots      []quantSnapshotPromptItem    `json:"quantSnapshots,omitempty"`
 		UniverseRanking     []universeRankingPromptItem  `json:"universeRanking,omitempty"`
 		Cooldowns           []cooldownPromptItem         `json:"cooldowns,omitempty"`
+		RiskBudget          *riskBudgetPromptItem        `json:"riskBudget,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
 		RiskNotes           []string                     `json:"riskNotes,omitempty"`
 	}{
@@ -148,6 +156,7 @@ func userPrompt(input DecisionInput) string {
 		QuantSnapshots:      buildQuantSnapshotPromptItems(input.QuantSnapshots),
 		UniverseRanking:     buildUniverseRankingPromptItems(input.UniverseRanking),
 		Cooldowns:           buildCooldownPromptItems(input.Cooldowns),
+		RiskBudget:          buildRiskBudgetPromptItem(input.RiskBudget),
 		BuyBudget:           input.BuyBudget,
 		RiskNotes:           input.RiskNotes,
 	}
@@ -337,6 +346,69 @@ func roundTenth(v float64) float64 {
 		v = 0
 	}
 	const scale = 10.0
+	return float64(int64(v*scale+0.5)) / scale
+}
+
+// riskBudgetPromptItem is the on-the-wire shape for the Sprint B
+// #2 dynamic risk-budget throttle. Mirrors riskbudget.Snapshot but
+// rounds the percentage fields to 4 dp so the prompt JSON stays
+// diff-friendly across runs.
+type riskBudgetPromptItem struct {
+	Window                   string  `json:"window"`
+	SampleSize               int     `json:"sampleSize"`
+	BasePerTradeRiskPct      float64 `json:"basePerTradeRiskPct"`
+	RealisedVolAnnualized    float64 `json:"realisedVolAnnualized"`
+	VolTargetAnnualized      float64 `json:"volTargetAnnualized"`
+	VolScalar                float64 `json:"volScalar"`
+	PeakNAV                  float64 `json:"peakNav"`
+	CurrentNAV               float64 `json:"currentNav"`
+	DrawdownPct              float64 `json:"drawdownPct"`
+	DDCeilingPct             float64 `json:"ddCeilingPct"`
+	DDScalar                 float64 `json:"ddScalar"`
+	EffectivePerTradeRiskPct float64 `json:"effectivePerTradeRiskPct"`
+}
+
+// buildRiskBudgetPromptItem returns nil when the snapshot is nil so
+// the prompt simply omits the riskBudget block (matching every
+// other optional prompt-side type). Floats are rounded to 4 dp;
+// NAV figures stay at 2 dp because dollar precision is meaningful
+// at fund scale.
+func buildRiskBudgetPromptItem(snap *SymbolRiskBudgetAlias) *riskBudgetPromptItem {
+	if snap == nil {
+		return nil
+	}
+	return &riskBudgetPromptItem{
+		Window:                   snap.Window,
+		SampleSize:               snap.SampleSize,
+		BasePerTradeRiskPct:      round4Signed(snap.BasePerTradeRiskPct),
+		RealisedVolAnnualized:    round4Signed(snap.RealisedVolAnnualized),
+		VolTargetAnnualized:      round4Signed(snap.VolTargetAnnualized),
+		VolScalar:                round4Signed(snap.VolScalar),
+		PeakNAV:                  round2(snap.PeakNAV),
+		CurrentNAV:               round2(snap.CurrentNAV),
+		DrawdownPct:              round4Signed(snap.DrawdownPct),
+		DDCeilingPct:             round4Signed(snap.DDCeilingPct),
+		DDScalar:                 round4Signed(snap.DDScalar),
+		EffectivePerTradeRiskPct: round4Signed(snap.EffectivePerTradeRiskPct),
+	}
+}
+
+// SymbolRiskBudgetAlias re-exposes RiskBudgetSnapshot under a local
+// name so the build helper above doesn't need to import riskbudget
+// directly — keeps the prompt.go file's import list minimal. The
+// alias is a type alias (=), not a definition, so it costs nothing
+// at runtime and the wiring layer / tests can use either name.
+type SymbolRiskBudgetAlias = RiskBudgetSnapshot
+
+// round2 trims a non-negative float (NAV) to 2 dp. Negative inputs
+// are clamped to 0 — NAVs cannot go negative in a long-only fund
+// and the riskbudget service won't pass negatives anyway, but we
+// stay defensive.
+func round2(v float64) float64 {
+	if v < 0 {
+		v = 0
+	}
+	const scale = 100.0
 	return float64(int64(v*scale+0.5)) / scale
 }
 

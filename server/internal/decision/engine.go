@@ -30,6 +30,7 @@ import (
 	"github.com/fundai/server/internal/cooldown"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/ranking"
+	"github.com/fundai/server/internal/riskbudget"
 )
 
 // SymbolQuantSnapshot is the prompt-facing shape for the per-symbol
@@ -52,6 +53,14 @@ type SymbolRanking = ranking.SymbolRanking
 // types. Each entry tells the PM "this symbol just had a fill —
 // don't flip it again unless the catalyst is extreme".
 type SymbolCooldown = cooldown.Lock
+
+// RiskBudgetSnapshot is the prompt-facing shape for the Sprint B
+// #2 dynamic risk-budget throttle. Alias for riskbudget.Snapshot
+// so the decision package stays the single import point. The
+// snapshot tells the PM the fund's realised vol, peak-to-trough
+// drawdown, the resulting volatility / drawdown scalars, and the
+// effective per-trade R% to size with.
+type RiskBudgetSnapshot = riskbudget.Snapshot
 
 // DecisionInput is the full context handed to the engine for one
 // decision call. Every field is optional from the engine's
@@ -184,6 +193,18 @@ type DecisionInput struct {
 	// gate against. Empty / nil = no active cooldowns (or service
 	// unwired); the prompt omits the block.
 	Cooldowns []SymbolCooldown
+
+	// Sprint B #2 (dynamic risk budget). Single per-fund snapshot
+	// of realised portfolio vol vs target, peak-to-trough drawdown
+	// vs ceiling, and the resulting effective per-trade R%. The
+	// PM prompt instructs the model to size with
+	// effectivePerTradeRiskPct rather than its baseline R, so the
+	// fund scales DOWN automatically in a drawdown and scales UP
+	// when realised vol is well below target (the AHL / Bridgewater
+	// vol-target playbook). nil = no snapshot (service unwired or
+	// insufficient NAV history); the prompt omits the block and the
+	// PM falls back to its static R prior.
+	RiskBudget *RiskBudgetSnapshot
 
 	// Phase 3A-10 lesson replay. A multi-line block rendered
 	// upstream by attribution.BuildLessonReplay that paraphrases

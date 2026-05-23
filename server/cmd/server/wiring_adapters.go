@@ -43,6 +43,7 @@ import (
 	"github.com/fundai/server/internal/ranking"
 	"github.com/fundai/server/internal/repository"
 	"github.com/fundai/server/internal/risk"
+	"github.com/fundai/server/internal/riskbudget"
 	"github.com/fundai/server/internal/sectorflow"
 	"github.com/fundai/server/internal/sentiment"
 	"github.com/fundai/server/internal/sizing"
@@ -1330,6 +1331,14 @@ type runtimePMAgent struct {
 	// 24h after the last fill). nil = no cooldown wiring (legacy
 	// behaviour); the prompt block is then omitted.
 	cooldownSvc *cooldown.Service
+	// riskBudgetSvc is the Sprint B #2 dynamic risk-budget
+	// throttle. Reads nav_snapshots for the fund's NAV history
+	// and emits a single snapshot describing realised vol vs
+	// target, drawdown vs ceiling, and the resulting effective
+	// per-trade R%. nil = no risk-budget wiring (legacy
+	// behaviour); the prompt omits the block and the PM falls
+	// back to its static R prior.
+	riskBudgetSvc *riskbudget.Service
 }
 
 type runtimeRiskAgent struct {
@@ -5584,6 +5593,16 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// repository package and keep the cycle-free
 				// dependency graph intact.
 				cooldownSvc: cooldown.NewService(s.db, cooldown.Options{}),
+				// Sprint B #2: dynamic risk-budget throttle
+				// driven by nav_snapshots. Same nil-DB
+				// guard as cooldown; the default Options
+				// give us 60d lookback, 15% annualised vol
+				// target, 25% drawdown ceiling, and the
+				// canonical AHL-style [0.5, 2.0] vol scalar
+				// band. Operators can later expose per-fund
+				// overrides via fund.config.riskBudget but
+				// Sprint B ships with the platform default.
+				riskBudgetSvc: riskbudget.NewService(s.db, riskbudget.Options{}),
 				// Sprint A #2: cross-sectional ranker shares
 				// the same OHLC fetcher so bars asked for
 				// by the quant snapshot pass come back from
@@ -13694,9 +13713,33 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		QuantSnapshots:      a.buildQuantSnapshots(ctx, profile.Market, universe, decisionPositions),
 		UniverseRanking:     a.buildUniverseRanking(ctx, profile.Market, universe, decisionPositions),
 		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
+		RiskBudget:          a.buildRiskBudget(ctx, fundID, tradingDate),
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
 	}
+}
+
+// buildRiskBudget assembles the Sprint B #2 fund-level risk-budget
+// snapshot. Returns nil when the service isn't wired or when the
+// fund has insufficient NAV history (the snapshot is then omitted
+// from the prompt and the PM falls back to its static R prior).
+//
+// SQL errors are downgraded to a warning log + nil result for the
+// same reason cooldown is: risk budget is advisory, and a transient
+// DB hiccup should never block a PM run.
+func (a *runtimePMAgent) buildRiskBudget(ctx context.Context, fundID string, now time.Time) *decision.RiskBudgetSnapshot {
+	if a == nil || a.riskBudgetSvc == nil {
+		return nil
+	}
+	if strings.TrimSpace(fundID) == "" {
+		return nil
+	}
+	snap, err := a.riskBudgetSvc.BuildSnapshot(ctx, fundID, now)
+	if err != nil {
+		slog.Warn("riskbudget snapshot failed; falling back to static R", "fund_id", fundID, "err", err)
+		return nil
+	}
+	return snap
 }
 
 // buildCooldowns assembles the Sprint B #1 re-entry lock list. Same

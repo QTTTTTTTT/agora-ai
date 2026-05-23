@@ -715,3 +715,110 @@ func TestRoundTenthClampsAndRounds(t *testing.T) {
 		}
 	}
 }
+
+// Sprint B #2: the system prompt must teach the PM how to read the
+// riskBudget block — same loud-fail pattern as cooldowns above.
+func TestSystemPromptDocumentsRiskBudgetRules(t *testing.T) {
+	prompt := systemPrompt()
+	required := []string{
+		"input.riskBudget",
+		"effectivePerTradeRiskPct",
+		"volScalar",
+		"ddScalar",
+		"drawdown",
+	}
+	for _, frag := range required {
+		if !strings.Contains(prompt, frag) {
+			t.Errorf("systemPrompt() missing %q — the riskBudget rule has regressed", frag)
+		}
+	}
+}
+
+// The user prompt must serialise RiskBudget under the documented
+// JSON key with the fields the system prompt references.
+func TestUserPromptIncludesRiskBudgetBlock(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+		RiskBudget: &RiskBudgetSnapshot{
+			Window:                   "60 trading days",
+			SampleSize:               60,
+			BasePerTradeRiskPct:      0.005,
+			RealisedVolAnnualized:    0.18,
+			VolTargetAnnualized:      0.15,
+			VolScalar:                0.83,
+			PeakNAV:                  1.20,
+			CurrentNAV:               1.05,
+			DrawdownPct:              0.125,
+			DDCeilingPct:             0.25,
+			DDScalar:                 0.5,
+			EffectivePerTradeRiskPct: 0.00208,
+		},
+	})
+	if !strings.Contains(prompt, `"riskBudget"`) {
+		t.Errorf("user prompt missing riskBudget key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"window": "60 trading days"`) {
+		t.Errorf("window string missing under riskBudget:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"volScalar": 0.83`) {
+		t.Errorf("volScalar missing/wrong under riskBudget:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"ddScalar": 0.5`) {
+		t.Errorf("ddScalar missing/wrong under riskBudget:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"effectivePerTradeRiskPct": 0.0021`) {
+		t.Errorf("effectivePerTradeRiskPct missing/wrong rounding under riskBudget:\n%s", prompt)
+	}
+	// NAV fields use 2dp rounder; expected outputs.
+	if !strings.Contains(prompt, `"peakNav": 1.2`) {
+		t.Errorf("peakNav missing/wrong under riskBudget:\n%s", prompt)
+	}
+}
+
+// Nil RiskBudget → no key in prompt.
+func TestUserPromptOmitsRiskBudgetWhenNil(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+	})
+	if strings.Contains(prompt, `"riskBudget"`) {
+		t.Errorf("nil RiskBudget should not appear in prompt:\n%s", prompt)
+	}
+}
+
+// buildRiskBudgetPromptItem on nil input returns nil.
+func TestBuildRiskBudgetPromptItemNilSafe(t *testing.T) {
+	if got := buildRiskBudgetPromptItem(nil); got != nil {
+		t.Errorf("buildRiskBudgetPromptItem(nil) = %+v, want nil", got)
+	}
+}
+
+// round2 clamps negatives and rounds half-up to 2dp. Pin the
+// corner behaviour — NAV figures lean on this for the prompt.
+//
+// We deliberately avoid the 1.005 case here: 1.005 has no exact
+// float64 representation (it's stored as ~1.00499999...) so the
+// half-up rounder produces 1.00 — that's a property of IEEE-754,
+// not of round2. The NAV figures we feed in have far more
+// decimals from real NAV calculations so this edge case never
+// surfaces in production.
+func TestRound2(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0, 0},
+		{1.234, 1.23},
+		{1.235, 1.24},
+		{1.215, 1.22}, // half-up on a representable boundary
+		{-3.5, 0},     // clamp negatives
+	}
+	for _, c := range cases {
+		got := round2(c.in)
+		if got != c.want {
+			t.Errorf("round2(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
