@@ -240,3 +240,72 @@ func (t Trace) PresentBlocks() []string {
 	}
 	return out
 }
+
+// AbsentBlocks is the inverse of PresentBlocks: every signal
+// block in the canonical vocabulary that was NOT included in
+// the decision input. Sprint D #1 uses both lists to drive the
+// fundai_decision_input_blocks_total counter (so dashboards
+// can compute presence rate per block, not just hits).
+//
+// Order matches PresentBlocks so the union of the two equals
+// the fixed signal vocabulary in a stable, reviewable order.
+// Adding a new signal requires touching both methods + the
+// SignalsPresence struct.
+func (t Trace) AbsentBlocks() []string {
+	var out []string
+	if !t.Signals.RoundtableStance {
+		out = append(out, "roundtableStance")
+	}
+	if !t.Signals.BullCase {
+		out = append(out, "bullCase")
+	}
+	if !t.Signals.BearCase {
+		out = append(out, "bearCase")
+	}
+	if !t.Signals.QuantCase {
+		out = append(out, "quantCase")
+	}
+	if !t.Signals.SymbolVerdicts {
+		out = append(out, "symbolVerdicts")
+	}
+	if !t.Signals.FundamentalSummary {
+		out = append(out, "fundamentalSummary")
+	}
+	if !t.Signals.SectorRotation {
+		out = append(out, "sectorRotation")
+	}
+	if !t.Signals.NewsSentiment {
+		out = append(out, "newsSentiment")
+	}
+	if !t.Signals.SleeveScorecard {
+		out = append(out, "sleeveScorecard")
+	}
+	if !t.Signals.LessonReplay {
+		out = append(out, "lessonReplay")
+	}
+	if !t.Signals.InstrumentHints {
+		out = append(out, "instrumentHints")
+	}
+	if !t.Signals.QuantSnapshots {
+		out = append(out, "quantSnapshots")
+	}
+	if !t.Signals.UniverseRanking {
+		out = append(out, "universeRanking")
+	}
+	if !t.Signals.Cooldowns {
+		out = append(out, "cooldowns")
+	}
+	if !t.Signals.RiskBudget {
+		out = append(out, "riskBudget")
+	}
+	if !t.Signals.NewsCatalysts {
+		out = append(out, "newsCatalysts")
+	}
+	if !t.Signals.Exposure {
+		out = append(out, "exposure")
+	}
+	if !t.Signals.Correlations {
+		out = append(out, "correlations")
+	}
+	return out
+}

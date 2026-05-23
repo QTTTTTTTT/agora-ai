@@ -2143,6 +2143,36 @@ type serverMetrics struct {
 	positionRefreshFailuresTotal int64
 	positionRefreshRowsTotal     int64
 	positionRefreshDurationMS    int64
+	// Sprint D #1 — PM decision-input observability. These let
+	// us answer "which signal blocks fired today" and "how often
+	// is the portfolio bumping into a guardrail" at a glance.
+	//
+	// decisionInputBlocks keys by `block=NAME,present=true|false`
+	// so dashboards can compute presence rate per block. Cardinality
+	// is bounded by the fixed set of block names (18).
+	//
+	// decisionInputCalls is the denominator: total number of
+	// PM decision inputs assembled (one per fund-day decision).
+	//
+	// decisionExposureBreaches keys by `kind=single_name|sector|
+	// top3|cash_floor`. Cardinality bounded by 4.
+	//
+	// decisionCorrelationHighPairs counts the cumulative number
+	// of high-correlation pairs surfaced. No labels — a single
+	// counter is enough to spot regime changes (sudden
+	// correlation spikes flag a likely systemic move).
+	//
+	// decisionCooldownVetos keys by `symbol=...`. Bounded by the
+	// per-fund universe size (~tens per fund).
+	//
+	// decisionRiskBudgetThrottled keys by `reason=drawdown|
+	// vol_target_zero|disabled`. Cardinality bounded by 3.
+	decisionInputBlocks          map[string]int64
+	decisionInputCalls           int64
+	decisionExposureBreaches     map[string]int64
+	decisionCorrelationHighPairs int64
+	decisionCooldownVetos        map[string]int64
+	decisionRiskBudgetThrottled  map[string]int64
 }
 
 var httpRequestDurationSecondsBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
@@ -2163,6 +2193,10 @@ func newServerMetrics() *serverMetrics {
 		marketplaceReconciliationLast: make(map[string]int64),
 		hardRiskRejections:            make(map[string]int64),
 		lotLedgerFailures:             make(map[string]int64),
+		decisionInputBlocks:           make(map[string]int64),
+		decisionExposureBreaches:      make(map[string]int64),
+		decisionCooldownVetos:         make(map[string]int64),
+		decisionRiskBudgetThrottled:   make(map[string]int64),
 	}
 }
 
@@ -2215,6 +2249,62 @@ func (m *serverMetrics) RecordRefreshPass(rows int, duration time.Duration, fail
 		m.positionRefreshRowsTotal += int64(rows)
 	}
 	m.positionRefreshDurationMS += duration.Milliseconds()
+}
+
+// ObserveDecisionInput records the Sprint D #1 PM-decision-input
+// observability counters from a single decision_input_fingerprint
+// emission. presentBlocks/absentBlocks are the canonical block
+// names from decision.Trace.PresentBlocks() / AbsentBlocks().
+// exposureBreaches lists which guardrail kinds tripped in the
+// snapshot (kept short — typically 0 or 1).
+// highCorrPairs is the number of high-correlation pairs surfaced.
+// cooldownSymbols and riskBudgetReason are non-empty only when the
+// fingerprint shows the respective signal as present and a veto
+// fired (cooldown blocked a symbol) or the dynamic budget actually
+// throttled (drawdown / vol-target zero).
+//
+// Cardinality safety: every label set above is bounded by the
+// fixed signal vocabulary (18 blocks), the breach kind enum (4),
+// the per-fund universe (typically <50), and the throttle reason
+// enum (3). No per-fund label is added — fund-level breakdown
+// stays in logs (decision_input_fingerprint slog records carry
+// fund_id) to keep cardinality predictable.
+func (m *serverMetrics) ObserveDecisionInput(presentBlocks, absentBlocks []string, exposureBreaches []string, highCorrPairs int, cooldownSymbols []string, riskBudgetReason string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.decisionInputCalls++
+	for _, block := range presentBlocks {
+		key := fmt.Sprintf("block=%s,present=true", block)
+		m.decisionInputBlocks[key]++
+	}
+	for _, block := range absentBlocks {
+		key := fmt.Sprintf("block=%s,present=false", block)
+		m.decisionInputBlocks[key]++
+	}
+	for _, kind := range exposureBreaches {
+		if kind == "" {
+			continue
+		}
+		key := fmt.Sprintf("kind=%s", kind)
+		m.decisionExposureBreaches[key]++
+	}
+	if highCorrPairs > 0 {
+		m.decisionCorrelationHighPairs += int64(highCorrPairs)
+	}
+	for _, symbol := range cooldownSymbols {
+		if symbol == "" {
+			continue
+		}
+		key := fmt.Sprintf("symbol=%s", symbol)
+		m.decisionCooldownVetos[key]++
+	}
+	if reason := strings.TrimSpace(riskBudgetReason); reason != "" {
+		key := fmt.Sprintf("reason=%s", reason)
+		m.decisionRiskBudgetThrottled[key]++
+	}
 }
 
 func (m *serverMetrics) ObserveLLM(provider, model, step string, status string, latency time.Duration) {
@@ -2390,6 +2480,40 @@ func (m *serverMetrics) ExportPrometheus() string {
 	)
 	for _, key := range sortedMetricKeys(m.lotLedgerFailures) {
 		lines = append(lines, fmt.Sprintf("fundai_lot_ledger_failures_total{%s} %d", prometheusLabels(key), m.lotLedgerFailures[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_decision_input_calls_total Total PM decision inputs assembled (one per fund-day decision).",
+		"# TYPE fundai_decision_input_calls_total counter",
+		fmt.Sprintf("fundai_decision_input_calls_total %d", m.decisionInputCalls),
+		"# HELP fundai_decision_input_blocks_total Per-block presence count in PM decision inputs. Divide by fundai_decision_input_calls_total to get presence rate.",
+		"# TYPE fundai_decision_input_blocks_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.decisionInputBlocks) {
+		lines = append(lines, fmt.Sprintf("fundai_decision_input_blocks_total{%s} %d", prometheusLabels(key), m.decisionInputBlocks[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_decision_exposure_breaches_total Portfolio concentration guardrail breaches detected during PM decision input assembly.",
+		"# TYPE fundai_decision_exposure_breaches_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.decisionExposureBreaches) {
+		lines = append(lines, fmt.Sprintf("fundai_decision_exposure_breaches_total{%s} %d", prometheusLabels(key), m.decisionExposureBreaches[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_decision_correlation_high_pairs_total Cumulative number of high-correlation candidate-or-held pairs surfaced to the PM prompt.",
+		"# TYPE fundai_decision_correlation_high_pairs_total counter",
+		fmt.Sprintf("fundai_decision_correlation_high_pairs_total %d", m.decisionCorrelationHighPairs),
+		"# HELP fundai_decision_cooldown_vetos_total Per-symbol cooldown vetos surfaced as deterministic blocks in the PM prompt.",
+		"# TYPE fundai_decision_cooldown_vetos_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.decisionCooldownVetos) {
+		lines = append(lines, fmt.Sprintf("fundai_decision_cooldown_vetos_total{%s} %d", prometheusLabels(key), m.decisionCooldownVetos[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_decision_risk_budget_throttled_total Dynamic risk-budget throttles (drawdown / vol target zero / disabled) applied to per-trade R.",
+		"# TYPE fundai_decision_risk_budget_throttled_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.decisionRiskBudgetThrottled) {
+		lines = append(lines, fmt.Sprintf("fundai_decision_risk_budget_throttled_total{%s} %d", prometheusLabels(key), m.decisionRiskBudgetThrottled[key]))
 	}
 	lines = append(lines,
 		"# HELP fundai_marketdata_position_refresh_total Total background position-quote refresher passes that have completed.",

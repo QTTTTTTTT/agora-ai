@@ -1370,6 +1370,13 @@ type runtimePMAgent struct {
 	// OHLC data; the prompt omits the block in that case and
 	// the PM falls back on per-symbol R sizing alone.
 	correlationSvc *correlation.Service
+	// serverMetrics powers Sprint D #1 (Prometheus counters for
+	// PM decision-input observability). Optional — tests that
+	// build a runtimePMAgent directly leave this nil and the
+	// metrics calls become no-ops via the ObserveDecisionInput
+	// receiver-nil guard. Wired by newRuntime when the global
+	// metrics registry is available.
+	serverMetrics *serverMetrics
 }
 
 type runtimeRiskAgent struct {
@@ -5663,6 +5670,12 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// OHLC fetcher degrades to no-op Compute so
 				// the prompt block is simply omitted.
 				correlationSvc: correlation.NewService(s.ohlcFetcher, correlation.Options{}),
+				// Sprint D #1 — Prometheus counters for PM
+				// decision-input observability. Shares the
+				// global metrics registry; nil-safe inside
+				// ObserveDecisionInput so tests that don't
+				// wire metrics keep working.
+				serverMetrics: s.metrics,
 			}
 		}(),
 		&runtimeApprovalGateway{
@@ -13787,6 +13800,47 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	if blocks := trace.PresentBlocks(); len(blocks) > 0 {
 		input.RiskNotes = append(input.RiskNotes,
 			"signal_blocks_present: "+strings.Join(blocks, ", "))
+	}
+
+	// Sprint D #1 — Prometheus counters for signal-block presence,
+	// exposure breach kinds, high-correlation pair count, cooldown
+	// vetos, and dynamic risk-budget throttles. Per-fund cardinality
+	// is intentionally absent: the slog line above carries fund_id
+	// for drill-down, while these counters stay aggregated so the
+	// time series count is bounded and dashboards scale.
+	if a.serverMetrics != nil {
+		var (
+			breachKinds      = input.Exposure.BreachKinds()
+			highCorrPairs    int
+			cooldownSymbols  []string
+			riskBudgetReason string
+		)
+		if input.Correlations != nil {
+			highCorrPairs = len(input.Correlations.HighCorrPairs)
+		}
+		for _, c := range input.Cooldowns {
+			if s := strings.TrimSpace(c.Symbol); s != "" {
+				cooldownSymbols = append(cooldownSymbols, strings.ToUpper(s))
+			}
+		}
+		if rb := input.RiskBudget; rb != nil {
+			switch {
+			case rb.DDScalar > 0 && rb.DDScalar < 1.0:
+				riskBudgetReason = "drawdown_throttle"
+			case rb.VolScalar > 0 && rb.VolScalar < 1.0:
+				riskBudgetReason = "vol_target_throttle"
+			case rb.VolScalar > 1.0:
+				riskBudgetReason = "vol_target_boost"
+			}
+		}
+		a.serverMetrics.ObserveDecisionInput(
+			trace.PresentBlocks(),
+			trace.AbsentBlocks(),
+			breachKinds,
+			highCorrPairs,
+			cooldownSymbols,
+			riskBudgetReason,
+		)
 	}
 
 	return input

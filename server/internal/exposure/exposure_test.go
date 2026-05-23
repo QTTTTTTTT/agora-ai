@@ -307,6 +307,78 @@ func TestComputeBreachesAreSorted(t *testing.T) {
 	}
 }
 
+// BreachKinds classifies each breach string into the
+// Prometheus-safe enum used by Sprint D #1's
+// fundai_decision_exposure_breaches_total counter.
+func TestBreachKindsCoversEveryClass(t *testing.T) {
+	// One of each: single-name, sector, top-3, cash floor.
+	got := Compute(
+		Options{SingleNameCap: 0.20, SectorCap: 0.30, Top3Cap: 0.40, CashFloorPct: 0.10},
+		1000,
+		20,
+		[]Position{
+			{Symbol: "AAPL", Sector: "tech", MarketValue: 400},
+			{Symbol: "JPM", Sector: "finance", MarketValue: 350},
+			{Symbol: "XOM", Sector: "energy", MarketValue: 230},
+		},
+	)
+	kinds := got.BreachKinds()
+	if len(kinds) != len(got.Breaches) {
+		t.Fatalf("BreachKinds len=%d want %d (one per breach)", len(kinds), len(got.Breaches))
+	}
+	// Each kind in the result should be one of the canonical enum values.
+	allowed := map[string]bool{
+		BreachKindSingleName: true,
+		BreachKindSector:     true,
+		BreachKindTop3:       true,
+		BreachKindCashFloor:  true,
+		"other":              true,
+	}
+	for i, k := range kinds {
+		if !allowed[k] {
+			t.Errorf("BreachKinds[%d]=%q not in canonical enum %+v", i, k, got.Breaches[i])
+		}
+	}
+	// Every kind classification must round-trip through the
+	// canonical enum (no surprise "other" for known prefixes).
+	for i, k := range kinds {
+		if k == "other" {
+			t.Errorf("breach %q classified as 'other' — classifier missing a case", got.Breaches[i])
+		}
+	}
+}
+
+// Empty snapshot returns nil kinds (no allocations) so the
+// metrics caller can append directly without nil checks.
+func TestBreachKindsEmptyIsNil(t *testing.T) {
+	snap := Compute(Options{}, 1000, 1000, nil)
+	if kinds := snap.BreachKinds(); kinds != nil {
+		t.Errorf("empty snapshot BreachKinds should be nil, got %+v", kinds)
+	}
+}
+
+// classifyBreach is the lookup helper exposed for callers that
+// already have a breach string. Verify the discriminator matching
+// is strict so a malformed entry doesn't accidentally map onto
+// the wrong kind. The cases below mirror formatBreach /
+// formatCashBreach output formats verbatim.
+func TestClassifyBreachStrictPrefix(t *testing.T) {
+	cases := map[string]string{
+		"BREACH: single-name=AAPL weight=32.0% > cap=25.0%": BreachKindSingleName,
+		"BREACH: sector=tech weight=55.0% > cap=50.0%":      BreachKindSector,
+		"BREACH: top-3=cluster weight=70.0% > cap=60.0%":    BreachKindTop3,
+		"BREACH: cash=2.5% < floor=5.0% (consider releasing a position before any new buy)": BreachKindCashFloor,
+		"BREACH: unknown=XYZ weight=1% > cap=0%":                                            "other",
+		"single-name AAPL 32.0% > 25.0%":                                                    "other",
+		"":                                                                                  "other",
+	}
+	for input, want := range cases {
+		if got := classifyBreach(input); got != want {
+			t.Errorf("classifyBreach(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 // round4 scrubs NaN / Inf / negatives so the prompt fields never
 // carry junk.
 func TestRound4(t *testing.T) {

@@ -260,6 +260,79 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 	}
 }
 
+// AbsentBlocks is the inverse — on an empty input every block
+// should be reported absent, and on an all-signals input the
+// list should be empty.
+func TestAbsentBlocksEmptyInputReportsAllAbsent(t *testing.T) {
+	got := Fingerprint(DecisionInput{}).AbsentBlocks()
+	// 18 canonical signal blocks (matches PresentBlocksKnownVocabulary).
+	if len(got) != 18 {
+		t.Errorf("empty input AbsentBlocks = %d entries, want 18 (%v)", len(got), got)
+	}
+}
+
+// PresentBlocks + AbsentBlocks must partition the canonical
+// signal vocabulary: no overlap, total = 18.
+func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
+	rb := RiskBudgetSnapshot{}
+	corr := CorrelationSnapshot{SampleSize: 2, HighCorrPairs: []HighCorrPair{{Left: "A", Right: "B", Rho: 0.9}}}
+	for _, tc := range []struct {
+		name string
+		in   DecisionInput
+	}{
+		{"empty", DecisionInput{}},
+		{"all_signals", DecisionInput{
+			Universe:           []string{"A"},
+			InstrumentHints:    map[string]InstrumentHint{"A": {}},
+			RoundtableStance:   "x",
+			BullCase:           "x",
+			BearCase:           "x",
+			QuantCase:          "x",
+			SymbolVerdicts:     []RoundtableSymbolVerdict{{}},
+			FundamentalSummary: "x",
+			SectorRotation:     "x",
+			NewsSentiment:      "x",
+			SleeveScorecard:    "x",
+			LessonReplay:       "x",
+			QuantSnapshots:     []SymbolQuantSnapshot{{}},
+			UniverseRanking:    []SymbolRanking{{}},
+			Cooldowns:          []SymbolCooldown{{}},
+			RiskBudget:         &rb,
+			NewsCatalysts:      []SymbolNewsCatalysts{{}},
+			Exposure:           ExposureSnapshot{TotalAssets: 100, PositionCount: 1},
+			Correlations:       &corr,
+		}},
+		{"partial", DecisionInput{
+			BullCase:       "x",
+			BearCase:       "x",
+			QuantSnapshots: []SymbolQuantSnapshot{{}},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := Fingerprint(tc.in)
+			present := tr.PresentBlocks()
+			absent := tr.AbsentBlocks()
+			if len(present)+len(absent) != 18 {
+				t.Errorf("present(%d) + absent(%d) = %d, want 18 (present=%v absent=%v)",
+					len(present), len(absent), len(present)+len(absent), present, absent)
+			}
+			seen := map[string]bool{}
+			for _, b := range present {
+				if seen[b] {
+					t.Errorf("block %q appears twice in present", b)
+				}
+				seen[b] = true
+			}
+			for _, b := range absent {
+				if seen[b] {
+					t.Errorf("block %q appears in both present and absent (no partition)", b)
+				}
+				seen[b] = true
+			}
+		})
+	}
+}
+
 // recordingHandler captures slog records to a slice so the test
 // can inspect their attrs.
 type recordingHandler struct {

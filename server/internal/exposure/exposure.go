@@ -120,6 +120,60 @@ func (s Snapshot) HasSignal() bool {
 	return s.TotalAssets > 0 && (s.PositionCount > 0 || s.CashPct > 0)
 }
 
+// breachKindSingleName, breachKindSector, breachKindTop3, and
+// breachKindCashFloor are the canonical Prometheus-safe kind
+// labels exposed by BreachKinds. Keep this enum stable: the
+// fundai_decision_exposure_breaches_total metric labels by these
+// exact strings and downstream dashboards / alerts depend on
+// them. New breach types added later should extend the enum,
+// not rename existing values.
+const (
+	BreachKindSingleName = "single_name"
+	BreachKindSector     = "sector"
+	BreachKindTop3       = "top3"
+	BreachKindCashFloor  = "cash_floor"
+)
+
+// BreachKinds returns the canonical Prometheus-safe kind labels
+// for every breach in Snapshot.Breaches. Order matches Breaches
+// (Compute pre-sorts so the slice is deterministic). Duplicates
+// are preserved — two single-name breaches surface as
+// ["single_name", "single_name"] so the counter increments
+// twice. Unknown / future breach formats fall back to "other"
+// rather than silently dropping the breach.
+func (s Snapshot) BreachKinds() []string {
+	if len(s.Breaches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.Breaches))
+	for _, b := range s.Breaches {
+		out = append(out, classifyBreach(b))
+	}
+	return out
+}
+
+func classifyBreach(b string) string {
+	// formatBreach emits "BREACH: <bucket>=<name> weight=..." for
+	// single-name / sector / top-3 breaches, and "BREACH: cash="
+	// for the cash floor breach. Inspect the discriminator that
+	// follows the "BREACH: " prefix so a renamed bucket can be
+	// caught in unit tests rather than silently downgraded to
+	// "other".
+	trimmed := strings.TrimPrefix(b, "BREACH: ")
+	switch {
+	case strings.HasPrefix(trimmed, "single-name="):
+		return BreachKindSingleName
+	case strings.HasPrefix(trimmed, "sector="):
+		return BreachKindSector
+	case strings.HasPrefix(trimmed, "top-3="):
+		return BreachKindTop3
+	case strings.HasPrefix(trimmed, "cash="):
+		return BreachKindCashFloor
+	default:
+		return "other"
+	}
+}
+
 // Options configures the caps. The zero value is fine; withDefaults
 // installs the conventional limits used by AQR / Bridgewater /
 // most modern multi-asset funds.

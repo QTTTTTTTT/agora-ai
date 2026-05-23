@@ -2216,6 +2216,70 @@ func TestMetricsExportIncludesHardRiskRejections(t *testing.T) {
 	}
 }
 
+// Sprint D #1: ObserveDecisionInput recorder + Prometheus
+// exposition. Each label set must show up exactly once and
+// match the counter values, and the helper-line header must be
+// emitted so /api/metrics scrapes are valid Prometheus text.
+func TestMetricsExportIncludesDecisionInputSignals(t *testing.T) {
+	metrics := newServerMetrics()
+	metrics.ObserveDecisionInput(
+		[]string{"bullCase", "exposure"},
+		[]string{"riskBudget"},
+		[]string{"single_name", "cash_floor"},
+		3,
+		[]string{"MU", "SNDK"},
+		"drawdown_throttle",
+	)
+	metrics.ObserveDecisionInput(
+		[]string{"bullCase"},
+		[]string{"riskBudget"},
+		nil,
+		0,
+		nil,
+		"",
+	)
+	output := metrics.ExportPrometheus()
+	mustContain := []string{
+		"# TYPE fundai_decision_input_calls_total counter",
+		"fundai_decision_input_calls_total 2",
+		"# TYPE fundai_decision_input_blocks_total counter",
+		"fundai_decision_input_blocks_total{block=\"bullCase\",present=\"true\"} 2",
+		"fundai_decision_input_blocks_total{block=\"exposure\",present=\"true\"} 1",
+		"fundai_decision_input_blocks_total{block=\"riskBudget\",present=\"false\"} 2",
+		"# TYPE fundai_decision_exposure_breaches_total counter",
+		"fundai_decision_exposure_breaches_total{kind=\"single_name\"} 1",
+		"fundai_decision_exposure_breaches_total{kind=\"cash_floor\"} 1",
+		"# TYPE fundai_decision_correlation_high_pairs_total counter",
+		"fundai_decision_correlation_high_pairs_total 3",
+		"# TYPE fundai_decision_cooldown_vetos_total counter",
+		"fundai_decision_cooldown_vetos_total{symbol=\"MU\"} 1",
+		"fundai_decision_cooldown_vetos_total{symbol=\"SNDK\"} 1",
+		"# TYPE fundai_decision_risk_budget_throttled_total counter",
+		"fundai_decision_risk_budget_throttled_total{reason=\"drawdown_throttle\"} 1",
+	}
+	for _, want := range mustContain {
+		if !bytes.Contains([]byte(output), []byte(want)) {
+			t.Errorf("ExportPrometheus missing line: %q", want)
+		}
+	}
+}
+
+// Receiver nil-guard: ObserveDecisionInput must be safe on a
+// nil *serverMetrics so test wirings that omit the registry can
+// still call into PM code paths.
+func TestObserveDecisionInputNilSafe(t *testing.T) {
+	var metrics *serverMetrics
+	metrics.ObserveDecisionInput(
+		[]string{"bullCase"},
+		[]string{"riskBudget"},
+		[]string{"single_name"},
+		1,
+		[]string{"MU"},
+		"drawdown_throttle",
+	)
+	// no panic = pass
+}
+
 func BenchmarkRequestLogger(b *testing.B) {
 	oldLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
