@@ -42,6 +42,7 @@ import (
 	"github.com/fundai/server/internal/marketplace"
 	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/ohlc"
+	"github.com/fundai/server/internal/quality"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/quota"
 	"github.com/fundai/server/internal/ranking"
@@ -1371,6 +1372,13 @@ type runtimePMAgent struct {
 	// adapter) via the wiring layer's earnings.Service constructor.
 	// nil = feature off; the prompt omits the block.
 	earningsSvc *earnings.Service
+	// qualitySvc is the Sprint E #3 cross-sectional quality-factor
+	// score builder. Reuses the cached fundamental.Fetcher the
+	// wiring layer already shares with the FundamentalSummary
+	// renderer so a single per-symbol Fetch covers both. nil =
+	// feature off (fundamental data unwired); the prompt omits
+	// the block.
+	qualitySvc *quality.Service
 	// correlationSvc is the Sprint C #2 pairwise correlation
 	// matrix. Shares the same OHLC fetcher as quantSnapshot and
 	// ranker so the cache layer makes the third pass cheap.
@@ -5676,6 +5684,16 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// classic AQR-style (20d momentum / 20d vol
 				// / 10d $vol; weights 0.5/-0.3/0.2).
 				ranker: ranking.NewRanker(s.ohlcFetcher, ranking.Options{}),
+				// Sprint E #3: cross-sectional quality factor
+				// (Asness/Frazzini/Pedersen "Quality Minus
+				// Junk" decomposition). Shares the cached
+				// fundamental.Fetcher with the rest of the
+				// wiring so the per-symbol Fetch is reused
+				// across QualityScores and the existing
+				// FundamentalSummary renderer. nil fetcher
+				// degrades gracefully (BuildScores returns
+				// nil, the prompt skips the block).
+				qualitySvc: quality.NewService(s.fundamentalFetcher, quality.Options{}),
 				// Sprint C #2: pairwise correlation matrix
 				// over the universe ∪ positions set. Reuses
 				// the same OHLC fetcher so the third pass
@@ -13881,6 +13899,7 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		LessonReplay:        a.buildLessonReplay(ctx, fundID),
 		QuantSnapshots:      a.buildQuantSnapshots(ctx, profile.Market, universe, decisionPositions),
 		UniverseRanking:     a.buildUniverseRanking(ctx, profile.Market, universe, decisionPositions),
+		QualityScores:       a.buildQualityScores(ctx, profile.Market, universe, decisionPositions),
 		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
 		RiskBudget:          a.buildRiskBudget(ctx, fundID, tradingDate),
 		NewsCatalysts:       a.buildNewsCatalysts(ctx, profile.Market, universe, decisionPositions, tradingDate),
@@ -14313,6 +14332,55 @@ func (a *runtimePMAgent) buildUniverseRanking(ctx context.Context, fundMarket st
 		return nil
 	}
 	return a.ranker.BuildRanking(ctx, requests)
+}
+
+// buildQualityScores assembles the Sprint E #3 cross-sectional
+// quality-factor table for the LLM prompt. Same universe ∪
+// positions request set as buildUniverseRanking; the fundamental
+// fetcher's cache makes the second pass effectively free.
+//
+// Returns nil when the quality service isn't wired (legacy /
+// fundamental-disabled builds) or when fewer than MinUniverse
+// (default 3) symbols carry any usable fundamental data — in
+// either case the prompt skips the block and the PM falls back
+// on the existing FundamentalSummary text blob.
+func (a *runtimePMAgent) buildQualityScores(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition) []decision.SymbolQualityScore {
+	if a == nil || a.qualitySvc == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	requests := make([]quality.SymbolRequest, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, quality.SymbolRequest{Symbol: key, Market: market})
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := market
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, quality.SymbolRequest{Symbol: key, Market: mk})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return a.qualitySvc.BuildScores(ctx, requests)
 }
 
 // buildQuantSnapshots assembles the per-symbol regime + ATR +

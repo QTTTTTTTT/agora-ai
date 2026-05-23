@@ -32,6 +32,7 @@ import (
 	"github.com/fundai/server/internal/earnings"
 	"github.com/fundai/server/internal/exposure"
 	"github.com/fundai/server/internal/newsrecall"
+	"github.com/fundai/server/internal/quality"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/ranking"
 	"github.com/fundai/server/internal/riskbudget"
@@ -94,6 +95,14 @@ type EarningsCalendarSnapshot = earnings.Snapshot
 // DecisionInput.EarningsCalendar without importing the earnings
 // package directly.
 type EarningsEvent = earnings.Event
+
+// SymbolQualityScore is the prompt-facing shape for the Sprint
+// E #3 cross-sectional quality factor block. Alias for
+// quality.Score so the decision package stays the single import
+// point for prompt-facing types. Carries the per-symbol
+// Profitability / Growth / Safety z-scores plus the composite
+// the PM sorts by.
+type SymbolQualityScore = quality.Score
 
 // ExposureSnapshot is the prompt-facing shape for the Sprint C
 // #1 portfolio-level concentration check. Alias for
@@ -242,6 +251,24 @@ type DecisionInput struct {
 	// universe size or OHLC unwired); the prompt simply omits the
 	// block.
 	UniverseRanking []SymbolRanking
+
+	// Sprint E #3 (cross-sectional quality factor). One row per
+	// universe symbol with sub-factor z-scores (Profitability /
+	// Growth / Safety) plus the composite CompositeZ and a
+	// 1..4 quartile bucket. Built from the same fundamental.Metrics
+	// the upstream FundamentalSummary string is rendered from —
+	// turning the prose into a structured channel the LLM can
+	// sort / cite / cross-reference against the momentum-based
+	// UniverseRanking. The two rankings are intentionally
+	// orthogonal: UniverseRanking captures price-driven signals
+	// (the "market thinks"), QualityScores captures the
+	// fundamental quality (the "company is"). Top-quartile names
+	// in BOTH are the highest-conviction longs in classical
+	// quality-momentum combo strategies (the AQR QMJ + UMD
+	// double-overlay). Empty / nil = no scores (insufficient
+	// universe coverage or fundamentals unwired); the prompt
+	// simply omits the block.
+	QualityScores []SymbolQualityScore
 
 	// Sprint B #1 (event-driven cooldown). Per-symbol re-entry locks
 	// computed from the fund's own trade_executions: any symbol with

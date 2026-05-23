@@ -46,6 +46,7 @@ type SignalsPresence struct {
 	InstrumentHints    bool `json:"instrument_hints"`
 	QuantSnapshots     bool `json:"quant_snapshots"`
 	UniverseRanking    bool `json:"universe_ranking"`
+	QualityScores      bool `json:"quality_scores"`
 	Cooldowns          bool `json:"cooldowns"`
 	RiskBudget         bool `json:"risk_budget"`
 	NewsCatalysts      bool `json:"news_catalysts"`
@@ -63,6 +64,7 @@ type SignalCounts struct {
 	InstrumentHints   int `json:"instrument_hints"`
 	QuantSnapshots    int `json:"quant_snapshots"`
 	UniverseRanking   int `json:"universe_ranking"`
+	QualityScores     int `json:"quality_scores"`
 	Cooldowns         int `json:"cooldowns"`
 	NewsCatalysts     int `json:"news_catalysts"`
 	EarningsCalendar  int `json:"earnings_calendar"`
@@ -93,6 +95,7 @@ func Fingerprint(in DecisionInput) Trace {
 			InstrumentHints:  len(in.InstrumentHints),
 			QuantSnapshots:   len(in.QuantSnapshots),
 			UniverseRanking:  len(in.UniverseRanking),
+			QualityScores:    len(in.QualityScores),
 			Cooldowns:        len(in.Cooldowns),
 			NewsCatalysts:    len(in.NewsCatalysts),
 			ExposureBreaches: len(in.Exposure.Breaches),
@@ -111,6 +114,7 @@ func Fingerprint(in DecisionInput) Trace {
 			InstrumentHints:    len(in.InstrumentHints) > 0,
 			QuantSnapshots:     len(in.QuantSnapshots) > 0,
 			UniverseRanking:    len(in.UniverseRanking) > 0,
+			QualityScores:      len(in.QualityScores) > 0,
 			Cooldowns:          len(in.Cooldowns) > 0,
 			RiskBudget:         in.RiskBudget != nil,
 			NewsCatalysts:      len(in.NewsCatalysts) > 0,
@@ -154,6 +158,7 @@ func (t Trace) SlogAttrs() []any {
 		slog.Int("count_instrument_hints", t.Counts.InstrumentHints),
 		slog.Int("count_quant_snapshots", t.Counts.QuantSnapshots),
 		slog.Int("count_universe_ranking", t.Counts.UniverseRanking),
+		slog.Int("count_quality_scores", t.Counts.QualityScores),
 		slog.Int("count_cooldowns", t.Counts.Cooldowns),
 		slog.Int("count_news_catalysts", t.Counts.NewsCatalysts),
 		slog.Int("count_earnings_calendar", t.Counts.EarningsCalendar),
@@ -174,6 +179,7 @@ func (t Trace) SlogAttrs() []any {
 		slog.Bool("p_instrument_hints", t.Signals.InstrumentHints),
 		slog.Bool("p_quant_snapshots", t.Signals.QuantSnapshots),
 		slog.Bool("p_universe_ranking", t.Signals.UniverseRanking),
+		slog.Bool("p_quality_scores", t.Signals.QualityScores),
 		slog.Bool("p_cooldowns", t.Signals.Cooldowns),
 		slog.Bool("p_risk_budget", t.Signals.RiskBudget),
 		slog.Bool("p_news_catalysts", t.Signals.NewsCatalysts),
@@ -230,6 +236,9 @@ func (t Trace) PresentBlocks() []string {
 	}
 	if t.Signals.UniverseRanking {
 		out = append(out, "universeRanking")
+	}
+	if t.Signals.QualityScores {
+		out = append(out, "qualityScores")
 	}
 	if t.Signals.Cooldowns {
 		out = append(out, "cooldowns")
@@ -302,6 +311,9 @@ func (t Trace) AbsentBlocks() []string {
 	}
 	if !t.Signals.UniverseRanking {
 		out = append(out, "universeRanking")
+	}
+	if !t.Signals.QualityScores {
+		out = append(out, "qualityScores")
 	}
 	if !t.Signals.Cooldowns {
 		out = append(out, "cooldowns")

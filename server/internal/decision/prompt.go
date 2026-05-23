@@ -74,6 +74,14 @@ Adhere to these rules without exception:
        - Liquidity matters most in crypto / small-cap funds: when liquidityZ is below -1.0 on a candidate buy, halve the qtyPct relative to the ceiling regardless of compositeZ, because impact cost will eat the alpha.
        - High volatilityZ on a Q1 name is fine (it earned the rank) but still subject to the per-symbol ATR ceiling; don't override the ceiling because the symbol is "the most exciting one".
        - When fewer than 3 symbols would land in the ranking the block is omitted entirely; treat its absence as "no cross-sectional signal today, lean harder on the per-symbol blocks above".
+   - When input.qualityScores is present (Sprint E #3 cross-sectional quality factor): every row carries profitabilityZ / growthZ / safetyZ + a single compositeZ + a quartile bucket (1 = top, 4 = bottom) + componentsAvailable (1..3 — how many of the three sub-factors actually had data). Quality scores are FUNDAMENTAL, where universeRanking is PRICE-driven; the two are intentionally orthogonal. Use the table to layer quality on top of the momentum-based ranking:
+       - The highest-conviction long setup is "Q1 universeRanking AND Q1 qualityScores" — the AQR / GMO "Quality at a Reasonable Price" overlay. When both are Q1 you may size at the per-symbol ceiling without requiring extra debate corroboration.
+       - When universeRanking is Q1 but qualityScores is Q4, the rally is happening but the underlying business is junk — common late-cycle behaviour. Cap qtyPct at HALF the per-symbol ceiling and lean toward "watch" unless the bullCase explicitly names a catalyst (a turnaround, an acquisition rumour) that justifies the divergence.
+       - When qualityScores is Q1 but universeRanking is Q4, the business is sound but the market is punishing it — common deep-value setup. You may take a half-ceiling position only if the regime is range / chop (the trend hasn't broken) AND the bearCase doesn't carry a concrete deterioration thesis. Otherwise treat as "watch".
+       - Use the sub-factor decomposition to color the verdict: a positive compositeZ driven purely by safetyZ (low debt) is NOT the same as one driven by profitabilityZ (real ROE). When citing the quality block in your reasoning, name which sub-factor is doing the work ("qualityScores compositeZ=+1.1 driven mostly by profitabilityZ=+1.5; growth and safety roughly neutral").
+       - componentsAvailable=1 means the score is built on a single sub-factor — discount the signal accordingly. A "Q1 quality" verdict built only on safetyZ is materially weaker than one built on all three.
+       - QualityScores are slow-moving (fundamentals change quarterly). Don't expect day-over-day shifts in this block; if you see one, you're looking at a coverage change (a new symbol joined the universe with strong / weak data) rather than a real fundamental move.
+       - When the block is absent treat it as "no fundamental coverage today, lean on the FundamentalSummary text and universeRanking alone". Do NOT infer "low quality" from absence.
    - When input.quantSnapshots is present (Sprint A regime + volatility prior): each entry carries that symbol's regime (trend_up/trend_down/range/chop), the 14-bar ATR in price units (atr14), the same ATR as a percentage of close (atrPct), and an explicit positionSizeCeilingPct. Apply these as a per-symbol filter on top of every other signal:
        - positionSizeCeilingPct is the UPPER BOUND on any qtyPct you assign to a buy or add for that symbol. If you want to size larger you must drop to the ceiling. The number is derived from a 50-bps-per-trade risk budget at a 2× ATR stop, clamped into [0.005, 0.10]; it already respects rule 3's 10% single-order cap so you do NOT need to add your own buffer on top.
        - If regime is "chop", treat any buy/add as exceptional: only propose it when the debate verdict on that symbol is bull AND the news / fundamental block carries a concrete near-term catalyst. Otherwise downgrade to "watch". Chop kills both trend and mean-reversion sleeves; the historical attribution scorecard usually shows red here.
@@ -159,6 +167,7 @@ func userPrompt(input DecisionInput) string {
 		LessonReplay        string                       `json:"lessonReplay,omitempty"`
 		QuantSnapshots      []quantSnapshotPromptItem    `json:"quantSnapshots,omitempty"`
 		UniverseRanking     []universeRankingPromptItem  `json:"universeRanking,omitempty"`
+		QualityScores       []qualityScorePromptItem     `json:"qualityScores,omitempty"`
 		Cooldowns           []cooldownPromptItem         `json:"cooldowns,omitempty"`
 		RiskBudget          *riskBudgetPromptItem        `json:"riskBudget,omitempty"`
 		NewsCatalysts       []newsCatalystPromptItem     `json:"newsCatalysts,omitempty"`
@@ -190,6 +199,7 @@ func userPrompt(input DecisionInput) string {
 		LessonReplay:        strings.TrimSpace(input.LessonReplay),
 		QuantSnapshots:      buildQuantSnapshotPromptItems(input.QuantSnapshots),
 		UniverseRanking:     buildUniverseRankingPromptItems(input.UniverseRanking),
+		QualityScores:       buildQualityScorePromptItems(input.QualityScores),
 		Cooldowns:           buildCooldownPromptItems(input.Cooldowns),
 		RiskBudget:          buildRiskBudgetPromptItem(input.RiskBudget),
 		NewsCatalysts:       buildNewsCatalystPromptItems(input.NewsCatalysts),
@@ -324,6 +334,46 @@ func buildUniverseRankingPromptItems(rows []SymbolRanking) []universeRankingProm
 			LiquidityZ:  round4Signed(r.LiquidityZ),
 			CompositeZ:  round4Signed(r.CompositeZ),
 			Quartile:    r.Quartile,
+		})
+	}
+	return out
+}
+
+// qualityScorePromptItem is the on-the-wire shape for the Sprint
+// E #3 cross-sectional quality factor table. Mirrors
+// decision.SymbolQualityScore but rounds the z-scores so the
+// prompt JSON stays diff-friendly across runs.
+//
+// componentsAvailable lets the LLM discount a Q1 verdict that's
+// built on only a single sub-factor — see the system prompt's
+// "componentsAvailable=1 means …" rule.
+type qualityScorePromptItem struct {
+	Symbol              string  `json:"symbol"`
+	ProfitabilityZ      float64 `json:"profitabilityZ"`
+	GrowthZ             float64 `json:"growthZ"`
+	SafetyZ             float64 `json:"safetyZ"`
+	CompositeZ          float64 `json:"compositeZ"`
+	Quartile            int     `json:"quartile,omitempty"`
+	ComponentsAvailable int     `json:"componentsAvailable"`
+}
+
+// buildQualityScorePromptItems is the analogue of
+// buildUniverseRankingPromptItems for the quality block. Returns
+// nil on an empty input so the prompt omits the block entirely.
+func buildQualityScorePromptItems(rows []SymbolQualityScore) []qualityScorePromptItem {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]qualityScorePromptItem, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, qualityScorePromptItem{
+			Symbol:              r.Symbol,
+			ProfitabilityZ:      round4Signed(r.ProfitabilityZ),
+			GrowthZ:             round4Signed(r.GrowthZ),
+			SafetyZ:             round4Signed(r.SafetyZ),
+			CompositeZ:          round4Signed(r.CompositeZ),
+			Quartile:            r.Quartile,
+			ComponentsAvailable: r.ComponentsAvailable,
 		})
 	}
 	return out

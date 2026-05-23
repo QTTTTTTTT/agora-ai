@@ -222,6 +222,7 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		"riskBudget":         {},
 		"newsCatalysts":      {},
 		"earningsCalendar":   {},
+		"qualityScores":      {},
 		"exposure":           {},
 		"correlations":       {},
 	}
@@ -248,6 +249,7 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		LessonReplay:       "x",
 		QuantSnapshots:     []SymbolQuantSnapshot{{}},
 		UniverseRanking:    []SymbolRanking{{}},
+		QualityScores:      []SymbolQualityScore{{Symbol: "A"}},
 		Cooldowns:          []SymbolCooldown{{}},
 		RiskBudget:         &rb,
 		NewsCatalysts:      []SymbolNewsCatalysts{{}},
@@ -271,14 +273,14 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 // list should be empty.
 func TestAbsentBlocksEmptyInputReportsAllAbsent(t *testing.T) {
 	got := Fingerprint(DecisionInput{}).AbsentBlocks()
-	// 19 canonical signal blocks (matches PresentBlocksKnownVocabulary).
-	if len(got) != 19 {
-		t.Errorf("empty input AbsentBlocks = %d entries, want 19 (%v)", len(got), got)
+	// 20 canonical signal blocks (matches PresentBlocksKnownVocabulary).
+	if len(got) != 20 {
+		t.Errorf("empty input AbsentBlocks = %d entries, want 20 (%v)", len(got), got)
 	}
 }
 
 // PresentBlocks + AbsentBlocks must partition the canonical
-// signal vocabulary: no overlap, total = 19.
+// signal vocabulary: no overlap, total = 20.
 func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 	rb := RiskBudgetSnapshot{}
 	corr := CorrelationSnapshot{SampleSize: 2, HighCorrPairs: []HighCorrPair{{Left: "A", Right: "B", Rho: 0.9}}}
@@ -306,6 +308,7 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			LessonReplay:       "x",
 			QuantSnapshots:     []SymbolQuantSnapshot{{}},
 			UniverseRanking:    []SymbolRanking{{}},
+			QualityScores:      []SymbolQualityScore{{Symbol: "A"}},
 			Cooldowns:          []SymbolCooldown{{}},
 			RiskBudget:         &rb,
 			NewsCatalysts:      []SymbolNewsCatalysts{{}},
@@ -323,8 +326,8 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			tr := Fingerprint(tc.in)
 			present := tr.PresentBlocks()
 			absent := tr.AbsentBlocks()
-			if len(present)+len(absent) != 19 {
-				t.Errorf("present(%d) + absent(%d) = %d, want 19 (present=%v absent=%v)",
+			if len(present)+len(absent) != 20 {
+				t.Errorf("present(%d) + absent(%d) = %d, want 20 (present=%v absent=%v)",
 					len(present), len(absent), len(present)+len(absent), present, absent)
 			}
 			seen := map[string]bool{}
@@ -386,6 +389,34 @@ func TestFingerprintEarningsCalendarEmptySnapshot(t *testing.T) {
 	}
 	if tr.Counts.EarningsCalendar != 0 {
 		t.Errorf("expected count = 0 on empty snapshot, got %d", tr.Counts.EarningsCalendar)
+	}
+}
+
+// Sprint E #3: QualityScores presence + count must flow into the
+// trace fingerprint so dashboards can grep p_quality_scores /
+// count_quality_scores.
+func TestFingerprintQualityScores(t *testing.T) {
+	tr := Fingerprint(DecisionInput{
+		QualityScores: []SymbolQualityScore{
+			{Symbol: "AAPL", CompositeZ: 1.2, Quartile: 1, ComponentsAvailable: 3},
+			{Symbol: "MSFT", CompositeZ: 0.5, Quartile: 2, ComponentsAvailable: 3},
+		},
+	})
+	if !tr.Signals.QualityScores {
+		t.Error("expected p_quality_scores = true")
+	}
+	if tr.Counts.QualityScores != 2 {
+		t.Errorf("expected count_quality_scores = 2, got %d", tr.Counts.QualityScores)
+	}
+	found := false
+	for _, b := range tr.PresentBlocks() {
+		if b == "qualityScores" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'qualityScores' in PresentBlocks, got %v", tr.PresentBlocks())
 	}
 }
 
