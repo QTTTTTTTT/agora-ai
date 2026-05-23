@@ -996,6 +996,103 @@ func TestDecodeFundMarketProfilePreservesSpecializationFields(t *testing.T) {
 	}
 }
 
+// Sprint D #2: per-fund exposure / correlation policy knobs.
+//
+// decodeFundMarketProfile must round-trip the new
+// exposurePolicy / correlationPolicy stanzas verbatim so
+// downstream wiring picks the operator's intent up on the very
+// next decision rather than waiting for a service restart.
+func TestDecodeFundMarketProfilePreservesExposureAndCorrelationPolicies(t *testing.T) {
+	profile := decodeFundMarketProfile(json.RawMessage(`{
+		"market":"us_equity",
+		"exposurePolicy":{"singleNameCapPct":0.15,"sectorCapPct":0.40,"top3CapPct":0.55,"cashFloorPct":0.10},
+		"correlationPolicy":{"lookbackDays":120,"highCorrThreshold":0.6,"maxHighCorrPairs":5}
+	}`))
+	if profile.ExposurePolicy == nil {
+		t.Fatal("expected exposure policy to round-trip")
+	}
+	if v := profile.ExposurePolicy.SingleNameCapPct; v == nil || *v != 0.15 {
+		t.Fatalf("singleNameCapPct = %v, want 0.15", v)
+	}
+	if v := profile.ExposurePolicy.SectorCapPct; v == nil || *v != 0.40 {
+		t.Fatalf("sectorCapPct = %v, want 0.40", v)
+	}
+	if v := profile.ExposurePolicy.Top3CapPct; v == nil || *v != 0.55 {
+		t.Fatalf("top3CapPct = %v, want 0.55", v)
+	}
+	if v := profile.ExposurePolicy.CashFloorPct; v == nil || *v != 0.10 {
+		t.Fatalf("cashFloorPct = %v, want 0.10", v)
+	}
+	if profile.CorrelationPolicy == nil {
+		t.Fatal("expected correlation policy to round-trip")
+	}
+	if v := profile.CorrelationPolicy.LookbackDays; v == nil || *v != 120 {
+		t.Fatalf("lookbackDays = %v, want 120", v)
+	}
+	if v := profile.CorrelationPolicy.HighCorrThreshold; v == nil || *v != 0.6 {
+		t.Fatalf("highCorrThreshold = %v, want 0.6", v)
+	}
+	if v := profile.CorrelationPolicy.MaxHighCorrPairs; v == nil || *v != 5 {
+		t.Fatalf("maxHighCorrPairs = %v, want 5", v)
+	}
+}
+
+// Default (policy unset) should retain the AQR / Bridgewater /
+// Citadel ship defaults so existing funds inherit Sprint C's
+// caps untouched.
+func TestResolveExposureOptionsNilUsesShipDefaults(t *testing.T) {
+	got := resolveExposureOptions(nil)
+	if got.SingleNameCap != 0.25 || got.SectorCap != 0.50 || got.Top3Cap != 0.60 || got.CashFloorPct != 0.05 {
+		t.Errorf("nil policy expected ship defaults, got %+v", got)
+	}
+}
+
+// Partial overrides must leave untouched fields at their
+// defaults (Sprint D #2 lets operators tune one dimension
+// without disturbing the others).
+func TestResolveExposureOptionsPartialOverrideKeepsDefaults(t *testing.T) {
+	cap := 0.10
+	policy := &FundExposurePolicy{CashFloorPct: &cap}
+	got := resolveExposureOptions(policy)
+	if got.CashFloorPct != 0.10 {
+		t.Errorf("CashFloorPct override lost: got %v", got.CashFloorPct)
+	}
+	if got.SingleNameCap != 0.25 || got.SectorCap != 0.50 || got.Top3Cap != 0.60 {
+		t.Errorf("untouched fields drifted from defaults: %+v", got)
+	}
+}
+
+// Correlation policy nil → empty Options (the service falls
+// back to its own withDefaults inside mergeOptions).
+func TestResolveCorrelationOptionsNilReturnsEmpty(t *testing.T) {
+	got := resolveCorrelationOptions(nil)
+	if got.LookbackBars != 0 || got.HighCorrThreshold != 0 || got.MaxPairs != 0 {
+		t.Errorf("nil policy expected empty Options, got %+v", got)
+	}
+}
+
+// Per-fund overrides ride through unchanged so the service's
+// mergeOptions can pick them up.
+func TestResolveCorrelationOptionsTransfersFields(t *testing.T) {
+	lookback := 120
+	thresh := 0.55
+	pairs := 5
+	got := resolveCorrelationOptions(&FundCorrelationPolicy{
+		LookbackDays:      &lookback,
+		HighCorrThreshold: &thresh,
+		MaxHighCorrPairs:  &pairs,
+	})
+	if got.LookbackBars != 120 {
+		t.Errorf("LookbackBars = %d, want 120", got.LookbackBars)
+	}
+	if got.HighCorrThreshold != 0.55 {
+		t.Errorf("HighCorrThreshold = %v, want 0.55", got.HighCorrThreshold)
+	}
+	if got.MaxPairs != 5 {
+		t.Errorf("MaxPairs = %d, want 5", got.MaxPairs)
+	}
+}
+
 func TestBuildFundFocusContextIncludesUniverseFields(t *testing.T) {
 	context := buildFundFocusContext(UserLanguageZH, &repository.Fund{Config: json.RawMessage(`{"market":"crypto","assetClass":"spot","primaryDirection":"tokens","universe":{"mode":"manual","symbols":["BTCUSDT","ETHUSDT"],"themes":["CEX","AI infra"],"sectors":["crypto"],"customFilters":["marketCap>5B"]}}`)})
 	for _, expected := range []string{"市场：crypto", "资产类别：spot", "主要方向：tokens", "标的池模式：manual", "标的池代码：BTCUSDT、ETHUSDT", "标的池主题：CEX、AI infra", "标的池行业：crypto", "标的池自定义过滤器：marketCap>5B"} {

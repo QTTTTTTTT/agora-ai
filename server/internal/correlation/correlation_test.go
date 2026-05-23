@@ -300,6 +300,90 @@ func TestComputeSurfacesHighCorrAndCluster(t *testing.T) {
 
 // Per-symbol fetch failures don't abort the call; the failing
 // symbol is dropped.
+// Sprint D #2: per-fund correlation policy override.
+//
+// ComputeWithOptions must let a per-call override raise the
+// HighCorrThreshold so a fund that wants a stricter "diversifying"
+// floor can opt in without disturbing other funds that share the
+// same Service. The setup mirrors TestComputeSurfacesHighCorrAndCluster
+// but the 0.99 floor kills the CAND<->HELD pairs (|rho|=1 still
+// passes), keeping only the two perfectly-correlated HELD<->HELD
+// edge and the two perfectly-anti-correlated CAND edges.
+func TestComputeWithOptionsHonoursPerCallOverride(t *testing.T) {
+	rets := []float64{0.01, -0.005, 0.02, -0.01, 0.015, -0.008, 0.012, -0.003, 0.025, -0.018,
+		0.009, -0.012, 0.014, -0.007, 0.022, -0.015, 0.011, -0.006, 0.019, -0.013,
+		0.008, -0.011, 0.017, -0.009, 0.013, -0.014, 0.018, -0.016, 0.021, -0.019,
+	}
+	f := newFakeFetcher()
+	f.bySymbol["A|x"] = genBarsFromReturns(rets)
+	// B differs from A by ~0.6 correlation (mix half + noise).
+	mixed := make([]float64, len(rets))
+	for i, r := range rets {
+		if i%2 == 0 {
+			mixed[i] = r
+		} else {
+			mixed[i] = -r * 0.5
+		}
+	}
+	f.bySymbol["B|x"] = genBarsFromReturns(mixed)
+	// Add a third symbol C with returns identical to A so the
+	// fund has 2 held symbols → HeldCluster fires regardless of
+	// the HighCorrPairs filter, letting the snapshot stay
+	// non-nil under both the baseline and the override case.
+	f.bySymbol["C|x"] = genBarsFromReturns(rets)
+	s := NewService(f, Options{LookbackBars: 30, HighCorrThreshold: 0.5})
+	// Baseline: 0.5 floor catches the A<->B pair AND the A<->C
+	// pair (rho=1.0).
+	baseline := s.Compute(context.Background(), []SymbolRequest{
+		{Symbol: "A", Market: "x", Held: true},
+		{Symbol: "B", Market: "x"},
+		{Symbol: "C", Market: "x", Held: true},
+	})
+	if baseline == nil {
+		t.Fatal("expected baseline snapshot")
+	}
+	// Override to 0.99 floor: A<->C (rho=1) still passes; the
+	// A<->B and B<->C edges drop out. So pair count strictly
+	// shrinks even though SampleSize and HeldCluster stay the
+	// same.
+	override := s.ComputeWithOptions(context.Background(), []SymbolRequest{
+		{Symbol: "A", Market: "x", Held: true},
+		{Symbol: "B", Market: "x"},
+		{Symbol: "C", Market: "x", Held: true},
+	}, Options{HighCorrThreshold: 0.99})
+	if override == nil {
+		t.Fatal("expected override snapshot (HeldCluster keeps HasSignal true)")
+	}
+	if len(override.HighCorrPairs) >= len(baseline.HighCorrPairs) {
+		t.Errorf("override HighCorrPairs %d should be < baseline %d", len(override.HighCorrPairs), len(baseline.HighCorrPairs))
+	}
+	if override.HighCorrThreshold != 0.99 {
+		t.Errorf("snapshot HighCorrThreshold = %v, want 0.99 (echoed from override)", override.HighCorrThreshold)
+	}
+}
+
+// mergeOptions: zero override fields leave base untouched;
+// non-zero fields win; out-of-range values snap through
+// withDefaults so a sloppy operator entry can't poison the math.
+func TestMergeOptionsPrefersOverrideAndClamps(t *testing.T) {
+	base := Options{LookbackBars: 60, HighCorrThreshold: 0.7, MaxPairs: 10, Concurrency: 4, PerCallTimeout: 6 * time.Second}
+	got := mergeOptions(base, Options{HighCorrThreshold: 0.45})
+	if got.LookbackBars != 60 {
+		t.Errorf("zero override LookbackBars should keep base 60, got %d", got.LookbackBars)
+	}
+	if got.HighCorrThreshold != 0.45 {
+		t.Errorf("override HighCorrThreshold = %v, want 0.45", got.HighCorrThreshold)
+	}
+	// Out-of-range overrides snap to safe bounds.
+	clamped := mergeOptions(base, Options{HighCorrThreshold: 5.0, LookbackBars: 1})
+	if clamped.HighCorrThreshold != 0.99 {
+		t.Errorf("overshoot HighCorrThreshold should clamp to 0.99, got %v", clamped.HighCorrThreshold)
+	}
+	if clamped.LookbackBars != 20 {
+		t.Errorf("undershoot LookbackBars should clamp to 20, got %d", clamped.LookbackBars)
+	}
+}
+
 func TestComputeTolerantOfFetchErrors(t *testing.T) {
 	rets := []float64{}
 	for i := 0; i < 30; i++ {

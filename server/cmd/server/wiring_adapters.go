@@ -13781,8 +13781,8 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
 		RiskBudget:          a.buildRiskBudget(ctx, fundID, tradingDate),
 		NewsCatalysts:       a.buildNewsCatalysts(ctx, profile.Market, universe, decisionPositions, tradingDate),
-		Exposure:            buildExposureSnapshot(totalAssets, availableCash, decisionPositions, instrumentHints),
-		Correlations:        a.buildCorrelations(ctx, profile.Market, universe, decisionPositions),
+		Exposure:            buildExposureSnapshot(totalAssets, availableCash, decisionPositions, instrumentHints, profile.ExposurePolicy),
+		Correlations:        a.buildCorrelations(ctx, profile.Market, universe, decisionPositions, profile.CorrelationPolicy),
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
 	}
@@ -13851,7 +13851,12 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 // request and asks the correlation service for the snapshot.
 // Returns nil whenever the service / fetcher / sample is too thin
 // (the prompt builder omits the block in that case).
-func (a *runtimePMAgent) buildCorrelations(ctx context.Context, market string, universe []string, positions []decision.DecisionPosition) *decision.CorrelationSnapshot {
+//
+// policy carries the per-fund overrides parsed from
+// fund.config.correlationPolicy. nil = use the service's
+// configured defaults (60-day lookback, 0.7 |rho| floor, 10 max
+// pairs). ComputeWithOptions clamps any out-of-range override.
+func (a *runtimePMAgent) buildCorrelations(ctx context.Context, market string, universe []string, positions []decision.DecisionPosition, policy *FundCorrelationPolicy) *decision.CorrelationSnapshot {
 	if a == nil || a.correlationSvc == nil {
 		return nil
 	}
@@ -13881,7 +13886,7 @@ func (a *runtimePMAgent) buildCorrelations(ctx context.Context, market string, u
 	if len(requests) < 2 {
 		return nil
 	}
-	snap := a.correlationSvc.Compute(ctx, requests)
+	snap := a.correlationSvc.ComputeWithOptions(ctx, requests, resolveCorrelationOptions(policy))
 	if snap == nil {
 		return nil
 	}
@@ -13899,7 +13904,11 @@ func (a *runtimePMAgent) buildCorrelations(ctx context.Context, market string, u
 // This is intentionally pure / cheap so we can call it on every
 // PM run even when totalAssets is zero — exposure.Compute itself
 // degrades gracefully on the zero-NAV path.
-func buildExposureSnapshot(totalAssets, availableCash float64, positions []decision.DecisionPosition, hints map[string]decision.InstrumentHint) decision.ExposureSnapshot {
+//
+// policy carries the per-fund overrides parsed from
+// fund.config.exposurePolicy. nil = use the AQR / Bridgewater /
+// Citadel defaults baked into resolveExposureOptions.
+func buildExposureSnapshot(totalAssets, availableCash float64, positions []decision.DecisionPosition, hints map[string]decision.InstrumentHint, policy *FundExposurePolicy) decision.ExposureSnapshot {
 	if totalAssets <= 0 {
 		return decision.ExposureSnapshot{}
 	}
@@ -13925,16 +13934,62 @@ func buildExposureSnapshot(totalAssets, availableCash float64, positions []decis
 			MarketValue: mv,
 		})
 	}
-	return exposure.Compute(exposure.Options{
-		// Sprint C ships the AQR / Bridgewater / Citadel
-		// conventional caps; per-fund overrides via
-		// fund.config.exposurePolicy can follow once we have
-		// live behaviour to tune against.
+	return exposure.Compute(resolveExposureOptions(policy), totalAssets, availableCash, out)
+}
+
+// resolveExposureOptions overlays the per-fund policy on top of
+// the ship defaults. Nil-safe so callers that don't have a
+// fund.config.exposurePolicy stanza fall through to the
+// production defaults (25/50/60/5). Each pointer field is
+// applied only when set; the resulting Options run through
+// exposure's own withDefaults clamp so out-of-range values
+// snap to safe bounds rather than break the breach math.
+func resolveExposureOptions(policy *FundExposurePolicy) exposure.Options {
+	// Ship defaults (AQR / Bridgewater / Citadel conventions).
+	opts := exposure.Options{
 		SingleNameCap: 0.25,
 		SectorCap:     0.50,
 		Top3Cap:       0.60,
 		CashFloorPct:  0.05,
-	}, totalAssets, availableCash, out)
+	}
+	if policy == nil {
+		return opts
+	}
+	if policy.SingleNameCapPct != nil {
+		opts.SingleNameCap = *policy.SingleNameCapPct
+	}
+	if policy.SectorCapPct != nil {
+		opts.SectorCap = *policy.SectorCapPct
+	}
+	if policy.Top3CapPct != nil {
+		opts.Top3Cap = *policy.Top3CapPct
+	}
+	if policy.CashFloorPct != nil {
+		opts.CashFloorPct = *policy.CashFloorPct
+	}
+	return opts
+}
+
+// resolveCorrelationOptions converts the per-fund policy into
+// the correlation.Options shape ComputeWithOptions consumes.
+// Same nil-safety convention as resolveExposureOptions: nil
+// policy = empty Options (the service falls back to its own
+// configured defaults inside mergeOptions/withDefaults).
+func resolveCorrelationOptions(policy *FundCorrelationPolicy) correlation.Options {
+	if policy == nil {
+		return correlation.Options{}
+	}
+	opts := correlation.Options{}
+	if policy.LookbackDays != nil {
+		opts.LookbackBars = *policy.LookbackDays
+	}
+	if policy.HighCorrThreshold != nil {
+		opts.HighCorrThreshold = *policy.HighCorrThreshold
+	}
+	if policy.MaxHighCorrPairs != nil {
+		opts.MaxPairs = *policy.MaxHighCorrPairs
+	}
+	return opts
 }
 
 // buildNewsCatalysts assembles the Sprint B #3 per-symbol recent
@@ -18612,6 +18667,58 @@ type fundMarketProfile struct {
 	// existing funds created before this field existed transparently
 	// inherit the same value the panel ships with.
 	ActivityRetentionDays *int `json:"activityRetentionDays,omitempty"`
+	// ExposurePolicy is the per-fund override for the Sprint C #1
+	// portfolio-exposure caps. nil = use the AQR / Bridgewater /
+	// Citadel defaults baked into buildExposureSnapshot. Each
+	// inner field is also nullable so an operator can tighten one
+	// dimension (e.g. cap single-name at 15% for a high-conviction
+	// concentrated fund) without disturbing the others.
+	ExposurePolicy *FundExposurePolicy `json:"exposurePolicy,omitempty"`
+	// CorrelationPolicy is the per-fund override for the Sprint C
+	// #2 pairwise correlation matrix. nil = use the package
+	// defaults (60-day lookback, 0.7 |rho| floor, 10 max pairs).
+	// Same nullable-field convention as ExposurePolicy.
+	CorrelationPolicy *FundCorrelationPolicy `json:"correlationPolicy,omitempty"`
+}
+
+// FundExposurePolicy is the per-fund override surface for the
+// Sprint C #1 portfolio guardrails. Each pointer field is a
+// percentage in [0, 1]; nil means "fall back to the package
+// default". All values run through the same withDefaults clamp
+// inside exposure.Options so an out-of-range JSON entry doesn't
+// silently break the breach math.
+type FundExposurePolicy struct {
+	// SingleNameCapPct caps any single position's weight. Default
+	// 0.25 (25%) — the classic concentrated-fund threshold.
+	SingleNameCapPct *float64 `json:"singleNameCapPct,omitempty"`
+	// SectorCapPct caps the aggregate weight of any one sector.
+	// Default 0.50 (50%) — Bridgewater All Weather style.
+	SectorCapPct *float64 `json:"sectorCapPct,omitempty"`
+	// Top3CapPct caps the sum of the top three position weights.
+	// Default 0.60 (60%) — a Citadel-style diversification floor.
+	Top3CapPct *float64 `json:"top3CapPct,omitempty"`
+	// CashFloorPct enforces a minimum cash buffer. Default 0.05
+	// (5%) — the standard "no fully-deployed" guardrail.
+	CashFloorPct *float64 `json:"cashFloorPct,omitempty"`
+}
+
+// FundCorrelationPolicy is the per-fund override surface for the
+// Sprint C #2 pairwise correlation matrix. Same nullable-field
+// convention as FundExposurePolicy so an operator can tune one
+// dimension without disturbing the rest.
+type FundCorrelationPolicy struct {
+	// LookbackDays is the rolling-window size for the daily
+	// returns used by the Pearson math. Default 60 (≈ 3 months);
+	// clamped to [20, 252].
+	LookbackDays *int `json:"lookbackDays,omitempty"`
+	// HighCorrThreshold is the |rho| floor for the HighCorrPairs
+	// list surfaced to the PM. Default 0.7 — the conventional
+	// "diversifying" cutoff. Clamped to [0.3, 0.99].
+	HighCorrThreshold *float64 `json:"highCorrThreshold,omitempty"`
+	// MaxHighCorrPairs caps how many pairs the prompt actually
+	// receives so a degenerate universe doesn't blow the context.
+	// Default 10; clamped to [1, 50].
+	MaxHighCorrPairs *int `json:"maxHighCorrPairs,omitempty"`
 }
 
 // DefaultActivityRetentionDays is the retention horizon applied to a

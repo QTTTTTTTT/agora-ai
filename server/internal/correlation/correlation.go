@@ -165,6 +165,34 @@ type Options struct {
 	PerCallTimeout time.Duration
 }
 
+// mergeOptions overlays any non-zero field from override onto
+// base, then re-clamps the result through withDefaults so an
+// out-of-range value supplied by a per-fund policy doesn't break
+// the math. Zero fields on override mean "stick with base".
+//
+// We intentionally avoid pointers on Options to keep the public
+// type ergonomic; the price is the zero-value-means-default
+// convention, which matches the rest of the package's API.
+func mergeOptions(base, override Options) Options {
+	merged := base
+	if override.LookbackBars != 0 {
+		merged.LookbackBars = override.LookbackBars
+	}
+	if override.HighCorrThreshold != 0 {
+		merged.HighCorrThreshold = override.HighCorrThreshold
+	}
+	if override.MaxPairs != 0 {
+		merged.MaxPairs = override.MaxPairs
+	}
+	if override.Concurrency != 0 {
+		merged.Concurrency = override.Concurrency
+	}
+	if override.PerCallTimeout != 0 {
+		merged.PerCallTimeout = override.PerCallTimeout
+	}
+	return merged.withDefaults()
+}
+
 func (o Options) withDefaults() Options {
 	if o.LookbackBars <= 0 {
 		o.LookbackBars = 60
@@ -238,9 +266,28 @@ func (s *Service) Options() Options {
 // Per-symbol fetch errors do NOT abort the call — the symbol is
 // dropped from the result, the rest continues.
 func (s *Service) Compute(ctx context.Context, requests []SymbolRequest) *Snapshot {
+	return s.ComputeWithOptions(ctx, requests, Options{})
+}
+
+// ComputeWithOptions is the per-call override entry point used by
+// the Sprint D #2 per-fund policy knobs. Any non-zero field on
+// the supplied opts overrides the service's defaults for THIS
+// call only; zero fields fall back to the service-level
+// configuration. Useful when a single shared Service is wired
+// once but individual funds need tighter / looser thresholds
+// (e.g. a concentrated thematic fund opts into a 0.5 high-corr
+// floor, while a diversified macro book stays at the 0.7
+// default).
+//
+// The merge semantics intentionally use the package's
+// withDefaults clamp so an out-of-range override (negative
+// lookback, |rho| > 1, …) snaps to a safe value instead of
+// silently breaking the cluster math.
+func (s *Service) ComputeWithOptions(ctx context.Context, requests []SymbolRequest, opts Options) *Snapshot {
 	if s == nil || s.ohlc == nil {
 		return nil
 	}
+	effective := mergeOptions(s.opts, opts)
 	deduped := dedupeRequests(requests)
 	if len(deduped) < 2 {
 		return nil
@@ -254,7 +301,7 @@ func (s *Service) Compute(ctx context.Context, requests []SymbolRequest) *Snapsh
 		returns []float64
 	}
 	results := make([]slot, len(deduped))
-	limiter := make(chan struct{}, s.opts.Concurrency)
+	limiter := make(chan struct{}, effective.Concurrency)
 	var wg sync.WaitGroup
 	for i, req := range deduped {
 		wg.Add(1)
@@ -262,12 +309,12 @@ func (s *Service) Compute(ctx context.Context, requests []SymbolRequest) *Snapsh
 		go func(i int, req SymbolRequest) {
 			defer wg.Done()
 			defer func() { <-limiter }()
-			fetchCtx, cancel := context.WithTimeout(ctx, s.opts.PerCallTimeout)
+			fetchCtx, cancel := context.WithTimeout(ctx, effective.PerCallTimeout)
 			defer cancel()
 			bars, err := s.ohlc.Fetch(fetchCtx, ohlc.FetchRequest{
 				Symbol:    req.Symbol,
 				Market:    req.Market,
-				LookbackN: s.opts.LookbackBars,
+				LookbackN: effective.LookbackBars,
 			})
 			if err != nil || len(bars) < 20 {
 				return
@@ -322,7 +369,7 @@ func (s *Service) Compute(ctx context.Context, requests []SymbolRequest) *Snapsh
 	// HighCorrPairs.
 	high := make([]HighCorrPair, 0)
 	for _, p := range pairs {
-		if math.Abs(p.rho) < s.opts.HighCorrThreshold {
+		if math.Abs(p.rho) < effective.HighCorrThreshold {
 			continue
 		}
 		left, right := clean[p.i].req.Symbol, clean[p.j].req.Symbol
@@ -341,8 +388,8 @@ func (s *Service) Compute(ctx context.Context, requests []SymbolRequest) *Snapsh
 		}
 		return ai > aj
 	})
-	if len(high) > s.opts.MaxPairs {
-		high = high[:s.opts.MaxPairs]
+	if len(high) > effective.MaxPairs {
+		high = high[:effective.MaxPairs]
 	}
 
 	// CandidateSummaries: for each non-held symbol, find the
@@ -428,9 +475,9 @@ func (s *Service) Compute(ctx context.Context, requests []SymbolRequest) *Snapsh
 	}
 
 	snap := &Snapshot{
-		Window:             windowLabel(s.opts.LookbackBars),
+		Window:             windowLabel(effective.LookbackBars),
 		SampleSize:         len(clean),
-		HighCorrThreshold:  s.opts.HighCorrThreshold,
+		HighCorrThreshold:  effective.HighCorrThreshold,
 		HighCorrPairs:      high,
 		CandidateSummaries: candidates,
 		HeldCluster:        cluster,
