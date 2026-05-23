@@ -423,3 +423,177 @@ func TestLLMDecisionEngineMaxTokensDefaultLeavesRoomForThinkingModels(t *testing
 		t.Errorf("LLMDecisionEngine{MaxTokens:200}.maxTokens() = %d, want 200 — explicit override must win", custom)
 	}
 }
+
+// Sprint A #1: the system prompt must instruct the PM how to read
+// the quantSnapshots block. Pin the exact section markers so a
+// future prompt refactor that drops the regime/ATR rules fails this
+// test loudly rather than silently shipping a model that ignores
+// the new position-size ceiling. The markers are quoted from the
+// prompt itself.
+func TestSystemPromptDocumentsQuantSnapshotRules(t *testing.T) {
+	prompt := systemPrompt()
+	required := []string{
+		"input.quantSnapshots",
+		"positionSizeCeilingPct",
+		"regime is \"chop\"",
+		"regime is \"trend_down\"",
+		"regime is \"trend_up\"",
+		"regime is \"range\"",
+	}
+	for _, frag := range required {
+		if !strings.Contains(prompt, frag) {
+			t.Errorf("systemPrompt() missing %q — the regime + ATR rule block has regressed", frag)
+		}
+	}
+}
+
+// User prompt must serialise QuantSnapshots under the documented
+// JSON key with the same field shapes the system prompt references.
+// Skipped Snapshots (HasSignal == false) are NOT included; this is
+// what keeps the prompt clean on funds whose OHLC pipeline is half-
+// wired.
+func TestUserPromptIncludesQuantSnapshotsBlock(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL", "TSLA", "NEW"},
+		QuantSnapshots: []SymbolQuantSnapshot{
+			{Symbol: "AAPL", Regime: "trend_up", Close: 187.5, ATR14: 2.6, ATRPct: 1.3866, PositionSizeCeilingPct: 0.08},
+			{Symbol: "TSLA", Regime: "chop", Close: 240.2, ATR14: 11.5, ATRPct: 4.7877, PositionSizeCeilingPct: 0.0261},
+			{Symbol: "NEW"}, // no signal — must be dropped
+		},
+	})
+	if !strings.Contains(prompt, `"quantSnapshots"`) {
+		t.Errorf("user prompt missing quantSnapshots key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"regime": "trend_up"`) {
+		t.Errorf("AAPL trend_up regime not in prompt")
+	}
+	if !strings.Contains(prompt, `"regime": "chop"`) {
+		t.Errorf("TSLA chop regime not in prompt")
+	}
+	if !strings.Contains(prompt, `"positionSizeCeilingPct": 0.08`) {
+		t.Errorf("AAPL ceiling not surfaced verbatim:\n%s", prompt)
+	}
+	// The bare-Symbol NEW row must be filtered out — that's the
+	// no-signal contract that keeps the prompt from bloating.
+	if strings.Contains(prompt, `"symbol": "NEW"`) {
+		t.Errorf("bare-Symbol NEW row leaked into prompt:\n%s", prompt)
+	}
+}
+
+// When QuantSnapshots is empty / nil the prompt must omit the key
+// entirely so legacy deployments (OHLC fetcher unwired) don't see a
+// dangling empty array the LLM has to special-case.
+func TestUserPromptOmitsQuantSnapshotsWhenEmpty(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+	})
+	if strings.Contains(prompt, `"quantSnapshots"`) {
+		t.Errorf("empty QuantSnapshots should not appear in prompt:\n%s", prompt)
+	}
+}
+
+// buildQuantSnapshotPromptItems is the function the prompt uses to
+// drop no-signal rows. Locking its contract here makes the rounding
+// + drop behaviour debuggable without rendering the whole prompt.
+func TestBuildQuantSnapshotPromptItemsDropsNoSignalAndRounds(t *testing.T) {
+	got := buildQuantSnapshotPromptItems([]SymbolQuantSnapshot{
+		{Symbol: "A", Regime: "trend_up", Close: 100.0000004, ATR14: 1.500000003, ATRPct: 1.50000045, PositionSizeCeilingPct: 0.0833333333},
+		{Symbol: "B"}, // dropped
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 surviving row, got %d (%+v)", len(got), got)
+	}
+	if got[0].Symbol != "A" {
+		t.Errorf("expected A, got %q", got[0].Symbol)
+	}
+	// All four numeric fields rounded to 6dp (0.0833333333 → 0.083333).
+	if got[0].PositionSizeCeilingPct != 0.083333 {
+		t.Errorf("ceiling not rounded to 6dp: got %v", got[0].PositionSizeCeilingPct)
+	}
+}
+
+// Sprint A #2: the system prompt must teach the PM how to read the
+// universeRanking block — same loud-fail-on-regression pattern as
+// the quantSnapshot rule test above.
+func TestSystemPromptDocumentsUniverseRankingRules(t *testing.T) {
+	prompt := systemPrompt()
+	required := []string{
+		"input.universeRanking",
+		"compositeZ",
+		"Q1",
+		"Q4",
+		"liquidityZ",
+	}
+	for _, frag := range required {
+		if !strings.Contains(prompt, frag) {
+			t.Errorf("systemPrompt() missing %q — the universeRanking rule has regressed", frag)
+		}
+	}
+}
+
+// The user prompt must serialise UniverseRanking under the documented
+// JSON key with the fields the system prompt references.
+func TestUserPromptIncludesUniverseRankingBlock(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"STRONG", "MID", "WEAK"},
+		UniverseRanking: []SymbolRanking{
+			{Symbol: "STRONG", MomentumZ: 1.23, VolatilityZ: -0.4, LiquidityZ: 0.8, CompositeZ: 0.91, Quartile: 1},
+			{Symbol: "MID", MomentumZ: 0, VolatilityZ: 0, LiquidityZ: 0, CompositeZ: 0, Quartile: 2},
+			{Symbol: "WEAK", MomentumZ: -1.23, VolatilityZ: 0.4, LiquidityZ: -0.8, CompositeZ: -0.91, Quartile: 4},
+		},
+	})
+	if !strings.Contains(prompt, `"universeRanking"`) {
+		t.Errorf("user prompt missing universeRanking key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"compositeZ": 0.91`) {
+		t.Errorf("STRONG compositeZ not surfaced:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"quartile": 1`) || !strings.Contains(prompt, `"quartile": 4`) {
+		t.Errorf("quartile labels missing:\n%s", prompt)
+	}
+	// Z-scores get round-to-4dp; check the negative case for the
+	// signed-rounder path.
+	if !strings.Contains(prompt, `"momentumZ": -1.23`) {
+		t.Errorf("negative MomentumZ not preserved with sign:\n%s", prompt)
+	}
+}
+
+// Empty / nil UniverseRanking → no key in prompt.
+func TestUserPromptOmitsUniverseRankingWhenEmpty(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+	})
+	if strings.Contains(prompt, `"universeRanking"`) {
+		t.Errorf("empty UniverseRanking should not appear in prompt:\n%s", prompt)
+	}
+}
+
+// round4Signed handles the negative-number rounding path the
+// universeRanking serialiser relies on. Locking it here so the
+// signed truncation never regresses to a positive-only rounder
+// that would push -1.234 to -1.2339 etc.
+func TestRound4SignedHandlesBothSigns(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0.123456, 0.1235},
+		{-0.123456, -0.1235},
+		{0, 0},
+		{1.99999, 2.0},
+		{-1.99999, -2.0},
+	}
+	for _, c := range cases {
+		got := round4Signed(c.in)
+		if got != c.want {
+			t.Errorf("round4Signed(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}

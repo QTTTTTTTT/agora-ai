@@ -26,7 +26,24 @@ package decision
 import (
 	"context"
 	"time"
+
+	"github.com/fundai/server/internal/quantsnapshot"
+	"github.com/fundai/server/internal/ranking"
 )
+
+// SymbolQuantSnapshot is the prompt-facing shape for the per-symbol
+// regime + ATR + position-size-ceiling block. It is a strict alias
+// for quantsnapshot.Snapshot — kept here so the decision package can
+// declare DecisionInput.QuantSnapshots without forcing every caller
+// to import the helper package. The wiring layer fills it via the
+// shared Builder; tests can set it inline.
+type SymbolQuantSnapshot = quantsnapshot.Snapshot
+
+// SymbolRanking is the prompt-facing shape for the Sprint A #2
+// cross-sectional ranking table. Alias for ranking.SymbolRanking
+// so the decision package stays the single import point for
+// prompt-facing types.
+type SymbolRanking = ranking.SymbolRanking
 
 // DecisionInput is the full context handed to the engine for one
 // decision call. Every field is optional from the engine's
@@ -116,6 +133,37 @@ type DecisionInput struct {
 	// has no closed lots, when no row meets the sample-size
 	// floor, or when attribution isn't wired in.
 	SleeveScorecard string
+
+	// Sprint A #1 (regime + ATR position-size ceiling). Per-symbol
+	// quantitative snapshot the PM prompt consumes verbatim. Each
+	// entry carries the symbol's current regime
+	// (trend_up/trend_down/range/chop/unknown), its 14-bar Wilder
+	// ATR in price units, the ATR as a fraction of close (so the
+	// LLM can reason about cross-symbol relative volatility), and
+	// a position-size ceiling derived from
+	//   risk_budget / (stop_atr_multiple * ATR_pct)
+	// which the prompt instructs the model to treat as an upper
+	// bound on any single buy/add qtyPct for that symbol. Empty
+	// slice = no quant snapshot wired (legacy behaviour); a slice
+	// with zero usable signal per Snapshot.HasSignal is dropped
+	// upstream before the prompt is built. Sprint A research
+	// rationale: Van Tharp / Kelly position sizing literature
+	// consistently shows ATR-anchored ceilings out-Sharpe both
+	// fixed-fractional and equal-weight on multi-regime universes.
+	QuantSnapshots []SymbolQuantSnapshot
+
+	// Sprint A #2 (cross-sectional ranking). One row per universe
+	// symbol with z-scored momentum / volatility / liquidity plus a
+	// composite ranking and 1..4 quartile bucket. Lets the PM ask
+	// "which of these 12 names look strongest relative to the rest
+	// today?" — the workhorse signal of every cross-sectional
+	// strategy at AQR / Two Sigma / Renaissance. The prompt
+	// instructs the model to prefer Q1 names for buys and treat Q4
+	// names as the default watch list, complementing the per-symbol
+	// QuantSnapshots filter. Empty / nil = no ranking (insufficient
+	// universe size or OHLC unwired); the prompt simply omits the
+	// block.
+	UniverseRanking []SymbolRanking
 
 	// Phase 3A-10 lesson replay. A multi-line block rendered
 	// upstream by attribution.BuildLessonReplay that paraphrases

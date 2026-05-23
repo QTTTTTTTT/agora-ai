@@ -37,7 +37,9 @@ import (
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketplace"
 	"github.com/fundai/server/internal/ohlc"
+	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/quota"
+	"github.com/fundai/server/internal/ranking"
 	"github.com/fundai/server/internal/repository"
 	"github.com/fundai/server/internal/risk"
 	"github.com/fundai/server/internal/sectorflow"
@@ -1303,6 +1305,24 @@ type runtimePMAgent struct {
 	// historical wins/losses on cells the mute didn't silence.
 	// Nil → no scorecard injection (legacy behaviour).
 	attribution *attribution.Service
+	// quantSnapshot is the Sprint A #1 per-symbol regime + ATR
+	// + position-size-ceiling builder. The PM calls BuildBatch
+	// for the union of universe + held positions on every
+	// decision pass and feeds the resulting Snapshots into
+	// DecisionInput.QuantSnapshots so the LLM prompt can apply
+	// the per-symbol size cap + regime-aware action rules. Nil
+	// → no snapshots in the prompt (legacy behaviour); the
+	// existing per-symbol RoundtableSymbolVerdict + sleeve
+	// scorecard still drive sizing.
+	quantSnapshot *quantsnapshot.Builder
+	// ranker is the Sprint A #2 cross-sectional ranker. Shares
+	// the same OHLC fetcher as quantSnapshot so the cache layer
+	// makes the second pass effectively free. BuildRanking
+	// returns nil on too-small universes (<3 surviving symbols)
+	// — the prompt block is then omitted, preserving the
+	// pre-Sprint-A behaviour for funds whose universe + history
+	// can't support a meaningful z-score.
+	ranker *ranking.Ranker
 }
 
 type runtimeRiskAgent struct {
@@ -5504,36 +5524,59 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			sectorFlowFetcher:  s.sectorFlowFetcher,
 			sentimentScorer:    buildSentimentScorerFromRuntime(s.runtime, fund.ID, ownerUserID),
 		},
-		&runtimePMAgent{
-			planRepo:       planRepo,
-			fundRepo:       fundRepo,
-			positionRepo:   positionRepo,
-			teamRepo:       teamRepo,
-			agentRepo:      agentRepo,
-			marketData:     s.marketData,
-			tradeRepo:      tradeRepo,
-			decisionEngine: buildLLMDecisionEngine(s.runtime, fund.ID),
-			lotRepo:        lotRepo,
-			exitManager:    exitmanager.NewService(),
-			// regimeService is OPTIONAL — when s.ohlcFetcher is
-			// nil (single-binary smoke / OHLC disabled builds)
-			// the constructor returns a Service that always
-			// answers Unknown, which the wiring treats as
-			// "skip the tag". No need to fork the construction.
-			regimeService: regime.NewService(s.ohlcFetcher),
-			ohlcFetcher:   s.ohlcFetcher,
-			// Phase 3A-5: re-using the memory repo for the
-			// attribution lesson gate. The daily-review hook
-			// already builds one inside runtimeMemorySystem;
-			// here we share the repo so the PMAgent can fold
-			// active lessons into strategy.Service mutes.
-			memoryRepo: memoryRepo,
-			// Phase 3A-7: same attribution service the daily
-			// review and the HTTP endpoint share. Nil-safe:
-			// when s.attribution is nil (legacy / smoke
-			// builds) the PMAgent skips the scorecard step.
-			attribution: s.attribution,
-		},
+		func() *runtimePMAgent {
+			// Sprint A #1: regime service + ATR snapshot builder
+			// share the same OHLC fetcher so a single fetch per
+			// (symbol, day) feeds both the regime classifier AND
+			// the volatility math. The builder is intentionally
+			// constructed even when s.ohlcFetcher is nil — its
+			// BuildBatch then returns nil and the prompt gets no
+			// quantSnapshots block, preserving legacy behaviour.
+			regimeSvc := regime.NewService(s.ohlcFetcher)
+			return &runtimePMAgent{
+				planRepo:       planRepo,
+				fundRepo:       fundRepo,
+				positionRepo:   positionRepo,
+				teamRepo:       teamRepo,
+				agentRepo:      agentRepo,
+				marketData:     s.marketData,
+				tradeRepo:      tradeRepo,
+				decisionEngine: buildLLMDecisionEngine(s.runtime, fund.ID),
+				lotRepo:        lotRepo,
+				exitManager:    exitmanager.NewService(),
+				// regimeService is OPTIONAL — when s.ohlcFetcher is
+				// nil (single-binary smoke / OHLC disabled builds)
+				// the constructor returns a Service that always
+				// answers Unknown, which the wiring treats as
+				// "skip the tag". No need to fork the construction.
+				regimeService: regimeSvc,
+				ohlcFetcher:   s.ohlcFetcher,
+				// Phase 3A-5: re-using the memory repo for the
+				// attribution lesson gate. The daily-review hook
+				// already builds one inside runtimeMemorySystem;
+				// here we share the repo so the PMAgent can fold
+				// active lessons into strategy.Service mutes.
+				memoryRepo: memoryRepo,
+				// Phase 3A-7: same attribution service the daily
+				// review and the HTTP endpoint share. Nil-safe:
+				// when s.attribution is nil (legacy / smoke
+				// builds) the PMAgent skips the scorecard step.
+				attribution: s.attribution,
+				// Sprint A #1: same regimeSvc + ohlcFetcher
+				// pair. Options defaults are deliberate
+				// (50bps risk, 2x ATR stop, 0.5%-10% ceiling)
+				// — operators tuning these per-fund will go
+				// through a config knob in a follow-up PR.
+				quantSnapshot: quantsnapshot.NewBuilder(regimeSvc, s.ohlcFetcher, quantsnapshot.Options{}),
+				// Sprint A #2: cross-sectional ranker shares
+				// the same OHLC fetcher so bars asked for
+				// by the quant snapshot pass come back from
+				// cache. Options defaults are intentionally
+				// classic AQR-style (20d momentum / 20d vol
+				// / 10d $vol; weights 0.5/-0.3/0.2).
+				ranker: ranking.NewRanker(s.ohlcFetcher, ranking.Options{}),
+			}
+		}(),
 		&runtimeApprovalGateway{
 			planRepo:  planRepo,
 			fundRepo:  fundRepo,
@@ -13632,9 +13675,129 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		NewsSentiment:       newsSentiment,
 		SleeveScorecard:     a.buildSleeveScorecard(ctx, fundID),
 		LessonReplay:        a.buildLessonReplay(ctx, fundID),
+		QuantSnapshots:      a.buildQuantSnapshots(ctx, profile.Market, universe, decisionPositions),
+		UniverseRanking:     a.buildUniverseRanking(ctx, profile.Market, universe, decisionPositions),
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
 	}
+}
+
+// buildUniverseRanking assembles the Sprint A #2 cross-sectional
+// ranking table. Same candidate set as buildQuantSnapshots so the
+// OHLC fetch cache satisfies the second pass for free. Returns nil
+// when the ranker isn't wired (legacy / OHLC-disabled builds) or
+// when the universe is too small for a meaningful z-score (the
+// Ranker enforces a MinUniverse=3 floor).
+func (a *runtimePMAgent) buildUniverseRanking(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition) []decision.SymbolRanking {
+	if a == nil || a.ranker == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	requests := make([]ranking.SymbolRequest, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, ranking.SymbolRequest{Symbol: key, Market: market})
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := market
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, ranking.SymbolRequest{Symbol: key, Market: mk})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return a.ranker.BuildRanking(ctx, requests)
+}
+
+// buildQuantSnapshots assembles the per-symbol regime + ATR +
+// position-size-ceiling block for the LLM prompt. Sprint A #1.
+//
+// The candidate set is the union of the configured universe and the
+// current holdings (so the prompt can size both first-time buys AND
+// proposed reduces against the same volatility unit). Snapshots
+// without any usable signal — typically newly listed symbols whose
+// daily history is shorter than ATRPeriod+1 — are dropped here so
+// the prompt only sees rows that actually carry information.
+//
+// Returns nil when the builder isn't wired (legacy / smoke builds);
+// the prompt simply omits the quantSnapshots key in that case.
+func (a *runtimePMAgent) buildQuantSnapshots(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition) []decision.SymbolQuantSnapshot {
+	if a == nil || a.quantSnapshot == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	// Dedup keyed on upper-cased symbol; the snapshot builder also
+	// dedups internally but that drops the (symbol, market) tuple,
+	// while we want a single Snapshot per symbol regardless of
+	// market source. Universe symbols inherit the fund market; held
+	// positions carry their own per-row market via DecisionPosition.
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	requests := make([]quantsnapshot.SymbolRequest, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, quantsnapshot.SymbolRequest{Symbol: key, Market: market})
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := market
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, quantsnapshot.SymbolRequest{Symbol: key, Market: mk})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	snapshots := a.quantSnapshot.BuildBatch(ctx, requests)
+	if len(snapshots) == 0 {
+		return nil
+	}
+	// Drop snapshots that carry no signal so the prompt JSON doesn't
+	// bloat with one no-op row per universe entry on funds whose
+	// OHLC pipeline is half-wired.
+	out := make([]decision.SymbolQuantSnapshot, 0, len(snapshots))
+	for _, s := range snapshots {
+		if !s.HasSignal() {
+			continue
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // buildSleeveScorecard renders the attribution scorecard for the
