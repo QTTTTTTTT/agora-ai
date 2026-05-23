@@ -381,7 +381,19 @@ func newLLMRuntime(ctx context.Context, modelConfigs *subscription.ModelConfigSe
 	// retry the same request against the next provider in the chain.
 	// Auto-switch-back is automatic — each new Chat() call starts at
 	// the head of the chain.
-	client.SetFailoverConfig(llm.DefaultFailoverConfig())
+	// The failover chain's primary providers come from the
+	// production defaults (openai / deepseek / etc.). On envs
+	// where only the platform-default provider (gemini / claude /
+	// whatever LLM_PROVIDER points at) has a populated API key,
+	// the default chain can exhaust without ever hitting the only
+	// reachable provider. WithPlatformDefault appends LLM_PROVIDER
+	// to every tier chain as a guaranteed safety net so an agent
+	// configured for an unkeyed provider can still get serviced
+	// instead of failing with the "every researcher failed"
+	// pattern surfaced during Sprint C verification.
+	platformDefault := llm.Provider(strings.ToLower(strings.TrimSpace(defaults.Global.Provider)))
+	failoverCfg := llm.DefaultFailoverConfig().WithPlatformDefault(platformDefault)
+	client.SetFailoverConfig(failoverCfg)
 	runtime.client = client
 	runtime.router = router
 	runtime.budgetService = budgetService

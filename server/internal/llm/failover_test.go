@@ -2,6 +2,7 @@ package llm
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -41,6 +42,118 @@ func TestShouldFailoverServerErrorIsTrue(t *testing.T) {
 		if !ShouldFailover(err) {
 			t.Errorf("reason=%q must trigger failover", reason)
 		}
+	}
+}
+
+// ErrMissingCredentials must trigger failover. This is the live-
+// debugging scenario from Sprint C verification: an agent
+// configured for provider=claude but the env only carries
+// LLM_API_KEY for the platform default (gemini). Without this
+// case, the debate roundtable fails every round and the PM falls
+// back to the legacy text-concat consensus, silently dropping
+// the structured RoundtableStance / BullCase / BearCase blocks
+// from the prompt.
+func TestShouldFailoverMissingCredentialsIsTrue(t *testing.T) {
+	if !ShouldFailover(ErrMissingCredentials) {
+		t.Fatal("plain ErrMissingCredentials must trigger failover")
+	}
+	// errors.Is must match through wrapping (the chatOnce wrap is
+	// `fmt.Errorf("...: %w", ErrMissingCredentials)`).
+	wrapped := fmt.Errorf("llm: no API key available for provider claude: %w", ErrMissingCredentials)
+	if !ShouldFailover(wrapped) {
+		t.Fatal("wrapped ErrMissingCredentials must trigger failover (errors.Is regression)")
+	}
+}
+
+// WithPlatformDefault appends the supplied provider to every tier
+// chain that doesn't already list it and bumps MaxAttempts past
+// the longest chain length so a primary provider that isn't
+// itself in the chain can still walk every entry. Locked here
+// because the Sprint C live-verification depended on this exact
+// behaviour: an environment whose only configured key was
+// LLM_API_KEY (provider=gemini) couldn't service tier=standard
+// until gemini was guaranteed both a chain slot AND enough
+// attempts to be reached from an off-chain primary like claude.
+func TestWithPlatformDefaultAppendsAndBumpsAttempts(t *testing.T) {
+	cfg := DefaultFailoverConfig().WithPlatformDefault(ProviderGemini)
+	for tier, chain := range cfg.TierChains {
+		if len(chain) == 0 {
+			t.Fatalf("tier %s chain empty after WithPlatformDefault", tier)
+		}
+		seen := false
+		for _, p := range chain {
+			if p == ProviderGemini {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("tier %s missing ProviderGemini after WithPlatformDefault: %v", tier, chain)
+		}
+	}
+	maxChain := 0
+	for _, chain := range cfg.TierChains {
+		if len(chain) > maxChain {
+			maxChain = len(chain)
+		}
+	}
+	// MUST be strictly > longest chain so an off-chain primary
+	// (e.g. claude when standard chain is [deepseek, openai,
+	// qwen, gemini]) gets one attempt for itself + one per
+	// chain entry.
+	if cfg.MaxAttempts < maxChain+1 {
+		t.Errorf("MaxAttempts=%d must be >= longest chain + 1 (%d)", cfg.MaxAttempts, maxChain+1)
+	}
+}
+
+// WithPlatformDefault is idempotent: applying the same default
+// twice doesn't duplicate the entry.
+func TestWithPlatformDefaultIdempotent(t *testing.T) {
+	first := DefaultFailoverConfig().WithPlatformDefault(ProviderGemini)
+	second := first.WithPlatformDefault(ProviderGemini)
+	for tier, chain := range second.TierChains {
+		count := 0
+		for _, p := range chain {
+			if p == ProviderGemini {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("tier %s has ProviderGemini %d times after idempotent re-apply: %v", tier, count, chain)
+		}
+	}
+}
+
+// Empty / whitespace provider is a no-op (Sprint C wiring passes
+// strings.TrimSpace(LLM_PROVIDER); an unset env should not corrupt
+// the chain).
+func TestWithPlatformDefaultEmptyIsNoOp(t *testing.T) {
+	base := DefaultFailoverConfig()
+	got := base.WithPlatformDefault("")
+	for tier, baseChain := range base.TierChains {
+		gotChain := got.TierChains[tier]
+		if len(gotChain) != len(baseChain) {
+			t.Errorf("tier %s chain altered by empty default: got %v, want %v", tier, gotChain, baseChain)
+		}
+		for i := range baseChain {
+			if baseChain[i] != gotChain[i] {
+				t.Errorf("tier %s chain altered by empty default: got %v, want %v", tier, gotChain, baseChain)
+			}
+		}
+	}
+	got2 := base.WithPlatformDefault("   ")
+	if got2.MaxAttempts != base.MaxAttempts {
+		t.Errorf("whitespace default must not change MaxAttempts (got %d, want %d)", got2.MaxAttempts, base.MaxAttempts)
+	}
+}
+
+// WithPlatformDefault must not mutate the receiver — needed so the
+// runtime wiring can re-derive failover configs across reloads.
+func TestWithPlatformDefaultDoesNotMutateReceiver(t *testing.T) {
+	original := DefaultFailoverConfig()
+	originalCritical := append([]Provider{}, original.TierChains[TierCritical]...)
+	_ = original.WithPlatformDefault(ProviderGemini)
+	if len(original.TierChains[TierCritical]) != len(originalCritical) {
+		t.Errorf("WithPlatformDefault mutated receiver chain: %v", original.TierChains[TierCritical])
 	}
 }
 

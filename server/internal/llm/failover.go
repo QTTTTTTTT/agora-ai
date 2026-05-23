@@ -44,9 +44,13 @@ type FailoverConfig struct {
 // Rationale: the primary for each tier is the provider chosen by the
 // existing platform default; fallbacks add vendor diversity so a
 // vendor-wide outage doesn't take down the whole workflow.
+//
+// MaxAttempts is sized at 4 so a chain of three preferred providers
+// still has one slot left for the platform-default safety net
+// appended by WithPlatformDefault below.
 func DefaultFailoverConfig() FailoverConfig {
 	return FailoverConfig{
-		MaxAttempts: 3,
+		MaxAttempts: 4,
 		TierChains: map[ModelTier][]Provider{
 			TierCritical: {ProviderOpenAI, ProviderClaude, ProviderGemini},
 			TierStandard: {ProviderDeepSeek, ProviderOpenAI, ProviderQwen},
@@ -55,10 +59,74 @@ func DefaultFailoverConfig() FailoverConfig {
 	}
 }
 
+// WithPlatformDefault returns a copy of cfg with the supplied
+// provider appended to every tier chain that doesn't already list
+// it. The MaxAttempts cap is bumped to len(longest_chain) so the
+// extra fallback has a slot in every tier.
+//
+// Sprint C verification rationale: the local / staging env
+// typically configures LLM_API_KEY + LLM_PROVIDER (e.g. gemini)
+// without populating provider-specific keys (OPENAI_API_KEY,
+// CLAUDE_API_KEY, …). The default chain might not include the
+// platform-default provider for every tier, which means an
+// agent configured for one of the unkeyed providers exhausts the
+// chain before reaching the only-keyed provider. Appending the
+// platform default to every chain prevents that whole class of
+// "every researcher failed" symptoms.
+//
+// A zero / empty provider is a no-op so callers can pass an
+// unconfigured ChatRequest.Owner-less router safely.
+func (c FailoverConfig) WithPlatformDefault(provider Provider) FailoverConfig {
+	trimmed := Provider(strings.ToLower(strings.TrimSpace(string(provider))))
+	if trimmed == "" {
+		return c
+	}
+	out := FailoverConfig{
+		MaxAttempts: c.MaxAttempts,
+		TierChains:  make(map[ModelTier][]Provider, len(c.TierChains)),
+	}
+	maxChain := 0
+	for tier, chain := range c.TierChains {
+		copied := make([]Provider, len(chain))
+		copy(copied, chain)
+		alreadyPresent := false
+		for _, p := range copied {
+			if Provider(strings.ToLower(strings.TrimSpace(string(p)))) == trimmed {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
+			copied = append(copied, trimmed)
+		}
+		if len(copied) > maxChain {
+			maxChain = len(copied)
+		}
+		out.TierChains[tier] = copied
+	}
+	// maxChain + 1 covers the "primary provider isn't in the
+	// chain at all" case (an agent configured for an
+	// off-chain provider like claude when the standard chain
+	// is [deepseek, openai, qwen, gemini]). In that case
+	// nextProvider returns chain[0] as the first fallback, so
+	// the loop still needs len(chain) additional attempts
+	// after the primary to walk the full chain. Without this,
+	// the very last entry (typically the platform default we
+	// just appended) never gets tried.
+	if out.MaxAttempts < maxChain+1 {
+		out.MaxAttempts = maxChain + 1
+	}
+	return out
+}
+
 // ShouldFailover decides whether a given error should trigger the next
 // fallback in the chain. Returns true for:
 //   - circuit breaker open (primary cooled off by the rate limiter)
 //   - 5xx / 429 / timeout / network failures from the actual call
+//   - missing-credentials for the requested provider (operator has an
+//     agent pointed at a provider whose API key was never configured —
+//     deterministic, won't fix on retry of the same provider; the next
+//     provider in the chain is the only chance of success)
 //
 // Returns false for:
 //   - 4xx validation errors (won't succeed on a different provider)
@@ -71,6 +139,9 @@ func ShouldFailover(err error) bool {
 	}
 	if errors.Is(err, ErrCallBudgetExceeded) {
 		return false
+	}
+	if errors.Is(err, ErrMissingCredentials) {
+		return true
 	}
 	if IsCircuitOpen(err) {
 		return true

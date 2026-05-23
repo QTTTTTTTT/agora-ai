@@ -308,7 +308,15 @@ func (c *MultiProviderClient) chatOnce(ctx context.Context, req ChatRequest) (*C
 		return nil, fmt.Errorf("llm: failed to resolve model for request (tier=%s, step=%s)", req.ModelTier, req.StepName)
 	}
 	if config.APIKey == "" {
-		return nil, fmt.Errorf("llm: no API key available for provider %s", config.Provider)
+		// Wrap the missing-key error in the sentinel so the
+		// failover layer can route around an agent whose
+		// provider key was never configured. This is the most
+		// common cause of "every researcher failed" in local /
+		// staging envs where a single API key (LLM_API_KEY) is
+		// configured but per-agent overrides point at provider-
+		// specific keys (CLAUDE_API_KEY, OPENAI_API_KEY, ...)
+		// that the operator hasn't set.
+		return nil, fmt.Errorf("llm: no API key available for provider %s: %w", config.Provider, ErrMissingCredentials)
 	}
 
 	cache := c.chatCache()

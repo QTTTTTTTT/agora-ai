@@ -13,6 +13,15 @@ import (
 // lower-cost logic when possible.
 var ErrCallBudgetExceeded = errors.New("llm: call budget exceeded for owner/step")
 
+// ErrMissingCredentials is the sentinel returned by chatOnce when the
+// resolved provider config has no API key. Callers (and the failover
+// layer) match this with errors.Is so they can transparently move to
+// the next provider in the chain rather than surface a hard "no API
+// key" to the workflow step. Triggered most often when an operator
+// has an agent configured for a specific provider (e.g. claude) but
+// the env only has LLM_API_KEY / OPENAI_API_KEY etc. populated.
+var ErrMissingCredentials = errors.New("llm: missing provider credentials")
+
 // CallBudgetConfig controls short-window LLM call budgets. Zero values disable
 // the budget limiter.
 type CallBudgetConfig struct {
