@@ -25,8 +25,10 @@ import (
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/cooldown"
 	"github.com/fundai/server/internal/debate"
+	"github.com/fundai/server/internal/correlation"
 	"github.com/fundai/server/internal/decision"
 	"github.com/fundai/server/internal/exitmanager"
+	"github.com/fundai/server/internal/exposure"
 	"github.com/fundai/server/internal/regime"
 	"github.com/fundai/server/internal/strategy"
 	"github.com/fundai/server/internal/fundamental"
@@ -1349,6 +1351,13 @@ type runtimePMAgent struct {
 	// the block and the PM falls back on the existing
 	// NewsSentiment text blob.
 	newsCatalystSvc *newsrecall.Service
+	// correlationSvc is the Sprint C #2 pairwise correlation
+	// matrix. Shares the same OHLC fetcher as quantSnapshot and
+	// ranker so the cache layer makes the third pass cheap.
+	// Compute returns nil when fewer than 2 symbols have usable
+	// OHLC data; the prompt omits the block in that case and
+	// the PM falls back on per-symbol R sizing alone.
+	correlationSvc *correlation.Service
 }
 
 type runtimeRiskAgent struct {
@@ -5630,6 +5639,18 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// classic AQR-style (20d momentum / 20d vol
 				// / 10d $vol; weights 0.5/-0.3/0.2).
 				ranker: ranking.NewRanker(s.ohlcFetcher, ranking.Options{}),
+				// Sprint C #2: pairwise correlation matrix
+				// over the universe ∪ positions set. Reuses
+				// the same OHLC fetcher so the third pass
+				// hits the cache populated by quantSnapshot
+				// + ranker. The default Options match the
+				// classic risk-parity convention (60d daily
+				// lookback, 0.7 |rho| threshold, 10 max
+				// pairs in the prompt, 4-way fetch
+				// concurrency, 6s per-call timeout). A nil
+				// OHLC fetcher degrades to no-op Compute so
+				// the prompt block is simply omitted.
+				correlationSvc: correlation.NewService(s.ohlcFetcher, correlation.Options{}),
 			}
 		}(),
 		&runtimeApprovalGateway{
@@ -13705,7 +13726,7 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	}
 	_ = fund // reserved for future fund-level routing overrides
 
-	return decision.DecisionInput{
+	input := decision.DecisionInput{
 		FundID:              fundID,
 		TradingDate:         tradingDate,
 		Market:              profile.Market,
@@ -13735,9 +13756,119 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
 		RiskBudget:          a.buildRiskBudget(ctx, fundID, tradingDate),
 		NewsCatalysts:       a.buildNewsCatalysts(ctx, profile.Market, universe, decisionPositions, tradingDate),
+		Exposure:            buildExposureSnapshot(totalAssets, availableCash, decisionPositions, instrumentHints),
+		Correlations:        a.buildCorrelations(ctx, profile.Market, universe, decisionPositions),
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
 	}
+
+	// Sprint C #3 — decision-input fingerprint observability.
+	// Emit a structured slog line on every PM call so the audit
+	// trail can be grepped by signal presence ("which blocks
+	// were live on the call that produced this plan?"). The
+	// fingerprint is deterministic so the same input always
+	// produces the same trace; safe to log unconditionally.
+	// We also surface the present-blocks ribbon as a RiskNote so
+	// it lands inside Plan.Reasoning for end-to-end audit.
+	trace := decision.Fingerprint(input)
+	slog.Info("decision_input_fingerprint", trace.SlogAttrs()...)
+	if blocks := trace.PresentBlocks(); len(blocks) > 0 {
+		input.RiskNotes = append(input.RiskNotes,
+			"signal_blocks_present: "+strings.Join(blocks, ", "))
+	}
+
+	return input
+}
+
+// buildCorrelations is the Sprint C #2 entry point. Composes the
+// universe + held-positions sets into a deduped correlation
+// request and asks the correlation service for the snapshot.
+// Returns nil whenever the service / fetcher / sample is too thin
+// (the prompt builder omits the block in that case).
+func (a *runtimePMAgent) buildCorrelations(ctx context.Context, market string, universe []string, positions []decision.DecisionPosition) *decision.CorrelationSnapshot {
+	if a == nil || a.correlationSvc == nil {
+		return nil
+	}
+	requests := make([]correlation.SymbolRequest, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		s := strings.TrimSpace(sym)
+		if s == "" {
+			continue
+		}
+		requests = append(requests, correlation.SymbolRequest{
+			Symbol: s,
+			Market: market,
+			Held:   false,
+		})
+	}
+	for _, p := range positions {
+		s := strings.TrimSpace(p.Symbol)
+		if s == "" {
+			continue
+		}
+		requests = append(requests, correlation.SymbolRequest{
+			Symbol: s,
+			Market: market,
+			Held:   true,
+		})
+	}
+	if len(requests) < 2 {
+		return nil
+	}
+	snap := a.correlationSvc.Compute(ctx, requests)
+	if snap == nil {
+		return nil
+	}
+	return snap
+}
+
+// buildExposureSnapshot reduces the wiring layer's view of the
+// fund's NAV / cash / positions into the minimal Position slice
+// the exposure package consumes. Sector is taken from the
+// InstrumentHint AssetClass when present (cleanest available
+// proxy on a multi-asset fund); falls back to the position's own
+// Market field, then to "unclassified" when nothing else is
+// known.
+//
+// This is intentionally pure / cheap so we can call it on every
+// PM run even when totalAssets is zero — exposure.Compute itself
+// degrades gracefully on the zero-NAV path.
+func buildExposureSnapshot(totalAssets, availableCash float64, positions []decision.DecisionPosition, hints map[string]decision.InstrumentHint) decision.ExposureSnapshot {
+	if totalAssets <= 0 {
+		return decision.ExposureSnapshot{}
+	}
+	out := make([]exposure.Position, 0, len(positions))
+	for _, p := range positions {
+		mv := p.Quantity * p.CurrentPrice
+		if mv <= 0 || strings.TrimSpace(p.Symbol) == "" {
+			continue
+		}
+		sector := ""
+		if h, ok := hints[strings.ToUpper(strings.TrimSpace(p.Symbol))]; ok {
+			sector = strings.TrimSpace(h.AssetClass)
+		}
+		if sector == "" {
+			sector = strings.TrimSpace(p.AssetClass)
+		}
+		if sector == "" {
+			sector = strings.TrimSpace(p.Market)
+		}
+		out = append(out, exposure.Position{
+			Symbol:      p.Symbol,
+			Sector:      sector,
+			MarketValue: mv,
+		})
+	}
+	return exposure.Compute(exposure.Options{
+		// Sprint C ships the AQR / Bridgewater / Citadel
+		// conventional caps; per-fund overrides via
+		// fund.config.exposurePolicy can follow once we have
+		// live behaviour to tune against.
+		SingleNameCap: 0.25,
+		SectorCap:     0.50,
+		Top3Cap:       0.60,
+		CashFloorPct:  0.05,
+	}, totalAssets, availableCash, out)
 }
 
 // buildNewsCatalysts assembles the Sprint B #3 per-symbol recent

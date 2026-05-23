@@ -897,6 +897,188 @@ func TestUserPromptOmitsNewsCatalystsWhenEmpty(t *testing.T) {
 	}
 }
 
+// Sprint C #1: the system prompt must teach the PM the exposure
+// guardrails.
+func TestSystemPromptDocumentsExposureRules(t *testing.T) {
+	prompt := systemPrompt()
+	required := []string{
+		"input.exposure",
+		"breaches",
+		"sectorCap",
+		"top3",
+		"cashFloorPct",
+	}
+	for _, frag := range required {
+		if !strings.Contains(prompt, frag) {
+			t.Errorf("systemPrompt() missing %q — the exposure rule has regressed", frag)
+		}
+	}
+}
+
+// The user prompt must serialise the Exposure snapshot under the
+// documented JSON key with the fields the system prompt
+// references.
+func TestUserPromptIncludesExposureBlock(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+		Exposure: ExposureSnapshot{
+			TotalAssets:   1000,
+			AvailableCash: 50,
+			CashPct:       0.05,
+			CashFloorPct:  0.05,
+			PositionCount: 3,
+			SingleName: []SymbolWeight{
+				{Symbol: "AAPL", Weight: 0.40, Cap: 0.25, Breach: true},
+				{Symbol: "MSFT", Weight: 0.30, Cap: 0.25, Breach: true},
+				{Symbol: "NVDA", Weight: 0.25, Cap: 0.25, Breach: false},
+			},
+			SingleNameCap: 0.25,
+			SectorWeights: []SectorWeight{
+				{Sector: "tech", Weight: 0.95, Cap: 0.50, Breach: true},
+			},
+			SectorCap:  0.50,
+			Top3Weight: 0.95,
+			Top3Cap:    0.60,
+			Breaches: []string{
+				"BREACH: sector=tech weight=95.0% > cap=50.0%",
+				"BREACH: top-3=cluster weight=95.0% > cap=60.0%",
+			},
+		},
+	})
+	if !strings.Contains(prompt, `"exposure"`) {
+		t.Errorf("user prompt missing exposure key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"symbol": "AAPL"`) || !strings.Contains(prompt, `"breach": true`) {
+		t.Errorf("AAPL breach row missing under exposure:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"sectorCap": 0.5`) {
+		t.Errorf("sectorCap missing under exposure:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"top3Weight": 0.95`) {
+		t.Errorf("top3Weight missing under exposure:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "BREACH: sector=tech") {
+		t.Errorf("sector breach line missing under exposure.breaches:\n%s", prompt)
+	}
+}
+
+// Empty (zero-NAV) Exposure → no key in prompt.
+func TestUserPromptOmitsExposureWhenEmpty(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+	})
+	if strings.Contains(prompt, `"exposure"`) {
+		t.Errorf("empty Exposure should not appear in prompt:\n%s", prompt)
+	}
+}
+
+// buildExposurePromptItem returns nil on no-signal input — no
+// matter how the inner SingleName slice is populated, an
+// Exposure{} with zero TotalAssets must produce nil.
+func TestBuildExposurePromptItemNoSignalReturnsNil(t *testing.T) {
+	got := buildExposurePromptItem(ExposureSnapshot{})
+	if got != nil {
+		t.Errorf("expected nil on no-signal exposure, got %+v", got)
+	}
+}
+
+// SymbolWeight + SectorWeight type aliases are exported so the
+// wiring layer + tests can construct them without importing
+// exposure directly.
+func TestExposureAliasesAreUsable(t *testing.T) {
+	var sn SymbolWeight = SymbolWeight{Symbol: "AAPL", Weight: 0.1}
+	var sw SectorWeight = SectorWeight{Sector: "tech", Weight: 0.2}
+	if sn.Symbol != "AAPL" || sw.Sector != "tech" {
+		t.Errorf("alias round-trip failed: %+v %+v", sn, sw)
+	}
+}
+
+// Sprint C #2: the system prompt must teach the PM the
+// correlation-aware sizing rules.
+func TestSystemPromptDocumentsCorrelationRules(t *testing.T) {
+	prompt := systemPrompt()
+	required := []string{
+		"input.correlations",
+		"highCorrPairs",
+		"candidateSummaries",
+		"heldCluster",
+		"maxRho",
+	}
+	for _, frag := range required {
+		if !strings.Contains(prompt, frag) {
+			t.Errorf("systemPrompt() missing %q — the correlation rule has regressed", frag)
+		}
+	}
+}
+
+// The user prompt must serialise a CorrelationSnapshot under the
+// "correlations" key with all three sub-blocks.
+func TestUserPromptIncludesCorrelationsBlock(t *testing.T) {
+	snap := CorrelationSnapshot{
+		Window:            "60 daily bars",
+		SampleSize:        4,
+		HighCorrThreshold: 0.7,
+		HighCorrPairs: []HighCorrPair{
+			{Left: "AMD", Right: "NVDA", Rho: 0.85},
+		},
+		CandidateSummaries: []CorrCandidateSummary{
+			{Symbol: "AMD", MaxRho: 0.85, MaxAbsRho: 0.85, MaxAbsTarget: "NVDA"},
+		},
+		HeldCluster: &HeldClusterStats{
+			HeldCount:   3,
+			AvgPairwise: 0.62,
+			MaxPairwise: 0.85,
+			MaxLeft:     "MSFT",
+			MaxRight:    "NVDA",
+		},
+	}
+	prompt := userPrompt(DecisionInput{
+		FundID:       "f1",
+		TradingDate:  time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC),
+		Universe:     []string{"AMD"},
+		Correlations: &snap,
+	})
+	if !strings.Contains(prompt, `"correlations"`) {
+		t.Errorf("user prompt missing correlations key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"left": "AMD"`) || !strings.Contains(prompt, `"right": "NVDA"`) {
+		t.Errorf("high-corr pair missing from prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"maxAbsTarget": "NVDA"`) {
+		t.Errorf("candidate summary target missing:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"heldCount": 3`) {
+		t.Errorf("held cluster missing from prompt:\n%s", prompt)
+	}
+}
+
+// Nil Correlations → no key in the prompt.
+func TestUserPromptOmitsCorrelationsWhenNil(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+	})
+	if strings.Contains(prompt, `"correlations"`) {
+		t.Errorf("nil Correlations should not appear in prompt:\n%s", prompt)
+	}
+}
+
+// buildCorrelationsPromptItem must be nil-safe and reject
+// snapshots with no signal even when fields are partially set.
+func TestBuildCorrelationsPromptItemNoSignalReturnsNil(t *testing.T) {
+	if got := buildCorrelationsPromptItem(nil); got != nil {
+		t.Errorf("nil snapshot: got %+v, want nil", got)
+	}
+	if got := buildCorrelationsPromptItem(&CorrelationSnapshot{SampleSize: 1}); got != nil {
+		t.Errorf("sample size 1: got %+v, want nil", got)
+	}
+}
+
 // truncateSummary respects the rune boundary (avoids the classic
 // "slice in the middle of a 3-byte UTF-8 character" trap) and
 // returns the original when within the cap.

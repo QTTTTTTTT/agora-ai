@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/fundai/server/internal/cooldown"
+	"github.com/fundai/server/internal/correlation"
+	"github.com/fundai/server/internal/exposure"
 	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/ranking"
@@ -76,6 +78,34 @@ type SymbolNewsCatalysts = newsrecall.SymbolCatalysts
 // can construct DecisionInput.NewsCatalysts without importing the
 // newsrecall package directly.
 type NewsHit = newsrecall.Hit
+
+// ExposureSnapshot is the prompt-facing shape for the Sprint C
+// #1 portfolio-level concentration check. Alias for
+// exposure.Snapshot so the decision package stays the single
+// import point. Carries per-symbol / per-sector weights with their
+// caps, top-3 cluster %, cash %, and any breach lines the PM
+// must respect.
+type ExposureSnapshot = exposure.Snapshot
+
+// SymbolWeight + SectorWeight expose the per-row exposure shapes
+// so the wiring layer + tests can construct ExposureSnapshot
+// without importing the exposure package directly.
+type SymbolWeight = exposure.SymbolWeight
+type SectorWeight = exposure.SectorWeight
+
+// CorrelationSnapshot is the prompt-facing shape for the Sprint C
+// #2 pairwise correlation matrix. Alias for correlation.Snapshot
+// so the decision package stays the single import point. The
+// snapshot carries the high-corr pair list, per-candidate worst
+// correlation to any held name, and the held cluster statistics.
+type CorrelationSnapshot = correlation.Snapshot
+
+// HighCorrPair / CorrCandidateSummary / HeldCluster expose the
+// per-row correlation shapes so callers can construct the
+// snapshot without importing the correlation package directly.
+type HighCorrPair = correlation.HighCorrPair
+type CorrCandidateSummary = correlation.SymbolCorrSummary
+type HeldClusterStats = correlation.HeldClusterStats
 
 // DecisionInput is the full context handed to the engine for one
 // decision call. Every field is optional from the engine's
@@ -232,6 +262,31 @@ type DecisionInput struct {
 	// no fresh catalysts (or service unwired); the prompt omits
 	// the block.
 	NewsCatalysts []SymbolNewsCatalysts
+
+	// Sprint C #1 (portfolio exposure check). Fund-level
+	// concentration snapshot: per-symbol / per-sector weight
+	// rollups with their caps, top-3 cluster, cash %, and a
+	// deterministic list of breach strings. The system prompt
+	// teaches the PM to (a) refuse buys that would push a
+	// bucket past cap, (b) prefer "reduce" on the heaviest
+	// breaching name to release dry powder, and (c) honour
+	// the cash floor before adding any new exposure. A
+	// snapshot whose HasSignal returns false (zero NAV) means
+	// the prompt block is omitted entirely.
+	Exposure ExposureSnapshot
+
+	// Sprint C #2 (pairwise correlation matrix). Snapshot of
+	// rolling daily-return correlations across universe ∪
+	// positions: high-correlation pairs (|rho| >= 0.7 by
+	// default), per-candidate worst correlation against the
+	// held set, and the held-cluster avg / max pairwise. The
+	// system prompt teaches the PM to halve (or refuse)
+	// sizing on any candidate whose worst held-correlation
+	// exceeds the threshold and to skip new cluster adds when
+	// the held set's average is already tight. nil = no
+	// snapshot (service unwired or insufficient OHLC data);
+	// the prompt omits the block.
+	Correlations *CorrelationSnapshot
 
 	// Phase 3A-10 lesson replay. A multi-line block rendered
 	// upstream by attribution.BuildLessonReplay that paraphrases

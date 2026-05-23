@@ -101,6 +101,21 @@ Adhere to these rules without exception:
        - When a symbol has no entry in newsCatalysts but does appear in input.universe / input.positions, treat it as "no actionable catalyst window" — fall back entirely on the debate / fundamental / sector / quant blocks. Absence here is NOT a signal in itself.
        - The block is symbol-level, not fund-level: a fresh macro headline on AAPL does NOT change your TSLA sizing unless TSLA also has its own newsCatalysts entry referencing the same theme.
        - Cite the hit explicitly when it changes your action ("AAPL: 3h Reuters 'Q4 guidance cut' → downgrading the bull buy to watch").
+   - When input.exposure is present (Sprint C portfolio concentration check): the block carries the current per-symbol / per-sector weights, the top-3 cluster weight, cash%, the configured caps (singleNameCap, sectorCap, top3Cap, cashFloorPct), and a Breaches list. Treat the snapshot as a hard fund-level guardrail — concentration breaches are the single most common cause of catastrophic drawdowns in long-only funds:
+       - Every entry in breaches MUST be honoured. If a breach line names a symbol or sector, you must NOT propose "buy" or "add" on that symbol or any other symbol in the same sector for this plan. The only valid actions on a breaching bucket are "watch", "hold", "reduce", "sell".
+       - When a candidate buy would push a bucket over its cap (current + your proposed qtyPct > cap), refuse the buy or shrink qtyPct so the post-trade weight stays ≤ cap. The arithmetic: post-buy weight ≈ singleName.weight + qtyPct; do not propose qtyPct values that would make that sum exceed singleNameCap.
+       - Sector caps work the same way but on the aggregated sector weight: if input.exposure.sectorWeights shows tech=0.45 and sectorCap=0.50, any new tech buy must keep tech weight ≤ 0.50.
+       - top3Weight + top3Cap captures cluster risk. When top3Weight > top3Cap (or your proposed buy would push it past) the default action is "watch" on any name that would join the top-3 — even if the per-symbol bucket has room.
+       - cashPct vs cashFloorPct: when cashPct < cashFloorPct (even before any new buy), the only buy you may propose this session is one funded by an equal-or-larger "reduce" elsewhere in the same plan. If the plan only contains "buy" actions you must demote them all to "watch" with a one-line note that the cash floor is being honoured. cashFloorPct=0 means "no floor enforced" and this rule doesn't apply.
+       - When the breaches list is empty AND no candidate buy would create a fresh breach, the exposure block contributes no friction; size as the other blocks indicate.
+       - Cite the breach line verbatim in your reasoning when it caps an action ("exposure breach 'BREACH: sector=tech weight=52.0% > cap=50.0%' forces TSLA watch instead of buy").
+   - When input.correlations is present (Sprint C pairwise correlation matrix): the block carries highCorrPairs (|rho| >= highCorrThreshold, default 0.7), candidateSummaries (each non-held universe symbol's worst correlation against any held name), and heldCluster (avg / max pairwise inside the held set). Correlation is the missing dimension on top of per-symbol R and sector caps — two "different" names can still create a single hidden bet:
+       - For each candidate buy, look up its row in candidateSummaries. If maxAbsRho >= highCorrThreshold AND maxRho is POSITIVE, the candidate is effectively a duplicate of the named target (maxAbsTarget). Either refuse the buy or halve qtyPct vs the per-symbol ceiling, citing the correlation. Negative correlation at the same magnitude is a hedge — do NOT halve; you may keep ceiling sizing because the candidate diversifies risk away from the target.
+       - When heldCluster.avgPairwise >= 0.6 (the held book is already tightly correlated), prefer candidates whose maxRho is < 0.5 OR negative; reject otherwise-attractive buys that would tighten the cluster further.
+       - When heldCluster.maxPairwise >= highCorrThreshold, name the (maxLeft, maxRight) pair in your reasoning when proposing any reduce on either side — the cluster is already concentrated and trimming one of the two reduces effective book risk by more than the position size suggests.
+       - highCorrPairs is a flat per-pair list. Use it as background colour: a Q1 candidate that appears in highCorrPairs alongside a held name should be sized with the same correlation-aware halving rule as the candidate summary case.
+       - The block is intentionally lookback-bounded (default 60 daily bars); correlations decay over time so a fresh negative shock (a sector rotation, an earnings cluster) may not yet show up. Treat the matrix as a soft prior, not a forecast.
+       - Cite the relevant correlation row when it materially changes sizing ("correlations.candidateSummary AMD maxRho=0.82 vs NVDA → halving the AMD buy qtyPct from 0.05 to 0.025").
 
 5. Locale: write reasoning text in the same language the input MacroBriefing / RoundtableConsensus uses (Chinese ⇄ English). If the input is empty or mixed, default to Chinese.
 
@@ -138,6 +153,8 @@ func userPrompt(input DecisionInput) string {
 		Cooldowns           []cooldownPromptItem         `json:"cooldowns,omitempty"`
 		RiskBudget          *riskBudgetPromptItem        `json:"riskBudget,omitempty"`
 		NewsCatalysts       []newsCatalystPromptItem     `json:"newsCatalysts,omitempty"`
+		Exposure            *exposurePromptItem          `json:"exposure,omitempty"`
+		Correlations        *correlationsPromptItem      `json:"correlations,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
 		RiskNotes           []string                     `json:"riskNotes,omitempty"`
 	}{
@@ -166,6 +183,8 @@ func userPrompt(input DecisionInput) string {
 		Cooldowns:           buildCooldownPromptItems(input.Cooldowns),
 		RiskBudget:          buildRiskBudgetPromptItem(input.RiskBudget),
 		NewsCatalysts:       buildNewsCatalystPromptItems(input.NewsCatalysts),
+		Exposure:            buildExposurePromptItem(input.Exposure),
+		Correlations:        buildCorrelationsPromptItem(input.Correlations),
 		BuyBudget:           input.BuyBudget,
 		RiskNotes:           input.RiskNotes,
 	}
@@ -509,6 +528,162 @@ func truncateSummary(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "…"
+}
+
+// exposurePromptItem is the on-the-wire shape for the Sprint C
+// #1 portfolio exposure check. Mirrors exposure.Snapshot but
+// trims to the fields the PM system prompt actually consumes —
+// the raw TotalAssets / AvailableCash are already at the top of
+// the prompt under their own keys, so we skip them here to keep
+// the block focused.
+type exposurePromptItem struct {
+	PositionCount int                       `json:"positionCount"`
+	CashPct       float64                   `json:"cashPct"`
+	CashFloorPct  float64                   `json:"cashFloorPct,omitempty"`
+	SingleNameCap float64                   `json:"singleNameCap"`
+	SectorCap     float64                   `json:"sectorCap"`
+	Top3Cap       float64                   `json:"top3Cap"`
+	Top3Weight    float64                   `json:"top3Weight"`
+	SingleName    []exposureSinglePromptItem  `json:"singleName,omitempty"`
+	SectorWeights []exposureSectorPromptItem  `json:"sectorWeights,omitempty"`
+	Breaches      []string                  `json:"breaches,omitempty"`
+}
+
+type exposureSinglePromptItem struct {
+	Symbol string  `json:"symbol"`
+	Weight float64 `json:"weight"`
+	Breach bool    `json:"breach,omitempty"`
+}
+
+type exposureSectorPromptItem struct {
+	Sector string  `json:"sector"`
+	Weight float64 `json:"weight"`
+	Breach bool    `json:"breach,omitempty"`
+}
+
+// correlationsPromptItem is the on-the-wire shape for the Sprint
+// C #2 pairwise correlation block. We mirror the underlying
+// CorrelationSnapshot but rename a couple of fields to read more
+// naturally in the prompt JSON.
+type correlationsPromptItem struct {
+	Window             string                       `json:"window"`
+	SampleSize         int                          `json:"sampleSize"`
+	HighCorrThreshold  float64                      `json:"highCorrThreshold"`
+	HighCorrPairs      []correlationsPairPromptItem `json:"highCorrPairs,omitempty"`
+	CandidateSummaries []correlationsCandidatePromptItem `json:"candidateSummaries,omitempty"`
+	HeldCluster        *correlationsClusterPromptItem `json:"heldCluster,omitempty"`
+}
+
+type correlationsPairPromptItem struct {
+	Left  string  `json:"left"`
+	Right string  `json:"right"`
+	Rho   float64 `json:"rho"`
+}
+
+type correlationsCandidatePromptItem struct {
+	Symbol       string  `json:"symbol"`
+	MaxRho       float64 `json:"maxRho"`
+	MaxAbsRho    float64 `json:"maxAbsRho"`
+	MaxAbsTarget string  `json:"maxAbsTarget"`
+}
+
+type correlationsClusterPromptItem struct {
+	HeldCount   int     `json:"heldCount"`
+	AvgPairwise float64 `json:"avgPairwise"`
+	MaxPairwise float64 `json:"maxPairwise"`
+	MaxLeft     string  `json:"maxLeft"`
+	MaxRight    string  `json:"maxRight"`
+}
+
+// buildCorrelationsPromptItem renders a CorrelationSnapshot for
+// the prompt. Returns nil when the snapshot has no signal so the
+// prompt simply omits the block. The signed rho values flow
+// through round4Signed so the prompt sees stable, diff-friendly
+// numbers across runs.
+func buildCorrelationsPromptItem(snap *CorrelationSnapshot) *correlationsPromptItem {
+	if snap == nil || !snap.HasSignal() {
+		return nil
+	}
+	out := &correlationsPromptItem{
+		Window:            snap.Window,
+		SampleSize:        snap.SampleSize,
+		HighCorrThreshold: round4Signed(snap.HighCorrThreshold),
+	}
+	if len(snap.HighCorrPairs) > 0 {
+		out.HighCorrPairs = make([]correlationsPairPromptItem, 0, len(snap.HighCorrPairs))
+		for _, p := range snap.HighCorrPairs {
+			out.HighCorrPairs = append(out.HighCorrPairs, correlationsPairPromptItem{
+				Left:  p.Left,
+				Right: p.Right,
+				Rho:   round4Signed(p.Rho),
+			})
+		}
+	}
+	if len(snap.CandidateSummaries) > 0 {
+		out.CandidateSummaries = make([]correlationsCandidatePromptItem, 0, len(snap.CandidateSummaries))
+		for _, c := range snap.CandidateSummaries {
+			out.CandidateSummaries = append(out.CandidateSummaries, correlationsCandidatePromptItem{
+				Symbol:       c.Symbol,
+				MaxRho:       round4Signed(c.MaxRho),
+				MaxAbsRho:    round4Signed(c.MaxAbsRho),
+				MaxAbsTarget: c.MaxAbsTarget,
+			})
+		}
+	}
+	if snap.HeldCluster != nil {
+		out.HeldCluster = &correlationsClusterPromptItem{
+			HeldCount:   snap.HeldCluster.HeldCount,
+			AvgPairwise: round4Signed(snap.HeldCluster.AvgPairwise),
+			MaxPairwise: round4Signed(snap.HeldCluster.MaxPairwise),
+			MaxLeft:     snap.HeldCluster.MaxLeft,
+			MaxRight:    snap.HeldCluster.MaxRight,
+		}
+	}
+	return out
+}
+
+// buildExposurePromptItem renders an ExposureSnapshot for the
+// prompt. Returns nil when the snapshot has no signal (zero NAV
+// / no holdings / no cash) so the prompt simply omits the block.
+//
+// Caps that round to 1.0 are omitted because they mean "no cap";
+// rendering "100%" would mislead the LLM into thinking there's a
+// hard guard when there isn't.
+func buildExposurePromptItem(snap ExposureSnapshot) *exposurePromptItem {
+	if !snap.HasSignal() {
+		return nil
+	}
+	item := &exposurePromptItem{
+		PositionCount: snap.PositionCount,
+		CashPct:       round4Signed(snap.CashPct),
+		CashFloorPct:  round4Signed(snap.CashFloorPct),
+		SingleNameCap: round4Signed(snap.SingleNameCap),
+		SectorCap:     round4Signed(snap.SectorCap),
+		Top3Cap:       round4Signed(snap.Top3Cap),
+		Top3Weight:    round4Signed(snap.Top3Weight),
+		Breaches:      snap.Breaches,
+	}
+	if len(snap.SingleName) > 0 {
+		item.SingleName = make([]exposureSinglePromptItem, 0, len(snap.SingleName))
+		for _, sn := range snap.SingleName {
+			item.SingleName = append(item.SingleName, exposureSinglePromptItem{
+				Symbol: sn.Symbol,
+				Weight: round4Signed(sn.Weight),
+				Breach: sn.Breach,
+			})
+		}
+	}
+	if len(snap.SectorWeights) > 0 {
+		item.SectorWeights = make([]exposureSectorPromptItem, 0, len(snap.SectorWeights))
+		for _, sw := range snap.SectorWeights {
+			item.SectorWeights = append(item.SectorWeights, exposureSectorPromptItem{
+				Sector: sw.Sector,
+				Weight: round4Signed(sw.Weight),
+				Breach: sw.Breach,
+			})
+		}
+	}
+	return item
 }
 
 func buildRoundtableDebatePrompt(input DecisionInput) *roundtableDebatePrompt {
