@@ -27,6 +27,7 @@ import (
 	"github.com/fundai/server/internal/debate"
 	"github.com/fundai/server/internal/correlation"
 	"github.com/fundai/server/internal/decision"
+	"github.com/fundai/server/internal/earnings"
 	"github.com/fundai/server/internal/exitmanager"
 	"github.com/fundai/server/internal/exposure"
 	"github.com/fundai/server/internal/regime"
@@ -1363,6 +1364,13 @@ type runtimePMAgent struct {
 	// the block and the PM falls back on the existing
 	// NewsSentiment text blob.
 	newsCatalystSvc *newsrecall.Service
+	// earningsSvc is the Sprint E #2 scheduled-earnings catalyst
+	// service. Default deployment ships with earnings.NoopFetcher
+	// so the block is silently absent; operators can plug in a
+	// hand-curated StaticFetcher (or a future Finnhub / Polygon
+	// adapter) via the wiring layer's earnings.Service constructor.
+	// nil = feature off; the prompt omits the block.
+	earningsSvc *earnings.Service
 	// correlationSvc is the Sprint C #2 pairwise correlation
 	// matrix. Shares the same OHLC fetcher as quantSnapshot and
 	// ranker so the cache layer makes the third pass cheap.
@@ -5651,6 +5659,16 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// marketdata.Service degrades gracefully —
 				// the constructor stays unconditional.
 				newsCatalystSvc: newsrecall.NewService(s.marketData, newsrecall.Options{}),
+				// Sprint E #2: scheduled-earnings catalyst
+				// snapshot. Ships with NoopFetcher so the
+				// block is silently absent until an operator
+				// wires a real provider — same opt-in pattern
+				// as the other catalyst services. The fetcher
+				// can be swapped to earnings.StaticFetcher
+				// (hand-curated YAML) or a future
+				// Finnhub / Polygon / Akshare adapter without
+				// touching this constructor.
+				earningsSvc: earnings.NewService(earnings.NoopFetcher{}, earnings.Options{}),
 				// Sprint A #2: cross-sectional ranker shares
 				// the same OHLC fetcher so bars asked for
 				// by the quant snapshot pass come back from
@@ -13866,6 +13884,7 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
 		RiskBudget:          a.buildRiskBudget(ctx, fundID, tradingDate),
 		NewsCatalysts:       a.buildNewsCatalysts(ctx, profile.Market, universe, decisionPositions, tradingDate),
+		EarningsCalendar:    a.buildEarningsCalendar(ctx, profile.Market, universe, decisionPositions),
 		Exposure:            buildExposureSnapshot(totalAssets, availableCash, decisionPositions, instrumentHints, profile.ExposurePolicy),
 		Correlations:        a.buildCorrelations(ctx, profile.Market, universe, decisionPositions, profile.CorrelationPolicy),
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
@@ -14130,6 +14149,51 @@ func (a *runtimePMAgent) buildNewsCatalysts(ctx context.Context, fundMarket stri
 		return nil
 	}
 	return a.newsCatalystSvc.BuildCatalysts(ctx, requests, now)
+}
+
+// buildEarningsCalendar assembles the Sprint E #2 per-symbol
+// scheduled-earnings snapshot. Dedup-merges universe ∪ positions
+// onto upper-cased ticker keys and delegates to the wired
+// earnings.Service. Returns nil when the service isn't wired
+// (default deployment uses earnings.NoopFetcher → no events)
+// so the prompt simply omits the block. The horizonDays cap is
+// owned by earnings.Service (default 14d); we don't override here.
+//
+// Per-fund market is passed through as the disambiguation hint
+// for back-ends that might know e.g. BABA both NYSE-listed and
+// HK-listed.
+func (a *runtimePMAgent) buildEarningsCalendar(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition) *decision.EarningsCalendarSnapshot {
+	if a == nil || a.earningsSvc == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	symbols := make([]string, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		symbols = append(symbols, key)
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		symbols = append(symbols, key)
+	}
+	if len(symbols) == 0 {
+		return nil
+	}
+	return a.earningsSvc.Build(ctx, symbols, fundMarket)
 }
 
 // buildRiskBudget assembles the Sprint B #2 fund-level risk-budget

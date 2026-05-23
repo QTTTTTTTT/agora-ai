@@ -221,6 +221,7 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		"cooldowns":          {},
 		"riskBudget":         {},
 		"newsCatalysts":      {},
+		"earningsCalendar":   {},
 		"exposure":           {},
 		"correlations":       {},
 	}
@@ -228,6 +229,10 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 	// emits every supported entry exactly once.
 	rb := RiskBudgetSnapshot{}
 	corr := CorrelationSnapshot{SampleSize: 2, HighCorrPairs: []HighCorrPair{{Left: "A", Right: "B", Rho: 0.9}}}
+	earn := EarningsCalendarSnapshot{
+		HorizonDays: 14,
+		PerSymbol:   map[string]EarningsEvent{"A": {Symbol: "A", EventDate: time.Now().Add(48 * time.Hour)}},
+	}
 	in := DecisionInput{
 		Universe:           []string{"A"},
 		InstrumentHints:    map[string]InstrumentHint{"A": {}},
@@ -246,6 +251,7 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		Cooldowns:          []SymbolCooldown{{}},
 		RiskBudget:         &rb,
 		NewsCatalysts:      []SymbolNewsCatalysts{{}},
+		EarningsCalendar:   &earn,
 		Exposure:           ExposureSnapshot{TotalAssets: 100, PositionCount: 1},
 		Correlations:       &corr,
 	}
@@ -265,17 +271,21 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 // list should be empty.
 func TestAbsentBlocksEmptyInputReportsAllAbsent(t *testing.T) {
 	got := Fingerprint(DecisionInput{}).AbsentBlocks()
-	// 18 canonical signal blocks (matches PresentBlocksKnownVocabulary).
-	if len(got) != 18 {
-		t.Errorf("empty input AbsentBlocks = %d entries, want 18 (%v)", len(got), got)
+	// 19 canonical signal blocks (matches PresentBlocksKnownVocabulary).
+	if len(got) != 19 {
+		t.Errorf("empty input AbsentBlocks = %d entries, want 19 (%v)", len(got), got)
 	}
 }
 
 // PresentBlocks + AbsentBlocks must partition the canonical
-// signal vocabulary: no overlap, total = 18.
+// signal vocabulary: no overlap, total = 19.
 func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 	rb := RiskBudgetSnapshot{}
 	corr := CorrelationSnapshot{SampleSize: 2, HighCorrPairs: []HighCorrPair{{Left: "A", Right: "B", Rho: 0.9}}}
+	earn := EarningsCalendarSnapshot{
+		HorizonDays: 14,
+		PerSymbol:   map[string]EarningsEvent{"A": {Symbol: "A", EventDate: time.Now().Add(48 * time.Hour)}},
+	}
 	for _, tc := range []struct {
 		name string
 		in   DecisionInput
@@ -299,6 +309,7 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			Cooldowns:          []SymbolCooldown{{}},
 			RiskBudget:         &rb,
 			NewsCatalysts:      []SymbolNewsCatalysts{{}},
+			EarningsCalendar:   &earn,
 			Exposure:           ExposureSnapshot{TotalAssets: 100, PositionCount: 1},
 			Correlations:       &corr,
 		}},
@@ -312,8 +323,8 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			tr := Fingerprint(tc.in)
 			present := tr.PresentBlocks()
 			absent := tr.AbsentBlocks()
-			if len(present)+len(absent) != 18 {
-				t.Errorf("present(%d) + absent(%d) = %d, want 18 (present=%v absent=%v)",
+			if len(present)+len(absent) != 19 {
+				t.Errorf("present(%d) + absent(%d) = %d, want 19 (present=%v absent=%v)",
 					len(present), len(absent), len(present)+len(absent), present, absent)
 			}
 			seen := map[string]bool{}
@@ -330,6 +341,51 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 				seen[b] = true
 			}
 		})
+	}
+}
+
+// Sprint E #2: EarningsCalendar presence + per-symbol count must
+// flow into the trace fingerprint so dashboards can grep
+// p_earnings_calendar / count_earnings_calendar.
+func TestFingerprintEarningsCalendar(t *testing.T) {
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	snap := &EarningsCalendarSnapshot{
+		AsOf:        now,
+		HorizonDays: 14,
+		PerSymbol: map[string]EarningsEvent{
+			"AAPL": {Symbol: "AAPL", EventDate: now.AddDate(0, 0, 2)},
+			"MSFT": {Symbol: "MSFT", EventDate: now.AddDate(0, 0, 5)},
+		},
+	}
+	tr := Fingerprint(DecisionInput{EarningsCalendar: snap})
+	if !tr.Signals.EarningsCalendar {
+		t.Error("expected p_earnings_calendar = true")
+	}
+	if tr.Counts.EarningsCalendar != 2 {
+		t.Errorf("expected count_earnings_calendar = 2, got %d", tr.Counts.EarningsCalendar)
+	}
+	// PresentBlocks must include earningsCalendar
+	found := false
+	for _, b := range tr.PresentBlocks() {
+		if b == "earningsCalendar" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'earningsCalendar' in PresentBlocks, got %v", tr.PresentBlocks())
+	}
+}
+
+// Empty earnings snapshot must NOT signal even when the pointer
+// is non-nil — matches the prompt builder's HasSignal gate.
+func TestFingerprintEarningsCalendarEmptySnapshot(t *testing.T) {
+	tr := Fingerprint(DecisionInput{EarningsCalendar: &EarningsCalendarSnapshot{}})
+	if tr.Signals.EarningsCalendar {
+		t.Error("empty snapshot must not signal")
+	}
+	if tr.Counts.EarningsCalendar != 0 {
+		t.Errorf("expected count = 0 on empty snapshot, got %d", tr.Counts.EarningsCalendar)
 	}
 }
 

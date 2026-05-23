@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // systemPrompt returns the deterministic, prompt-injection-resistant
@@ -101,6 +102,14 @@ Adhere to these rules without exception:
        - When a symbol has no entry in newsCatalysts but does appear in input.universe / input.positions, treat it as "no actionable catalyst window" — fall back entirely on the debate / fundamental / sector / quant blocks. Absence here is NOT a signal in itself.
        - The block is symbol-level, not fund-level: a fresh macro headline on AAPL does NOT change your TSLA sizing unless TSLA also has its own newsCatalysts entry referencing the same theme.
        - Cite the hit explicitly when it changes your action ("AAPL: 3h Reuters 'Q4 guidance cut' → downgrading the bull buy to watch").
+   - When input.earningsCalendar is present (Sprint E #2 scheduled earnings catalysts): the block carries the next upcoming earnings release per symbol inside horizonDays (default 14), with daysUntil (0=today, 1=tomorrow, …), timeOfDay (bmo/amc/unknown), and the source provider. Earnings dates are HARD catalysts in a way news is not — they are scheduled, the gap is structural, and the IV / borrow / liquidity around the date all shift before the report:
+       - Never OPEN a fresh long position (action=buy on a name with current weight = 0) on a symbol with daysUntil <= 2 unless the debate's bullCase ALSO references the earnings event by name AND the news / fundamental block carries a concrete numeric catalyst (specific guidance, channel checks, an explicit pre-print). Default action in that window is "watch" with the reasoning citing the earnings date.
+       - For ADDS to existing positions (action=add) inside the daysUntil <= 2 window: halve qtyPct vs the per-symbol ceiling. The catalyst risk is asymmetric — a bad print is a -10% gap, a good one is +5%.
+       - For REDUCES / SELLS on names with daysUntil <= 2: prefer them. The catalyst is the most common single-day P&L outlier in long-only funds; trimming risk into a known event is the AQR / Renaissance default.
+       - timeOfDay=amc means the price-impacting open is daysUntil+1 (the report drops after today's close and the gap is tomorrow morning). Adjust the gating window accordingly when relevant.
+       - When a symbol you'd otherwise buy has daysUntil in (2, 7], you may proceed but at most 0.5× the per-symbol ceiling. The risk grows non-linearly into the date; this halving keeps you in the trade without paying full freight on the catalyst.
+       - When a symbol does NOT appear in earningsCalendar but does appear in input.universe / input.positions, treat it as "no scheduled catalyst in horizon" — the block carries no negative signal by its silence.
+       - Cite the row when it changes your action ("AAPL earnings T+1 AMC → downgrading buy to watch; planned entry resumes T+3 unless the bear case has been refreshed by the print").
    - When input.exposure is present (Sprint C portfolio concentration check): the block carries the current per-symbol / per-sector weights, the top-3 cluster weight, cash%, the configured caps (singleNameCap, sectorCap, top3Cap, cashFloorPct), and a Breaches list. Treat the snapshot as a hard fund-level guardrail — concentration breaches are the single most common cause of catastrophic drawdowns in long-only funds:
        - Every entry in breaches MUST be honoured. If a breach line names a symbol or sector, you must NOT propose "buy" or "add" on that symbol or any other symbol in the same sector for this plan. The only valid actions on a breaching bucket are "watch", "hold", "reduce", "sell".
        - When a candidate buy would push a bucket over its cap (current + your proposed qtyPct > cap), refuse the buy or shrink qtyPct so the post-trade weight stays ≤ cap. The arithmetic: post-buy weight ≈ singleName.weight + qtyPct; do not propose qtyPct values that would make that sum exceed singleNameCap.
@@ -153,6 +162,7 @@ func userPrompt(input DecisionInput) string {
 		Cooldowns           []cooldownPromptItem         `json:"cooldowns,omitempty"`
 		RiskBudget          *riskBudgetPromptItem        `json:"riskBudget,omitempty"`
 		NewsCatalysts       []newsCatalystPromptItem     `json:"newsCatalysts,omitempty"`
+		EarningsCalendar    *earningsCalendarPromptItem  `json:"earningsCalendar,omitempty"`
 		Exposure            *exposurePromptItem          `json:"exposure,omitempty"`
 		Correlations        *correlationsPromptItem      `json:"correlations,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
@@ -183,6 +193,7 @@ func userPrompt(input DecisionInput) string {
 		Cooldowns:           buildCooldownPromptItems(input.Cooldowns),
 		RiskBudget:          buildRiskBudgetPromptItem(input.RiskBudget),
 		NewsCatalysts:       buildNewsCatalystPromptItems(input.NewsCatalysts),
+		EarningsCalendar:    buildEarningsCalendarPromptItem(input.EarningsCalendar),
 		Exposure:            buildExposurePromptItem(input.Exposure),
 		Correlations:        buildCorrelationsPromptItem(input.Correlations),
 		BuyBudget:           input.BuyBudget,
@@ -638,6 +649,71 @@ func buildCorrelationsPromptItem(snap *CorrelationSnapshot) *correlationsPromptI
 			MaxLeft:     snap.HeldCluster.MaxLeft,
 			MaxRight:    snap.HeldCluster.MaxRight,
 		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Earnings calendar block (Sprint E #2)
+// ---------------------------------------------------------------------------
+
+// earningsCalendarPromptItem mirrors EarningsCalendarSnapshot but
+// flattens the per-symbol map into a stable-sorted slice so the
+// LLM sees the upcoming events in date-then-symbol order. Going
+// through a slice (rather than the underlying map) keeps the
+// prompt JSON byte-identical across runs with the same input —
+// important for the prompt-diff audit pipeline.
+type earningsCalendarPromptItem struct {
+	HorizonDays int                       `json:"horizonDays"`
+	Events      []earningsEventPromptItem `json:"events,omitempty"`
+}
+
+// earningsEventPromptItem is the per-symbol row in the calendar.
+// Date is rendered as YYYY-MM-DD because the time-of-day
+// shading lives in `timeOfDay`; the LLM should compare
+// `daysUntil` against the trading-date "today" to decide whether
+// the event sits inside the dangerous T+0 / T+1 / T+2 window.
+type earningsEventPromptItem struct {
+	Symbol    string `json:"symbol"`
+	Market    string `json:"market,omitempty"`
+	Date      string `json:"date"`
+	TimeOfDay string `json:"timeOfDay"`
+	DaysUntil int    `json:"daysUntil"`
+	Source    string `json:"source,omitempty"`
+}
+
+// buildEarningsCalendarPromptItem renders an
+// EarningsCalendarSnapshot for the prompt. Returns nil when the
+// snapshot has no signal so the prompt simply omits the block.
+//
+// DaysUntil is computed from snap.AsOf so the LLM doesn't have
+// to do the arithmetic itself: a 0 means "today", 1 means
+// "tomorrow", etc. The downstream system-prompt rule treats
+// daysUntil <= 2 as the "no fresh long" zone unless a concrete
+// catalyst case overrides.
+func buildEarningsCalendarPromptItem(snap *EarningsCalendarSnapshot) *earningsCalendarPromptItem {
+	if snap == nil || !snap.HasSignal() {
+		return nil
+	}
+	events := snap.SortedEvents()
+	out := &earningsCalendarPromptItem{
+		HorizonDays: snap.HorizonDays,
+		Events:      make([]earningsEventPromptItem, 0, len(events)),
+	}
+	asOfDate := snap.AsOf.UTC()
+	asOfDay := time.Date(asOfDate.Year(), asOfDate.Month(), asOfDate.Day(), 0, 0, 0, 0, time.UTC)
+	for _, e := range events {
+		eventDay := e.EventDate.UTC()
+		eventDay = time.Date(eventDay.Year(), eventDay.Month(), eventDay.Day(), 0, 0, 0, 0, time.UTC)
+		daysUntil := int(eventDay.Sub(asOfDay).Hours() / 24)
+		out.Events = append(out.Events, earningsEventPromptItem{
+			Symbol:    e.Symbol,
+			Market:    e.Market,
+			Date:      e.EventDate.UTC().Format("2006-01-02"),
+			TimeOfDay: string(e.TimeOfDay),
+			DaysUntil: daysUntil,
+			Source:    e.Source,
+		})
 	}
 	return out
 }

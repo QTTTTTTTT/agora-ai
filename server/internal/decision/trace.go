@@ -49,6 +49,7 @@ type SignalsPresence struct {
 	Cooldowns          bool `json:"cooldowns"`
 	RiskBudget         bool `json:"risk_budget"`
 	NewsCatalysts      bool `json:"news_catalysts"`
+	EarningsCalendar   bool `json:"earnings_calendar"`
 	Exposure           bool `json:"exposure"`
 	Correlations       bool `json:"correlations"`
 }
@@ -64,6 +65,7 @@ type SignalCounts struct {
 	UniverseRanking   int `json:"universe_ranking"`
 	Cooldowns         int `json:"cooldowns"`
 	NewsCatalysts     int `json:"news_catalysts"`
+	EarningsCalendar  int `json:"earnings_calendar"`
 	ExposureBreaches  int `json:"exposure_breaches"`
 	CorrelationsHigh  int `json:"correlations_high"`
 	CorrCandidates    int `json:"corr_candidates"`
@@ -112,9 +114,13 @@ func Fingerprint(in DecisionInput) Trace {
 			Cooldowns:          len(in.Cooldowns) > 0,
 			RiskBudget:         in.RiskBudget != nil,
 			NewsCatalysts:      len(in.NewsCatalysts) > 0,
+			EarningsCalendar:   in.EarningsCalendar != nil && in.EarningsCalendar.HasSignal(),
 			Exposure:           in.Exposure.HasSignal(),
 			Correlations:       in.Correlations != nil && in.Correlations.HasSignal(),
 		},
+	}
+	if in.EarningsCalendar != nil {
+		t.Counts.EarningsCalendar = len(in.EarningsCalendar.PerSymbol)
 	}
 	if !in.TradingDate.IsZero() {
 		// RFC-3339 keeps the trace JSON parseable by any
@@ -150,6 +156,7 @@ func (t Trace) SlogAttrs() []any {
 		slog.Int("count_universe_ranking", t.Counts.UniverseRanking),
 		slog.Int("count_cooldowns", t.Counts.Cooldowns),
 		slog.Int("count_news_catalysts", t.Counts.NewsCatalysts),
+		slog.Int("count_earnings_calendar", t.Counts.EarningsCalendar),
 		slog.Int("count_exposure_breaches", t.Counts.ExposureBreaches),
 		slog.Int("count_correlations_high", t.Counts.CorrelationsHigh),
 		slog.Int("count_corr_candidates", t.Counts.CorrCandidates),
@@ -170,6 +177,7 @@ func (t Trace) SlogAttrs() []any {
 		slog.Bool("p_cooldowns", t.Signals.Cooldowns),
 		slog.Bool("p_risk_budget", t.Signals.RiskBudget),
 		slog.Bool("p_news_catalysts", t.Signals.NewsCatalysts),
+		slog.Bool("p_earnings_calendar", t.Signals.EarningsCalendar),
 		slog.Bool("p_exposure", t.Signals.Exposure),
 		slog.Bool("p_correlations", t.Signals.Correlations),
 	}
@@ -231,6 +239,9 @@ func (t Trace) PresentBlocks() []string {
 	}
 	if t.Signals.NewsCatalysts {
 		out = append(out, "newsCatalysts")
+	}
+	if t.Signals.EarningsCalendar {
+		out = append(out, "earningsCalendar")
 	}
 	if t.Signals.Exposure {
 		out = append(out, "exposure")
@@ -300,6 +311,9 @@ func (t Trace) AbsentBlocks() []string {
 	}
 	if !t.Signals.NewsCatalysts {
 		out = append(out, "newsCatalysts")
+	}
+	if !t.Signals.EarningsCalendar {
+		out = append(out, "earningsCalendar")
 	}
 	if !t.Signals.Exposure {
 		out = append(out, "exposure")

@@ -29,6 +29,7 @@ import (
 
 	"github.com/fundai/server/internal/cooldown"
 	"github.com/fundai/server/internal/correlation"
+	"github.com/fundai/server/internal/earnings"
 	"github.com/fundai/server/internal/exposure"
 	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/quantsnapshot"
@@ -78,6 +79,21 @@ type SymbolNewsCatalysts = newsrecall.SymbolCatalysts
 // can construct DecisionInput.NewsCatalysts without importing the
 // newsrecall package directly.
 type NewsHit = newsrecall.Hit
+
+// EarningsCalendarSnapshot is the prompt-facing shape for the
+// Sprint E #2 earnings calendar block. Alias for earnings.Snapshot
+// so the decision package stays the single import point for
+// prompt-facing types. Each entry tells the PM the NEAREST
+// upcoming earnings release per symbol inside the configured
+// forward horizon, including the BMO/AMC tag for time-of-day
+// shading.
+type EarningsCalendarSnapshot = earnings.Snapshot
+
+// EarningsEvent is the single-event alias paired with the
+// snapshot so callers (the wiring layer + tests) can build
+// DecisionInput.EarningsCalendar without importing the earnings
+// package directly.
+type EarningsEvent = earnings.Event
 
 // ExposureSnapshot is the prompt-facing shape for the Sprint C
 // #1 portfolio-level concentration check. Alias for
@@ -262,6 +278,21 @@ type DecisionInput struct {
 	// no fresh catalysts (or service unwired); the prompt omits
 	// the block.
 	NewsCatalysts []SymbolNewsCatalysts
+
+	// Sprint E #2 (earnings calendar). Per-symbol next scheduled
+	// earnings release inside the configured forward horizon
+	// (default 14 days). The system prompt teaches the PM to
+	// (a) refuse to OPEN a fresh position with an earnings event
+	// ≤ T+2 unless the debate carries a concrete catalyst-aware
+	// case, (b) prefer "reduce" / "watch" on existing positions
+	// the day before earnings, and (c) cite the date + AMC/BMO
+	// tag in reasoning when the action is gated by it. nil = no
+	// calendar (service unwired / no events in horizon); the
+	// prompt omits the block. Structured intentionally distinct
+	// from NewsCatalysts: a scheduled earnings release is a HARD
+	// catalyst (date is known); news is a SOFT one (we just
+	// saw a headline).
+	EarningsCalendar *EarningsCalendarSnapshot
 
 	// Sprint C #1 (portfolio exposure check). Fund-level
 	// concentration snapshot: per-symbol / per-sector weight
