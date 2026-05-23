@@ -75,6 +75,12 @@ func NewService(policy Policy) *Service {
 				params = *policy.XSMomentum
 			}
 			sleeves = append(sleeves, NewCrossSectionalMomentumSleeve(params))
+		case "tsmom", "ts_momentum", "ts-momentum", "time_series_momentum":
+			params := defaultTSMomentum()
+			if policy.TSMomentum != nil {
+				params = *policy.TSMomentum
+			}
+			sleeves = append(sleeves, NewTSMomentumSleeve(params))
 		default:
 			slog.Warn("strategy: unknown sleeve name in policy", "sleeve", name)
 		}

@@ -44,6 +44,13 @@ import (
 //	      "quintile":        0.20,
 //	      "minUniverseSize": 5,
 //	      "stopLossPct":     0.06
+//	    },
+//	    "tsMomentum": {
+//	      "lookbackBars":    240,
+//	      "skipBars":        21,
+//	      "minAbsT":         0.5,
+//	      "maxSatT":         2.0,
+//	      "stopLossPct":     0.06
 //	    }
 //	  }
 //	}
@@ -56,10 +63,11 @@ type Policy struct {
 	// 0 means "accept anything > 0".
 	MinConfidence float64 `json:"minConfidence,omitempty"`
 
-	Trend         *TrendParams                   `json:"trend,omitempty"`
-	MeanReversion *MeanReversionParams           `json:"meanReversion,omitempty"`
-	DualMA        *DualMAParams                  `json:"dualMA,omitempty"`
-	XSMomentum    *CrossSectionalMomentumParams  `json:"xsMomentum,omitempty"`
+	Trend         *TrendParams                  `json:"trend,omitempty"`
+	MeanReversion *MeanReversionParams          `json:"meanReversion,omitempty"`
+	DualMA        *DualMAParams                 `json:"dualMA,omitempty"`
+	XSMomentum    *CrossSectionalMomentumParams `json:"xsMomentum,omitempty"`
+	TSMomentum    *TSMomentumParams             `json:"tsMomentum,omitempty"`
 }
 
 // TrendParams tunes the trend-following sleeve. Zero values fall
@@ -339,6 +347,45 @@ func (p Policy) EffectivePolicy() Policy {
 			merged.StopLossPct = p.XSMomentum.StopLossPct
 		}
 		out.XSMomentum = &merged
+	}
+	if p.TSMomentum != nil {
+		merged := defaultTSMomentum()
+		if p.TSMomentum.LookbackBars > 0 {
+			merged.LookbackBars = p.TSMomentum.LookbackBars
+		}
+		// Treat 0 as "use default" so partial overrides
+		// (LookbackBars: 120 alone) don't accidentally
+		// disable the skip. Operators who really want
+		// skipBars=0 must also set MinAbsT explicitly which
+		// is exotic enough to live in a config-time validator
+		// rather than the read path.
+		if p.TSMomentum.SkipBars > 0 {
+			merged.SkipBars = p.TSMomentum.SkipBars
+		}
+		// SkipBars must be strictly less than the lookback or
+		// the window collapses (same guard as XSMomentum).
+		if merged.SkipBars >= merged.LookbackBars {
+			merged.SkipBars = merged.LookbackBars / 12
+		}
+		if p.TSMomentum.MinAbsT > 0 {
+			merged.MinAbsT = p.TSMomentum.MinAbsT
+		}
+		if p.TSMomentum.MaxSatT > 0 {
+			merged.MaxSatT = p.TSMomentum.MaxSatT
+		}
+		// Confidence ramp degenerates if the user inverts the
+		// (min, max) pair. We swap rather than reject so the
+		// sleeve degrades gracefully under hand-edited configs.
+		if merged.MaxSatT <= merged.MinAbsT {
+			merged.MinAbsT, merged.MaxSatT = merged.MaxSatT, merged.MinAbsT
+			if merged.MaxSatT <= merged.MinAbsT {
+				merged = defaultTSMomentum()
+			}
+		}
+		if p.TSMomentum.StopLossPct > 0 {
+			merged.StopLossPct = p.TSMomentum.StopLossPct
+		}
+		out.TSMomentum = &merged
 	}
 	return out
 }
