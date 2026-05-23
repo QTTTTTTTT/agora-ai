@@ -37,6 +37,7 @@ import (
 	"github.com/fundai/server/internal/marketcalendar"
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketplace"
+	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/ohlc"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/quota"
@@ -1339,6 +1340,15 @@ type runtimePMAgent struct {
 	// behaviour); the prompt omits the block and the PM falls
 	// back to its static R prior.
 	riskBudgetSvc *riskbudget.Service
+	// newsCatalystSvc is the Sprint B #3 per-symbol news
+	// catalyst recall. Uses the same marketdata.Service as the
+	// rest of the wiring (provider rotation + cache + translation
+	// are shared) and parallel-fetches one news call per
+	// candidate symbol behind a small worker pool. nil = no
+	// catalyst recall (marketdata not enabled); the prompt omits
+	// the block and the PM falls back on the existing
+	// NewsSentiment text blob.
+	newsCatalystSvc *newsrecall.Service
 }
 
 type runtimeRiskAgent struct {
@@ -5603,6 +5613,16 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// overrides via fund.config.riskBudget but
 				// Sprint B ships with the platform default.
 				riskBudgetSvc: riskbudget.NewService(s.db, riskbudget.Options{}),
+				// Sprint B #3: per-symbol news catalyst
+				// recall. Shares the marketdata.Service
+				// instance with the rest of the wiring so
+				// cache + provider rotation + translation
+				// are reused; default Options give us a 7d
+				// MaxAge, top-3 per symbol, 4-way fetch
+				// concurrency, 6s per-call timeout. A nil
+				// marketdata.Service degrades gracefully —
+				// the constructor stays unconditional.
+				newsCatalystSvc: newsrecall.NewService(s.marketData, newsrecall.Options{}),
 				// Sprint A #2: cross-sectional ranker shares
 				// the same OHLC fetcher so bars asked for
 				// by the quant snapshot pass come back from
@@ -13714,9 +13734,65 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		UniverseRanking:     a.buildUniverseRanking(ctx, profile.Market, universe, decisionPositions),
 		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
 		RiskBudget:          a.buildRiskBudget(ctx, fundID, tradingDate),
+		NewsCatalysts:       a.buildNewsCatalysts(ctx, profile.Market, universe, decisionPositions, tradingDate),
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
 	}
+}
+
+// buildNewsCatalysts assembles the Sprint B #3 per-symbol recent
+// news catalyst list. Same universe ∪ positions candidate set the
+// Sprint A / B #1 helpers use so the PM prompt has a coherent view
+// across blocks. Returns nil when the service isn't wired, the
+// fund's marketdata is offline, or no symbols carry recent items.
+//
+// All errors are swallowed inside newsrecall.BuildCatalysts (the
+// service downgrades per-symbol failures to "no catalysts" for
+// that symbol), so this wrapper only needs the dedupe + symbol-
+// to-Request translation.
+func (a *runtimePMAgent) buildNewsCatalysts(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition, now time.Time) []decision.SymbolNewsCatalysts {
+	if a == nil || a.newsCatalystSvc == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	requests := make([]newsrecall.Request, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, newsrecall.Request{Symbol: key, Market: market})
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := market
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, newsrecall.Request{
+			Symbol:         key,
+			Market:         mk,
+			Exchange:       strings.TrimSpace(pos.Exchange),
+			AssetClass:     strings.TrimSpace(pos.AssetClass),
+			InstrumentType: strings.TrimSpace(pos.InstrumentKey),
+		})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return a.newsCatalystSvc.BuildCatalysts(ctx, requests, now)
 }
 
 // buildRiskBudget assembles the Sprint B #2 fund-level risk-budget

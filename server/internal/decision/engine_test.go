@@ -822,3 +822,100 @@ func TestRound2(t *testing.T) {
 		}
 	}
 }
+
+// Sprint B #3: the system prompt must teach the PM how to read the
+// newsCatalysts block.
+func TestSystemPromptDocumentsNewsCatalystsRules(t *testing.T) {
+	prompt := systemPrompt()
+	required := []string{
+		"input.newsCatalysts",
+		"hoursOld",
+		"publishedAt",
+		"contradicts",
+		"REINFORCES",
+	}
+	for _, frag := range required {
+		if !strings.Contains(prompt, frag) {
+			t.Errorf("systemPrompt() missing %q — the newsCatalysts rule has regressed", frag)
+		}
+	}
+}
+
+// The user prompt must serialise NewsCatalysts under the documented
+// JSON key with all the fields the system prompt references.
+func TestUserPromptIncludesNewsCatalystsBlock(t *testing.T) {
+	published := time.Date(2026, 5, 24, 8, 0, 0, 0, time.UTC)
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+		NewsCatalysts: []SymbolNewsCatalysts{
+			{
+				Symbol: "AAPL",
+				Hits: []NewsHit{
+					{
+						Title:       "AAPL Q4 guidance cut",
+						Summary:     "Apple lowered its Q4 services guidance citing weaker China demand and headwinds.",
+						Source:      "reuters",
+						Language:    "en",
+						PublishedAt: published,
+						HoursOld:    4.0,
+					},
+				},
+			},
+		},
+	})
+	if !strings.Contains(prompt, `"newsCatalysts"`) {
+		t.Errorf("user prompt missing newsCatalysts key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"symbol": "AAPL"`) {
+		t.Errorf("AAPL symbol not surfaced under newsCatalysts:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"title": "AAPL Q4 guidance cut"`) {
+		t.Errorf("title not surfaced under newsCatalysts:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"source": "reuters"`) {
+		t.Errorf("source not surfaced under newsCatalysts:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"publishedAt": "2026-05-24T08:00:00Z"`) {
+		t.Errorf("RFC-3339 publishedAt not surfaced under newsCatalysts:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"hoursOld": 4`) {
+		t.Errorf("hoursOld not surfaced under newsCatalysts:\n%s", prompt)
+	}
+}
+
+// Empty / nil NewsCatalysts → no key in prompt.
+func TestUserPromptOmitsNewsCatalystsWhenEmpty(t *testing.T) {
+	prompt := userPrompt(DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+	})
+	if strings.Contains(prompt, `"newsCatalysts"`) {
+		t.Errorf("empty NewsCatalysts should not appear in prompt:\n%s", prompt)
+	}
+}
+
+// truncateSummary respects the rune boundary (avoids the classic
+// "slice in the middle of a 3-byte UTF-8 character" trap) and
+// returns the original when within the cap.
+func TestTruncateSummaryUTF8Safe(t *testing.T) {
+	if got := truncateSummary("", 10); got != "" {
+		t.Errorf("empty in → got %q, want empty", got)
+	}
+	if got := truncateSummary("short", 10); got != "short" {
+		t.Errorf("within cap: got %q, want short", got)
+	}
+	// 4 Chinese characters, each 3 bytes (12 bytes total) — cap 2
+	// runes means we keep 2 chars + "…" suffix.
+	got := truncateSummary("一二三四五六", 2)
+	want := "一二…"
+	if got != want {
+		t.Errorf("truncate 6 chars to 2: got %q, want %q", got, want)
+	}
+	// Negative / zero cap → empty.
+	if got := truncateSummary("anything", 0); got != "" {
+		t.Errorf("zero cap should produce empty, got %q", got)
+	}
+}

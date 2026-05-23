@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/fundai/server/internal/cooldown"
+	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/ranking"
 	"github.com/fundai/server/internal/riskbudget"
@@ -61,6 +62,20 @@ type SymbolCooldown = cooldown.Lock
 // drawdown, the resulting volatility / drawdown scalars, and the
 // effective per-trade R% to size with.
 type RiskBudgetSnapshot = riskbudget.Snapshot
+
+// SymbolNewsCatalysts is the prompt-facing shape for the Sprint B
+// #3 per-symbol news catalyst list. Alias for
+// newsrecall.SymbolCatalysts so the decision package stays the
+// single import point. Each entry carries 1..K (default 3) recent
+// news hits the PM should weigh against the candidate symbol's
+// debate verdict.
+type SymbolNewsCatalysts = newsrecall.SymbolCatalysts
+
+// NewsHit is the single-news-item alias paired with
+// SymbolNewsCatalysts so callers (the wiring layer + tests)
+// can construct DecisionInput.NewsCatalysts without importing the
+// newsrecall package directly.
+type NewsHit = newsrecall.Hit
 
 // DecisionInput is the full context handed to the engine for one
 // decision call. Every field is optional from the engine's
@@ -205,6 +220,18 @@ type DecisionInput struct {
 	// insufficient NAV history); the prompt omits the block and the
 	// PM falls back to its static R prior.
 	RiskBudget *RiskBudgetSnapshot
+
+	// Sprint B #3 (per-symbol news catalysts). Top-K (default 3)
+	// recent news items per universe / position symbol fetched from
+	// the existing marketdata.Service. Sorted most-recent first and
+	// bounded by MaxAge (default 7 days) so the prompt only sees
+	// catalysts the PM can actually use to weigh a fresh debate
+	// verdict. The system prompt teaches the PM to (a) downgrade
+	// a buy when a < 48h catalyst contradicts the bullCase, and
+	// (b) cite the catalyst when it tips an action. Empty / nil =
+	// no fresh catalysts (or service unwired); the prompt omits
+	// the block.
+	NewsCatalysts []SymbolNewsCatalysts
 
 	// Phase 3A-10 lesson replay. A multi-line block rendered
 	// upstream by attribution.BuildLessonReplay that paraphrases

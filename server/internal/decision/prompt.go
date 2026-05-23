@@ -94,6 +94,13 @@ Adhere to these rules without exception:
        - If ddScalar < 1.0 (the fund is in drawdown) the throttle is engaged. Drop your typical position-count target by one (e.g. instead of 4 new buys, pick 3) and demand at least 0.7 confidence on any buy / add you do propose. When ddScalar is at the 0.4 floor (≥ ddCeiling drawdown) the default action is "watch" across the board unless a candidate has BOTH Q1 ranking AND a debate bullCase with zero dissent.
        - The riskBudget snapshot is fund-wide, not per-symbol. Symbols you've decided to "reduce" / "sell" for risk reasons aren't constrained by this rule — the throttle is about NEW exposure.
        - Cite the snapshot when it materially changes sizing ("riskBudget.ddScalar=0.55 forces qtyPct=0.025 instead of the 0.05 ATR ceiling; fund is in 12% drawdown").
+   - When input.newsCatalysts is present (Sprint B per-symbol catalyst recall): each entry is one universe / position symbol with 1..K (default 3) recent news hits, ordered most-recent first. hoursOld tells you how stale a hit is; publishedAt is the RFC-3339 timestamp; source and language let you weigh credibility / locale relevance. Use the block as the contextual gate that supplements the debate verdict:
+       - A hit with hoursOld <= 48 is "fresh" — treat it as material new information. If a fresh hit explicitly contradicts the debate bullCase (a buy candidate with a fresh earnings miss / downgrade / litigation headline), downgrade the action by one notch (buy → watch, add → hold) unless you can name a concrete reason the headline is already priced in.
+       - A fresh hit that REINFORCES the debate verdict (buy candidate + fresh positive guidance / contract win / regulatory approval) lets you keep your sizing at the per-symbol ceiling — but never above it. News alone is never sufficient to override the riskBudget or quantSnapshot ceilings; it only restores conviction within the existing budget.
+       - Stale hits (hoursOld > 48) are background context. Use them to discount the freshness of any "breaking" claim in your own reasoning, not as the trigger for an action.
+       - When a symbol has no entry in newsCatalysts but does appear in input.universe / input.positions, treat it as "no actionable catalyst window" — fall back entirely on the debate / fundamental / sector / quant blocks. Absence here is NOT a signal in itself.
+       - The block is symbol-level, not fund-level: a fresh macro headline on AAPL does NOT change your TSLA sizing unless TSLA also has its own newsCatalysts entry referencing the same theme.
+       - Cite the hit explicitly when it changes your action ("AAPL: 3h Reuters 'Q4 guidance cut' → downgrading the bull buy to watch").
 
 5. Locale: write reasoning text in the same language the input MacroBriefing / RoundtableConsensus uses (Chinese ⇄ English). If the input is empty or mixed, default to Chinese.
 
@@ -130,6 +137,7 @@ func userPrompt(input DecisionInput) string {
 		UniverseRanking     []universeRankingPromptItem  `json:"universeRanking,omitempty"`
 		Cooldowns           []cooldownPromptItem         `json:"cooldowns,omitempty"`
 		RiskBudget          *riskBudgetPromptItem        `json:"riskBudget,omitempty"`
+		NewsCatalysts       []newsCatalystPromptItem     `json:"newsCatalysts,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
 		RiskNotes           []string                     `json:"riskNotes,omitempty"`
 	}{
@@ -157,6 +165,7 @@ func userPrompt(input DecisionInput) string {
 		UniverseRanking:     buildUniverseRankingPromptItems(input.UniverseRanking),
 		Cooldowns:           buildCooldownPromptItems(input.Cooldowns),
 		RiskBudget:          buildRiskBudgetPromptItem(input.RiskBudget),
+		NewsCatalysts:       buildNewsCatalystPromptItems(input.NewsCatalysts),
 		BuyBudget:           input.BuyBudget,
 		RiskNotes:           input.RiskNotes,
 	}
@@ -410,6 +419,96 @@ func round2(v float64) float64 {
 	}
 	const scale = 100.0
 	return float64(int64(v*scale+0.5)) / scale
+}
+
+// newsCatalystPromptItem is the on-the-wire shape for the Sprint B
+// #3 per-symbol catalyst block. We collapse the Hit slice into a
+// flat structure with the title / source / publishedAt / hoursOld
+// fields the PM system prompt references — the summary is included
+// when present so the LLM can see the actual catalyst, not just a
+// headline.
+//
+// Why no URL: the marketdata fetchers don't always populate URL
+// (Sina's older payloads, for example). The PM never needs to open
+// the URL, and including it bloats the prompt for no payoff.
+// Language is preserved so the PM can ignore CN-only items in an
+// EN-mode fund (or vice versa).
+type newsCatalystPromptItem struct {
+	Symbol string           `json:"symbol"`
+	Hits   []newsHitPromptItem `json:"hits"`
+}
+
+type newsHitPromptItem struct {
+	Title       string  `json:"title"`
+	Summary     string  `json:"summary,omitempty"`
+	Source      string  `json:"source,omitempty"`
+	Language    string  `json:"language,omitempty"`
+	PublishedAt string  `json:"publishedAt"`
+	HoursOld    float64 `json:"hoursOld"`
+}
+
+// buildNewsCatalystPromptItems renders SymbolNewsCatalysts for the
+// prompt. Drops empty / blank-symbol entries and entries with no
+// hits — these can only appear when an upstream fetcher returns a
+// degenerate payload, but we stay defensive so the prompt JSON is
+// always well-formed.
+//
+// Summaries are truncated to keep the prompt small: a 200-char
+// snippet is enough for the PM to decide whether the catalyst is
+// material; longer than that and the prompt JSON bloats with no
+// signal gain. The truncation appends "…" to flag the cut.
+func buildNewsCatalystPromptItems(catalysts []SymbolNewsCatalysts) []newsCatalystPromptItem {
+	if len(catalysts) == 0 {
+		return nil
+	}
+	out := make([]newsCatalystPromptItem, 0, len(catalysts))
+	for _, c := range catalysts {
+		if strings.TrimSpace(c.Symbol) == "" || len(c.Hits) == 0 {
+			continue
+		}
+		hits := make([]newsHitPromptItem, 0, len(c.Hits))
+		for _, h := range c.Hits {
+			title := strings.TrimSpace(h.Title)
+			if title == "" {
+				continue
+			}
+			published := ""
+			if !h.PublishedAt.IsZero() {
+				published = h.PublishedAt.UTC().Format("2006-01-02T15:04:05Z")
+			}
+			hits = append(hits, newsHitPromptItem{
+				Title:       title,
+				Summary:     truncateSummary(strings.TrimSpace(h.Summary), 200),
+				Source:      strings.TrimSpace(h.Source),
+				Language:    strings.TrimSpace(h.Language),
+				PublishedAt: published,
+				HoursOld:    roundTenth(h.HoursOld),
+			})
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		out = append(out, newsCatalystPromptItem{Symbol: c.Symbol, Hits: hits})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// truncateSummary keeps the prompt JSON small. The cutoff is on a
+// rune boundary so we don't slice a multi-byte UTF-8 character in
+// half (Chinese characters are 3 bytes each — a naive byte cut
+// would produce invalid UTF-8 and break the JSON encoder).
+func truncateSummary(s string, max int) string {
+	if max <= 0 || s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
 }
 
 func buildRoundtableDebatePrompt(input DecisionInput) *roundtableDebatePrompt {
