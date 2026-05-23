@@ -37,7 +37,14 @@ type PositionView struct {
 	// indefinitely fresh — useful for tests; production wires
 	// the refresher's last update time.
 	QuoteAsOf time.Time
-	OpenLots  []*repository.PositionLotRow
+	// ATR14 is the per-symbol 14-bar Wilder ATR in price units,
+	// sourced from the same quantsnapshot pipeline that feeds
+	// the PM prompt. Optional: a zero value disables the ATR
+	// stop for this position (no-op rather than fire), which
+	// lets the exit manager run safely on funds whose OHLC
+	// coverage hasn't caught up yet. Sprint D #3.
+	ATR14    float64
+	OpenLots []*repository.PositionLotRow
 }
 
 // ExitDecision is the service's output: close all open lots of
@@ -122,13 +129,21 @@ var ErrInvalidView = errors.New("exitmanager: invalid position view")
 // Rule priority (when multiple fire on the same position): the
 // one that signals the WORST imminent risk wins, in order:
 //
-//   stop_loss > trailing > take_profit > time_stop
+//   stop_loss > atr_stop > trailing > take_profit > time_stop
 //
-// "stop_loss > trailing": both are downside protections; the
-// fixed stop fires from entry and the trailing fires from peak.
-// When both fire we prefer to attribute as stop_loss because
-// that's the harder signal (price below entry, not just below
-// peak).
+// "stop_loss > atr_stop > trailing": all three are downside
+// protections. The fixed stop fires from entry; the ATR stop
+// fires from anchor − k·ATR (peak or entry); the trailing stop
+// fires from peak. When several of them fire, the priority
+// reflects how INTENTIONAL each signal is:
+//   - stop_loss is the operator's hard line ("never lose more
+//     than X% on entry"), so it's the most decisive.
+//   - atr_stop is volatility-adapted — when it fires it means
+//     the move is large vs the symbol's own noise, which is a
+//     more informative signal than the fixed-percent retracement
+//     used by `trailing`.
+//   - trailing is the broadest "give back % of peak" rule and
+//     loses out to its volatility-aware sibling.
 //
 // "take_profit > time_stop": when we're already in profit AND
 // timed out, the proximate cause is the profit hit, not the
@@ -186,10 +201,16 @@ func (s *Service) evaluateOne(p Policy, v PositionView, now time.Time) *ExitDeci
 		TriggerPrice:  v.CurrentPrice,
 	}
 
-	// Priority: stop_loss → trailing → take_profit → time_stop.
+	// Priority: stop_loss → atr_stop → trailing → take_profit → time_stop.
 	if p.StopLoss != nil {
 		if hit, lot, reason := matchStopLoss(p.StopLoss.Percent, v); hit {
 			fill(&base, lot, "stop_loss", reason)
+			return &base
+		}
+	}
+	if p.ATRStop != nil {
+		if hit, lot, reason := matchATRStop(*p.ATRStop, v); hit {
+			fill(&base, lot, "atr_stop", reason)
 			return &base
 		}
 	}
@@ -334,6 +355,92 @@ func matchTrailing(percent float64, v PositionView) (bool, *repository.PositionL
 	}
 	return true, trigger, fmt.Sprintf("trailing: price %.4f retraced %.2f%% from peak %.4f (entry %.4f)",
 		v.CurrentPrice, worstRetracement*100, trigger.HighestPriceSeen.Float64, trigger.EntryPrice)
+}
+
+// matchATRStop fires when the current price has dropped below
+//
+//	anchor − rule.Multiplier · v.ATR14
+//
+// for ANY open lot, where `anchor` is either the lot's
+// highest_price_seen (anchorMode="peak", default) or the lot's
+// entry price (anchorMode="entry").
+//
+// Guards:
+//
+//   - v.ATR14 ≤ 0           → rule no-ops (no usable volatility
+//     signal; we don't synthesise one from price alone because
+//     the wiring layer is the single source of truth for ATR).
+//   - rule.Multiplier ≤ 0   → rule no-ops (caller bug; should
+//     have been clamped to 0 by clampATRMultiplier).
+//   - lot.EntryPrice ≤ 0    → skip lot (no anchor possible).
+//   - mode=peak AND HighestPriceSeen invalid OR ≤ entry → skip
+//     lot. This mirrors the trailing-stop guard: until the lot
+//     has actually rallied above entry, "peak − k·ATR" is just
+//     a worse stop_loss and would create noise.
+//
+// The triggering lot is the one with the LARGEST gap between
+// current_price and its threshold — i.e. the deepest breach —
+// so the audit log surfaces the worst offender. Reasoning quotes
+// the ATR multiple and the anchor mode so an operator reading
+// closed_lots can reconstruct the math without re-fetching the
+// quantsnapshot row.
+func matchATRStop(rule ATRStopRule, v PositionView) (bool, *repository.PositionLotRow, string) {
+	if rule.Multiplier <= 0 || v.ATR14 <= 0 {
+		return false, nil, ""
+	}
+	mode := rule.AnchorMode
+	if mode != ATRAnchorEntry {
+		mode = ATRAnchorPeak
+	}
+	budget := rule.Multiplier * v.ATR14
+	var trigger *repository.PositionLotRow
+	var triggerAnchor float64
+	worstBreach := 0.0
+	for _, lot := range v.OpenLots {
+		if lot == nil || lot.EntryPrice <= 0 {
+			continue
+		}
+		anchor := lot.EntryPrice
+		if mode == ATRAnchorPeak {
+			if !lot.HighestPriceSeen.Valid || lot.HighestPriceSeen.Float64 <= lot.EntryPrice {
+				// Lot never broke even — the peak-anchored
+				// rule has no business firing on it. Let
+				// stop_loss own this case.
+				continue
+			}
+			anchor = lot.HighestPriceSeen.Float64
+		}
+		threshold := anchor - budget
+		if threshold <= 0 {
+			// Pathologically wide stop — k·ATR ≥ anchor; the
+			// rule degenerates into "price below 0", which
+			// never fires. Treat as no-op rather than
+			// always-on to avoid surprising the operator.
+			continue
+		}
+		if v.CurrentPrice < threshold {
+			breach := threshold - v.CurrentPrice
+			if trigger == nil || breach > worstBreach {
+				trigger = lot
+				triggerAnchor = anchor
+				worstBreach = breach
+			}
+		}
+	}
+	if trigger == nil {
+		return false, nil, ""
+	}
+	threshold := triggerAnchor - budget
+	return true, trigger, fmt.Sprintf(
+		"atr_stop: price %.4f fell below anchor(%s)=%.4f − %.2f·ATR(%.4f)=%.4f (breach %.4f)",
+		v.CurrentPrice,
+		string(mode),
+		triggerAnchor,
+		rule.Multiplier,
+		v.ATR14,
+		threshold,
+		worstBreach,
+	)
 }
 
 // matchTimeStop fires when ANY open lot has been held for more

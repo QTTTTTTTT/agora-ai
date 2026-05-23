@@ -10,7 +10,12 @@
 //  2. take_profit — close when price rises Y% above entry
 //  3. trailing    — close when price drops Z% below the
 //                   highest price seen during the holding period
-//  4. time_stop   — close after N calendar days
+//  4. atr_stop    — close when price drops below
+//                   anchor − k·ATR (Chandelier-style volatility
+//                   trailing stop). Anchor is either the lot
+//                   peak (anchorMode="peak", default) or the
+//                   entry price (anchorMode="entry").
+//  5. time_stop   — close after N calendar days
 //
 // Each rule is configured per-fund inside fund.config.exitPolicy
 // and the service is OPT-IN — exitPolicy.enabled = false (the
@@ -47,8 +52,17 @@ import (
 //	  "stopLoss":   { "percent": 0.10 },
 //	  "takeProfit": { "percent": 0.25 },
 //	  "trailing":   { "percent": 0.12 },
+//	  "atrStop":    { "multiplier": 3.0, "anchorMode": "peak" },
 //	  "timeStop":   { "maxHoldingDays": 30 }
 //	}
+//
+// The atrStop rule is the volatility-aware sibling of `trailing`:
+// instead of "give back N% of the peak", it says "give back k
+// ATRs of the peak (or entry)". Funds that hold both quiet and
+// noisy names benefit because the stop self-scales — quiet
+// names get a tight stop, noisy names get a wide one, so a 2%
+// retracement in MSFT doesn't get stopped out by the same rule
+// that's trying to hold TSLA through an 8% swing.
 //
 // Backward compatibility: when the column is absent or the
 // JSON is empty, PolicyFromFundConfig returns a Policy whose
@@ -59,6 +73,7 @@ type Policy struct {
 	StopLoss   *FixedPercent    `json:"stopLoss,omitempty"`
 	TakeProfit *FixedPercent    `json:"takeProfit,omitempty"`
 	Trailing   *TrailingPercent `json:"trailing,omitempty"`
+	ATRStop    *ATRStopRule     `json:"atrStop,omitempty"`
 	TimeStop   *TimeWindow      `json:"timeStop,omitempty"`
 }
 
@@ -87,6 +102,50 @@ type TimeWindow struct {
 	MaxHoldingDays int `json:"maxHoldingDays"`
 }
 
+// ATRAnchorMode names where the ATR stop subtracts its volatility
+// budget from. The two supported modes match the two classical
+// shapes:
+//
+//   - "peak"  → Chandelier exit: anchor = highest_price_seen since
+//     entry. Stop floats UP as the position breaks out and locks
+//     in profit as the run extends. Strictly tighter than entry-
+//     anchored once the lot has rallied.
+//
+//   - "entry" → Wilder-style fixed ATR stop: anchor = entry_price.
+//     Stop never moves; the rule fires when the position bleeds
+//     k·ATR from entry. Useful for swing entries where the manager
+//     doesn't want the stop to creep up on noise.
+type ATRAnchorMode string
+
+const (
+	// ATRAnchorPeak is the Chandelier-style anchor. Default.
+	ATRAnchorPeak ATRAnchorMode = "peak"
+	// ATRAnchorEntry pins the anchor to the lot's entry price.
+	ATRAnchorEntry ATRAnchorMode = "entry"
+)
+
+// ATRStopRule expresses a volatility-scaled trailing stop:
+//
+//	threshold = anchor − Multiplier · ATR
+//
+// where ATR is the per-symbol 14-bar Wilder ATR sourced by the
+// wiring layer (same series the prompt's quantSnapshots block
+// uses). The rule no-ops when ATR is missing (legacy positions,
+// freshly listed symbols whose history is shorter than ATRPeriod+1)
+// so a fund can safely enable it ahead of full OHLC coverage —
+// it'll just stay quiet until the data lands.
+type ATRStopRule struct {
+	// Multiplier is the ATR multiple subtracted from the anchor.
+	// Common values: 3.0 (textbook Chandelier), 2.5 (tighter,
+	// faster scalps), 4.0 (looser, for high-vol crypto-style
+	// names). Clamped into [MinATRMultiplier, MaxATRMultiplier].
+	Multiplier float64 `json:"multiplier"`
+	// AnchorMode selects "peak" (default) or "entry"; unknown
+	// values are coerced to "peak" by EffectivePolicy so the
+	// rule degrades gracefully on hand-edited configs.
+	AnchorMode ATRAnchorMode `json:"anchorMode,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Bounds (kept generous on purpose; the goal is to reject obvious
 // typos like 1000% stops, not to second-guess sensible operators).
@@ -109,6 +168,15 @@ const (
 	// latter should disable time_stop entirely instead of using
 	// a hyper-large window.
 	MaxHoldingDays = 365
+	// MinATRMultiplier is the lower bound on the ATR stop
+	// multiplier. Anything below 0.5 fires on intraday noise.
+	MinATRMultiplier = 0.5
+	// MaxATRMultiplier is the upper bound; values above 10 are
+	// effectively no-stop and almost always a typo.
+	MaxATRMultiplier = 10.0
+	// DefaultATRMultiplier is the textbook Chandelier multiple
+	// (Chuck LeBeau's original Le Long Chandelier exit).
+	DefaultATRMultiplier = 3.0
 )
 
 // ---------------------------------------------------------------------------
@@ -146,6 +214,14 @@ func (p Policy) EffectivePolicy() Policy {
 			out.Trailing = &TrailingPercent{Percent: pct}
 		}
 	}
+	if p.ATRStop != nil {
+		if mult := clampATRMultiplier(p.ATRStop.Multiplier); mult > 0 {
+			out.ATRStop = &ATRStopRule{
+				Multiplier: mult,
+				AnchorMode: normaliseAnchorMode(p.ATRStop.AnchorMode),
+			}
+		}
+	}
 	if p.TimeStop != nil {
 		if days := clampDays(p.TimeStop.MaxHoldingDays); days > 0 {
 			out.TimeStop = &TimeWindow{MaxHoldingDays: days}
@@ -162,7 +238,7 @@ func (p Policy) HasAnyRule() bool {
 	if !p.Enabled {
 		return false
 	}
-	return p.StopLoss != nil || p.TakeProfit != nil || p.Trailing != nil || p.TimeStop != nil
+	return p.StopLoss != nil || p.TakeProfit != nil || p.Trailing != nil || p.ATRStop != nil || p.TimeStop != nil
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +316,37 @@ func clampPercent(v float64) float64 {
 	return v
 }
 
+// clampATRMultiplier coerces a raw atrStop.multiplier into the
+// supported [MinATRMultiplier, MaxATRMultiplier] band.
+// Returns 0 to mean "rule disabled" (NaN, ≤0, or sub-min input).
+// Anything above the ceiling is clipped rather than disabled —
+// we'd rather honour a too-loose stop than silently drop the rule.
+func clampATRMultiplier(v float64) float64 {
+	if math.IsNaN(v) || v <= 0 {
+		return 0
+	}
+	if v < MinATRMultiplier {
+		return 0
+	}
+	if v > MaxATRMultiplier {
+		return MaxATRMultiplier
+	}
+	return v
+}
+
+// normaliseAnchorMode forces an unknown / empty anchorMode to the
+// default "peak". We don't error out on hand-edited typos like
+// "PEAK" or "Entry" — case-fold + match is friendlier than 500ing
+// the next decision cycle.
+func normaliseAnchorMode(m ATRAnchorMode) ATRAnchorMode {
+	switch ATRAnchorMode(strings.ToLower(strings.TrimSpace(string(m)))) {
+	case ATRAnchorEntry:
+		return ATRAnchorEntry
+	default:
+		return ATRAnchorPeak
+	}
+}
+
 // clampDays clips an integer day count to the legal time_stop
 // range. Returns 0 to mean "disabled".
 func clampDays(v int) int {
@@ -275,6 +382,9 @@ func ValidatePolicy(p Policy) error {
 		return ErrInvalidPolicy
 	}
 	if p.Trailing != nil && clampPercent(p.Trailing.Percent) == 0 {
+		return ErrInvalidPolicy
+	}
+	if p.ATRStop != nil && clampATRMultiplier(p.ATRStop.Multiplier) == 0 {
 		return ErrInvalidPolicy
 	}
 	if p.TimeStop != nil && clampDays(p.TimeStop.MaxHoldingDays) == 0 {

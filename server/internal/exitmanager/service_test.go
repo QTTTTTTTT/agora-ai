@@ -474,3 +474,233 @@ func TestEvaluateOrdersResultsByInstrumentKey(t *testing.T) {
 		t.Fatalf("expected alphabetical order, got %+v", decs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ATR stop (Sprint D #3)
+// ---------------------------------------------------------------------------
+
+func TestPolicyFromFundConfigDecodesATRStop(t *testing.T) {
+	raw := json.RawMessage(`{
+		"exitPolicy": {
+			"enabled": true,
+			"atrStop": {"multiplier": 3.0, "anchorMode": "PEAK"}
+		}
+	}`)
+	p := PolicyFromFundConfig(raw)
+	if p.ATRStop == nil {
+		t.Fatalf("expected atrStop to decode, got %+v", p)
+	}
+	if p.ATRStop.Multiplier != 3.0 {
+		t.Fatalf("multiplier: got %v, want 3.0", p.ATRStop.Multiplier)
+	}
+	// PEAK should be case-folded to the canonical "peak" by
+	// normaliseAnchorMode.
+	if p.ATRStop.AnchorMode != ATRAnchorPeak {
+		t.Fatalf("anchorMode: got %q, want %q", p.ATRStop.AnchorMode, ATRAnchorPeak)
+	}
+}
+
+func TestEffectivePolicyClampsATRStop(t *testing.T) {
+	cases := []struct {
+		name      string
+		multiplier float64
+		anchor    ATRAnchorMode
+		wantMult  float64
+		wantAnchor ATRAnchorMode
+		wantNil   bool
+	}{
+		{"too small drops rule", 0.1, "", 0, "", true},
+		{"too large clips to ceiling", 99, "", MaxATRMultiplier, ATRAnchorPeak, false},
+		{"sane peak passes", 3.0, ATRAnchorPeak, 3.0, ATRAnchorPeak, false},
+		{"sane entry passes", 2.5, ATRAnchorEntry, 2.5, ATRAnchorEntry, false},
+		{"unknown anchor falls back to peak", 2.0, "bogus", 2.0, ATRAnchorPeak, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eff := Policy{
+				Enabled: true,
+				ATRStop: &ATRStopRule{Multiplier: tc.multiplier, AnchorMode: tc.anchor},
+			}.EffectivePolicy()
+			if tc.wantNil {
+				if eff.ATRStop != nil {
+					t.Fatalf("expected ATRStop=nil, got %+v", eff.ATRStop)
+				}
+				return
+			}
+			if eff.ATRStop == nil {
+				t.Fatalf("expected ATRStop, got nil")
+			}
+			if eff.ATRStop.Multiplier != tc.wantMult {
+				t.Fatalf("multiplier: got %v, want %v", eff.ATRStop.Multiplier, tc.wantMult)
+			}
+			if eff.ATRStop.AnchorMode != tc.wantAnchor {
+				t.Fatalf("anchor: got %q, want %q", eff.ATRStop.AnchorMode, tc.wantAnchor)
+			}
+		})
+	}
+}
+
+func TestATRStopFiresAgainstPeakAnchor(t *testing.T) {
+	svc := NewService()
+	// ATR14 = 2, multiplier = 3 → budget = 6.
+	// Lot1 entry 100, peak 120 → anchor 120, threshold 114.
+	// Price 110 < 114 → fires; breach = 4.
+	// Lot2 entry 100, peak 105 → anchor 105, threshold 99.
+	// Price 110 > 99 → does not fire (its threshold is lower).
+	// Trigger should be L1 (largest breach).
+	policy := Policy{
+		Enabled: true,
+		ATRStop: &ATRStopRule{Multiplier: 3, AnchorMode: ATRAnchorPeak},
+	}
+	view := PositionView{
+		InstrumentKey: "X",
+		Symbol:        "X",
+		CurrentPrice:  110,
+		ATR14:         2,
+		OpenLots: []*repository.PositionLotRow{
+			withHigh(lotFromEntry("L1", 100, 5, 5), 120),
+			withHigh(lotFromEntry("L2", 100, 5, 3), 105),
+		},
+	}
+	decs := svc.Evaluate(policy, []PositionView{view})
+	if len(decs) != 1 || decs[0].Reason != "atr_stop" {
+		t.Fatalf("expected atr_stop, got %+v", decs)
+	}
+	if decs[0].LotID != "L1" {
+		t.Fatalf("trigger lot: got %q, want L1 (largest peak breach)", decs[0].LotID)
+	}
+}
+
+func TestATRStopFiresAgainstEntryAnchor(t *testing.T) {
+	svc := NewService()
+	// ATR14 = 2, multiplier = 3 → budget = 6.
+	// entry-anchored: threshold = 100 - 6 = 94. Price 93 < 94 → fire.
+	policy := Policy{
+		Enabled: true,
+		ATRStop: &ATRStopRule{Multiplier: 3, AnchorMode: ATRAnchorEntry},
+	}
+	view := PositionView{
+		InstrumentKey: "X",
+		Symbol:        "X",
+		CurrentPrice:  93,
+		ATR14:         2,
+		OpenLots: []*repository.PositionLotRow{
+			// No HighestPriceSeen set on purpose — entry anchor
+			// does not need it.
+			lotFromEntry("L1", 100, 5, 5),
+		},
+	}
+	decs := svc.Evaluate(policy, []PositionView{view})
+	if len(decs) != 1 || decs[0].Reason != "atr_stop" {
+		t.Fatalf("expected atr_stop with entry anchor, got %+v", decs)
+	}
+}
+
+func TestATRStopNoOpsWhenATRZero(t *testing.T) {
+	svc := NewService()
+	policy := Policy{
+		Enabled: true,
+		ATRStop: &ATRStopRule{Multiplier: 3, AnchorMode: ATRAnchorPeak},
+	}
+	view := PositionView{
+		InstrumentKey: "X",
+		Symbol:        "X",
+		CurrentPrice:  50,    // would normally fire — but ATR is 0
+		ATR14:         0,
+		OpenLots: []*repository.PositionLotRow{
+			withHigh(lotFromEntry("L1", 100, 5, 5), 120),
+		},
+	}
+	if decs := svc.Evaluate(policy, []PositionView{view}); len(decs) != 0 {
+		t.Fatalf("expected no atr_stop when ATR14 is 0, got %+v", decs)
+	}
+}
+
+func TestATRStopPeakSkipsLotsThatNeverRoseAboveEntry(t *testing.T) {
+	svc := NewService()
+	// Peak anchor degenerates into "worse stop_loss" when the
+	// lot never crossed entry — explicitly skipped.
+	policy := Policy{
+		Enabled: true,
+		ATRStop: &ATRStopRule{Multiplier: 3, AnchorMode: ATRAnchorPeak},
+	}
+	view := PositionView{
+		InstrumentKey: "X",
+		Symbol:        "X",
+		CurrentPrice:  80, // far below entry; would fire on entry anchor
+		ATR14:         2,
+		OpenLots: []*repository.PositionLotRow{
+			withHigh(lotFromEntry("L1", 100, 5, 5), 95), // peak < entry
+		},
+	}
+	if decs := svc.Evaluate(policy, []PositionView{view}); len(decs) != 0 {
+		t.Fatalf("expected no atr_stop on never-broke-even lot, got %+v", decs)
+	}
+}
+
+func TestATRStopBeatsTrailingByPriority(t *testing.T) {
+	svc := NewService()
+	// Construct a scenario where both atr_stop and trailing
+	// would fire on the same lot — atr_stop must win.
+	//
+	// entry 100, peak 120, current 105, ATR14=2, multiplier=3.
+	// atr_stop: budget=6, threshold = 120-6 = 114, 105 < 114 ✓
+	// trailing 5%: threshold = 120*0.95 = 114, 105 < 114 ✓
+	// stop_loss not configured.
+	policy := Policy{
+		Enabled:  true,
+		Trailing: &TrailingPercent{Percent: 0.05},
+		ATRStop:  &ATRStopRule{Multiplier: 3, AnchorMode: ATRAnchorPeak},
+	}
+	view := PositionView{
+		InstrumentKey: "X",
+		Symbol:        "X",
+		CurrentPrice:  105,
+		ATR14:         2,
+		OpenLots: []*repository.PositionLotRow{
+			withHigh(lotFromEntry("L1", 100, 5, 5), 120),
+		},
+	}
+	decs := svc.Evaluate(policy, []PositionView{view})
+	if len(decs) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(decs))
+	}
+	if decs[0].Reason != "atr_stop" {
+		t.Fatalf("priority: expected atr_stop over trailing, got %q", decs[0].Reason)
+	}
+}
+
+func TestStopLossBeatsATRStop(t *testing.T) {
+	svc := NewService()
+	// stop_loss and atr_stop both fire on the same lot. stop_loss
+	// still wins by priority.
+	//
+	// entry 100, peak 120, current 80, ATR14=2, multiplier=3.
+	// stop_loss 5%: threshold 95, 80 < 95 ✓
+	// atr_stop: 120 - 6 = 114, 80 < 114 ✓
+	policy := Policy{
+		Enabled:  true,
+		StopLoss: &FixedPercent{Percent: 0.05},
+		ATRStop:  &ATRStopRule{Multiplier: 3, AnchorMode: ATRAnchorPeak},
+	}
+	view := PositionView{
+		InstrumentKey: "X",
+		Symbol:        "X",
+		CurrentPrice:  80,
+		ATR14:         2,
+		OpenLots: []*repository.PositionLotRow{
+			withHigh(lotFromEntry("L1", 100, 5, 5), 120),
+		},
+	}
+	decs := svc.Evaluate(policy, []PositionView{view})
+	if len(decs) != 1 || decs[0].Reason != "stop_loss" {
+		t.Fatalf("priority: expected stop_loss, got %+v", decs)
+	}
+}
+
+func TestHasAnyRuleCoversATRStop(t *testing.T) {
+	p := Policy{Enabled: true, ATRStop: &ATRStopRule{Multiplier: 3}}.EffectivePolicy()
+	if !p.HasAnyRule() {
+		t.Fatal("HasAnyRule must report true when only ATR stop is configured")
+	}
+}

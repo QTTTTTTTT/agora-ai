@@ -12085,6 +12085,11 @@ func (a *runtimePMAgent) evaluateExitActions(ctx context.Context, fundID string,
 	if len(positions) == 0 {
 		return nil
 	}
+	// Sprint D #3: pre-fetch per-symbol ATR14 once for the whole
+	// fund so the ATR stop rule can fire without re-running
+	// quantsnapshot per (instrument, lot). Cheap: BuildBatch is
+	// already deduped by (symbol, market) inside the package.
+	atrBySymbol := a.fetchATRForPositions(ctx, fund, positions)
 	views := make([]exitmanager.PositionView, 0, len(positions))
 	for i := range positions {
 		pos := positions[i]
@@ -12121,6 +12126,16 @@ func (a *runtimePMAgent) evaluateExitActions(ctx context.Context, fundID string,
 			// covers new fills going forward.
 			continue
 		}
+		// Resolve ATR14 from the prefetch map. Missing key just
+		// means "no quantsnapshot for this symbol today" — the
+		// ATR stop will no-op for this position, the other
+		// rules keep firing as usual.
+		atr := 0.0
+		if atrBySymbol != nil {
+			if v, ok := atrBySymbol[strings.ToUpper(strings.TrimSpace(pos.Symbol))]; ok {
+				atr = v
+			}
+		}
 		views = append(views, exitmanager.PositionView{
 			InstrumentKey: pos.InstrumentKey,
 			Symbol:        pos.Symbol,
@@ -12128,6 +12143,7 @@ func (a *runtimePMAgent) evaluateExitActions(ctx context.Context, fundID string,
 			AssetClass:    pos.AssetClass.String,
 			CurrentPrice:  pos.CurrentPrice,
 			QuoteAsOf:     pos.UpdatedAt,
+			ATR14:         atr,
 			OpenLots:      lots,
 		})
 	}
@@ -12153,6 +12169,75 @@ func (a *runtimePMAgent) evaluateExitActions(ctx context.Context, fundID string,
 			}
 		}
 		out = append(out, buildExitPlanAction(d, posMeta))
+	}
+	return out
+}
+
+// fetchATRForPositions reuses the existing quantsnapshot builder
+// (Sprint A #1) to source per-symbol 14-bar ATR for the exit
+// manager's ATR-stop rule. We piggyback on the same indicator
+// pipeline rather than recomputing ATR locally so:
+//
+//   - the rule respects whatever ATRPeriod / OHLC source the
+//     quantsnapshot builder is wired with (no drift between the
+//     "what the LLM sees" and "what the exit manager fires on"
+//     volatility series);
+//   - we get free dedup, concurrency, and short-history guards
+//     out of the builder;
+//   - tests can omit the quantsnapshot builder entirely (returns
+//     nil), which makes the ATR-stop rule a no-op — exactly the
+//     behaviour the rest of the exit manager already expects when
+//     a signal is missing.
+//
+// Returns nil when the builder isn't wired or the position slice
+// has no usable symbol. A nil return is treated by the caller as
+// "no ATR available for any symbol" → ATR-stop rule no-ops for
+// every position; the other rules continue firing normally.
+//
+// Market resolution: positions inherit the fund's primary market
+// when their own market column is blank (legacy rows pre-dating
+// the per-row market backfill). This matches the convention used
+// by buildQuantSnapshots so a fund's holdings always resolve
+// against the same OHLC adapter.
+func (a *runtimePMAgent) fetchATRForPositions(ctx context.Context, fund *repository.Fund, positions []repository.HoldingPosition) map[string]float64 {
+	if a == nil || a.quantSnapshot == nil || fund == nil || len(positions) == 0 {
+		return nil
+	}
+	profile := decodeFundMarketProfile(fund.Config)
+	fundMarket := strings.ToLower(strings.TrimSpace(profile.Market))
+	seen := make(map[string]struct{}, len(positions))
+	requests := make([]quantsnapshot.SymbolRequest, 0, len(positions))
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := fundMarket
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market.String)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, quantsnapshot.SymbolRequest{Symbol: key, Market: mk})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	snapshots := a.quantSnapshot.BuildBatch(ctx, requests)
+	if len(snapshots) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(snapshots))
+	for _, s := range snapshots {
+		if s.ATR14 <= 0 {
+			continue
+		}
+		out[strings.ToUpper(strings.TrimSpace(s.Symbol))] = s.ATR14
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

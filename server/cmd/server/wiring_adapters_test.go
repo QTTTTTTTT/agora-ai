@@ -16,10 +16,72 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/marketcalendar"
 	"github.com/fundai/server/internal/marketdata"
+	"github.com/fundai/server/internal/ohlc"
+	"github.com/fundai/server/internal/quantsnapshot"
+	"github.com/fundai/server/internal/regime"
 	"github.com/fundai/server/internal/repository"
 	"github.com/fundai/server/internal/risk"
 	"github.com/fundai/server/internal/workflow"
 )
+
+// testATRFetcher is a deliberately simple ohlc.Fetcher used by
+// the Sprint D #3 wiring tests for fetchATRForPositions. Keyed
+// on "SYMBOL|market" so tests can seed multiple symbols cheaply
+// without a fake market data adapter.
+type testATRFetcher struct {
+	bars map[string][]ohlc.Bar
+}
+
+func newTestATRFetcher() *testATRFetcher {
+	return &testATRFetcher{bars: map[string][]ohlc.Bar{}}
+}
+
+func (f *testATRFetcher) Fetch(_ context.Context, req ohlc.FetchRequest) ([]ohlc.Bar, error) {
+	k := req.Symbol + "|" + req.Market
+	if b, ok := f.bars[k]; ok {
+		return b, nil
+	}
+	return nil, ohlc.ErrNoData
+}
+
+// genTestTrendBars mirrors the helper in quantsnapshot_test.go:
+// quiet uptrend with constant true range so Wilder ATR converges
+// to `trueRange`.
+func genTestTrendBars(n int, startClose, closeStep, trueRange float64) []ohlc.Bar {
+	bars := make([]ohlc.Bar, n)
+	start := time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < n; i++ {
+		c := startClose + float64(i)*closeStep
+		bars[i] = ohlc.Bar{
+			Time:   start.AddDate(0, 0, i),
+			Open:   c - closeStep/2,
+			High:   c + trueRange/2,
+			Low:    c - trueRange/2,
+			Close:  c,
+			Volume: 1_000_000,
+		}
+	}
+	return bars
+}
+
+// testQuantBuilder constructs a quantsnapshot.Builder backed by
+// the test fetcher. Passing nil yields a real builder with no
+// data source (BuildBatch returns nothing), matching the unwired
+// production path. Regime service is nil — quantsnapshot tolerates
+// that and just leaves the Regime field blank.
+func testQuantBuilder(t *testing.T, fetcher ohlc.Fetcher) *quantsnapshot.Builder {
+	t.Helper()
+	var rs *regime.Service
+	return quantsnapshot.NewBuilder(rs, fetcher, quantsnapshot.Options{})
+}
+
+func mapKeys(m map[string]float64) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
 
 // TestBuildFundConfigJSONAppliesPerMarketCalendarDefaults pins down the
 // fix for the regression where every freshly-created fund (regardless of
@@ -1068,6 +1130,88 @@ func TestResolveCorrelationOptionsNilReturnsEmpty(t *testing.T) {
 	got := resolveCorrelationOptions(nil)
 	if got.LookbackBars != 0 || got.HighCorrThreshold != 0 || got.MaxPairs != 0 {
 		t.Errorf("nil policy expected empty Options, got %+v", got)
+	}
+}
+
+// fetchATRForPositions wiring tests (Sprint D #3).
+//
+// The exit manager's ATR-stop rule sources volatility from the
+// same quantsnapshot builder the LLM prompt uses. The wiring
+// helper has three behaviours worth pinning:
+//
+//   1. nil agent / nil quantsnapshot builder → returns nil so the
+//      exit manager treats every position's ATR as "missing" and
+//      the ATR-stop rule no-ops (degrades gracefully).
+//   2. happy path → returns a {symbol → ATR14} map for every
+//      position whose snapshot has a positive ATR14.
+//   3. symbols with no ATR (insufficient bar history) are
+//      dropped from the map so the no-op contract holds at the
+//      per-symbol level.
+
+func TestFetchATRForPositionsReturnsNilWithoutBuilder(t *testing.T) {
+	agent := &runtimePMAgent{quantSnapshot: nil}
+	got := agent.fetchATRForPositions(
+		context.Background(),
+		&repository.Fund{Config: json.RawMessage(`{"market":"us_equity"}`)},
+		[]repository.HoldingPosition{{Symbol: "AAPL"}},
+	)
+	if got != nil {
+		t.Fatalf("expected nil when quantsnapshot builder is unwired, got %+v", got)
+	}
+}
+
+func TestFetchATRForPositionsReturnsNilOnNilFund(t *testing.T) {
+	agent := &runtimePMAgent{quantSnapshot: testQuantBuilder(t, nil)}
+	got := agent.fetchATRForPositions(
+		context.Background(),
+		nil,
+		[]repository.HoldingPosition{{Symbol: "AAPL"}},
+	)
+	if got != nil {
+		t.Fatalf("expected nil when fund is nil, got %+v", got)
+	}
+}
+
+func TestFetchATRForPositionsBuildsSymbolMap(t *testing.T) {
+	fetcher := newTestATRFetcher()
+	// AAPL: flat-ish close + 2.0 true range → ATR14 ≈ 2.0.
+	fetcher.bars["AAPL|us_equity"] = genTestTrendBars(60, 100, 0.0, 2.0)
+	// MSFT: same shape with a different true range → ATR14 ≈ 1.5.
+	fetcher.bars["MSFT|us_equity"] = genTestTrendBars(60, 200, 0.0, 1.5)
+	// NEWCO: too few bars → snapshot has no ATR signal, should
+	// be dropped from the map.
+	fetcher.bars["NEWCO|us_equity"] = genTestTrendBars(5, 50, 0.0, 1.0)
+	agent := &runtimePMAgent{quantSnapshot: testQuantBuilder(t, fetcher)}
+	positions := []repository.HoldingPosition{
+		{Symbol: "  aapl  "}, // exercises the upper-case + trim
+		{Symbol: "MSFT"},
+		{Symbol: "MSFT"}, // dup → must not double-fetch
+		{Symbol: "NEWCO"},
+		{Symbol: ""}, // empty symbol → skipped
+	}
+	got := agent.fetchATRForPositions(
+		context.Background(),
+		&repository.Fund{Config: json.RawMessage(`{"market":"us_equity"}`)},
+		positions,
+	)
+	if got == nil {
+		t.Fatal("expected non-nil ATR map")
+	}
+	if _, ok := got["AAPL"]; !ok {
+		t.Errorf("expected AAPL in map, got keys=%v", mapKeys(got))
+	}
+	if _, ok := got["MSFT"]; !ok {
+		t.Errorf("expected MSFT in map, got keys=%v", mapKeys(got))
+	}
+	if _, ok := got["NEWCO"]; ok {
+		t.Errorf("NEWCO should be dropped (short history → no ATR), got keys=%v", mapKeys(got))
+	}
+	if v := got["AAPL"]; v <= 0 {
+		t.Errorf("AAPL ATR should be > 0, got %v", v)
+	}
+	// AAPL true range = 2.0, MSFT = 1.5 → AAPL must be higher.
+	if got["AAPL"] <= got["MSFT"] {
+		t.Errorf("expected AAPL ATR (%v) > MSFT ATR (%v)", got["AAPL"], got["MSFT"])
 	}
 }
 
