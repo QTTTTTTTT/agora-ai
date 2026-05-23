@@ -1175,7 +1175,22 @@ func (s *workflowServiceAdapter) resolveSentimentScorer(fundID string) sentiment
 	if s.sentimentScorer != nil {
 		return s.sentimentScorer
 	}
-	return buildSentimentScorerFromRuntime(s.runtime, fundID)
+	// Production path goes through newRuntime → resolves operator
+	// once and reuses for both scorer + roundtable; this fast path
+	// only fires for the test-only / disabled-feature flows where
+	// no fund context is available. Skipping the DB lookup when
+	// adapter.db is nil keeps the unit-test build (which spins up
+	// workflowServiceAdapter{} stand-alone) panic-free.
+	var ownerUserID string
+	if s.db != nil {
+		ownerUserID, _ = resolveFundOperatorRouting(
+			context.Background(),
+			fundID,
+			repository.NewTeamRepo(s.db),
+			repository.NewAgentRepo(s.db),
+		)
+	}
+	return buildSentimentScorerFromRuntime(s.runtime, fundID, ownerUserID)
 }
 
 type workflowRuntime struct {
@@ -1774,7 +1789,7 @@ func buildSectorFlowFetcherFromEnv(ohlcFetcher ohlc.Fetcher) sectorflow.Fetcher 
 // The keyword scorer is always wired as the safety-net fallback
 // behind the LLM scorer, so an LLM outage doesn't blank the
 // sentiment signal.
-func buildSentimentScorerFromRuntime(runtime *llmRuntime, fundID string) sentiment.Scorer {
+func buildSentimentScorerFromRuntime(runtime *llmRuntime, fundID string, ownerUserID string) sentiment.Scorer {
 	if envBool("SENTIMENT_DISABLED") {
 		return nil
 	}
@@ -1785,10 +1800,20 @@ func buildSentimentScorerFromRuntime(runtime *llmRuntime, fundID string) sentime
 	if runtime == nil || runtime.client == nil {
 		return keyword
 	}
+	// AgentID is a stable sentinel ("sentiment-scorer") that never
+	// matches any row in the agents table, so the router skips its
+	// agentDefaults bucket and falls through to userDefaults. As long
+	// as ownerUserID is populated, sentiment will use the operator's
+	// tier-specific preference (user_model_configs.tier="simple") when
+	// one is configured, and only fall back to the platform .env
+	// default when it isn't — same behaviour the PM gets from its
+	// per-agent route, just keyed on (user, simple-tier) instead of
+	// (user, specific-agent).
 	llmScorer := &sentiment.LLMScorer{
 		Client:    runtime.client,
 		ModelTier: llm.TierSimple,
 		AgentID:   "sentiment-scorer",
+		UserID:    strings.TrimSpace(ownerUserID),
 		StepName:  "news_sentiment",
 		FundID:    fundID,
 	}
@@ -5445,6 +5470,24 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 	// transition (not just when RunFull returns). Critical for paused runs
 	// where RunFull blocks indefinitely in WaitForDecision.
 	var bus workflow.EventBus = newPersistingEventBus(s, fund.ID, tradingDate, delegate)
+	// Resolve the fund operator + primary researcher AgentID exactly
+	// once and reuse for both the debate roundtable and the sentiment
+	// scorer so the model router can honour per-user / per-agent
+	// preferences instead of silently routing every internal step to
+	// the platform .env default. P2-T2 follow-up: keeps debate +
+	// sentiment in lock-step with the per-agent routing the PM was
+	// already getting from runDecisionEngine.
+	//
+	// Guarded by s.db != nil because a handful of unit tests
+	// (TriggerStep + conflict tests) construct a workflowServiceAdapter
+	// with only fundRepo + workflowRepo populated and no shared *sql.DB,
+	// so creating fresh TeamRepo/AgentRepo here would just wrap nil and
+	// panic on the first ListByFund. The test paths never reach the
+	// LLM call where routing matters, so leaving hints blank is safe.
+	var ownerUserID, researcherAgentID string
+	if s.db != nil {
+		ownerUserID, researcherAgentID = resolveFundOperatorRouting(context.Background(), fund.ID, teamRepo, agentRepo)
+	}
 	runtime.orchestrator = workflow.NewDailyOrchestrator(
 		fund.ID,
 		bus,
@@ -5454,12 +5497,12 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			agentRepo:          agentRepo,
 			marketData:         s.marketData,
 			memoryRepo:         memoryRepo,
-			debateRoundtable:   buildDebateRoundtable(s.runtime, fund.ID),
+			debateRoundtable:   buildDebateRoundtable(s.runtime, fund.ID, ownerUserID, researcherAgentID),
 			debateForceEnabled: debateForceEnabledFromEnv(),
 			ohlcFetcher:        s.ohlcFetcher,
 			fundamentalFetcher: s.fundamentalFetcher,
 			sectorFlowFetcher:  s.sectorFlowFetcher,
-			sentimentScorer:    s.resolveSentimentScorer(fund.ID),
+			sentimentScorer:    buildSentimentScorerFromRuntime(s.runtime, fund.ID, ownerUserID),
 		},
 		&runtimePMAgent{
 			planRepo:       planRepo,
@@ -5893,17 +5936,24 @@ func (s *teamServiceAdapter) AddAgent(userID, fundID, role, focus string) (*api.
 	if err != nil {
 		return nil, err
 	}
-	defaultLLMModel := defaultAgentModel(normalizedRole)
-	defaultProvider, defaultModelName := modelDisplayFields(defaultLLMModel)
-
+	// model_provider / model_name / llm_model are intentionally left
+	// NULL on creation: an unset row means "use the .env platform
+	// default" (the agents-table SyncAll fallback skips rows with
+	// either provider or model_name blank, so router.ResolveModel
+	// falls through to defaultModels[tier]). Auto-populating with
+	// claude-sonnet-4-6 etc. silently bound new operators to a
+	// provider they never picked — and on deployments without an
+	// Anthropic key, that was the P2 silent-downgrade we just
+	// fixed. The model only gets persisted once the operator picks
+	// one through UpdateAgent's ModelConfig path.
 	agent := &repository.Agent{
 		UserID:          strings.TrimSpace(userID),
 		Name:            buildAgentName(normalizedRole, normalizedFocus),
 		Role:            normalizedRole,
 		Focus:           nullString(normalizedFocus),
-		LLMModel:        defaultLLMModel,
-		ModelProvider:   nullString(defaultProvider),
-		ModelName:       nullString(defaultModelName),
+		LLMModel:        sql.NullString{},
+		ModelProvider:   sql.NullString{},
+		ModelName:       sql.NullString{},
 		SystemPrompt:    sql.NullString{},
 		SkillConfig:     json.RawMessage(`{}`),
 		DomainConfig:    json.RawMessage(`{}`),
@@ -6008,9 +6058,10 @@ func (s *teamServiceAdapter) UpdateAgent(userID, fundID, agentID string, cfg api
 		}
 		member.Role = normalizedRole
 		agent.Role = normalizedRole
-		if !agent.LLMModel.Valid || strings.TrimSpace(agent.LLMModel.String) == "" {
-			agent.LLMModel = defaultAgentModel(normalizedRole)
-		}
+		// Role changes no longer auto-fill LLMModel. An agent without
+		// an explicit model picks up the .env platform default at
+		// request time; back-filling here would re-introduce the
+		// silent provider lock-in we just removed from AddAgent.
 	}
 	if cfg.Focus != nil {
 		normalizedFocus, err := normalizeAgentFocus(*cfg.Focus)
@@ -9938,20 +9989,18 @@ func buildAgentName(role, focus string) string {
 	return base + " · " + strings.ToUpper(focus)
 }
 
-func defaultAgentModel(role string) sql.NullString {
-	switch role {
-	case "pm":
-		return sql.NullString{String: "claude-sonnet-4-6", Valid: true}
-	case "researcher":
-		return sql.NullString{String: "claude-opus-4-7", Valid: true}
-	case "trader":
-		return sql.NullString{String: "gpt-4o", Valid: true}
-	case "risk":
-		return sql.NullString{String: "claude-sonnet-4-6", Valid: true}
-	default:
-		return sql.NullString{}
-	}
-}
+// defaultAgentModel was removed in T1 (2026-05-23). It used to seed
+// every freshly-created agent with a hard-coded model name (claude-
+// sonnet-4-6 for PM/risk, claude-opus-4-7 for researcher, gpt-4o for
+// trader). That auto-binding silently locked the agent to whichever
+// provider's key happened to be present in .env — and worse, on
+// deployments configured for a Gemini relay (no Anthropic key), every
+// PM call ended up routed to gemini through the platform default
+// while the UI still showed "claude". The current contract is: an
+// agent without an explicit model_provider / model_name reads the
+// platform default from .env at request time. The operator must
+// click into the agent editor and pick a model to opt in to anything
+// else.
 
 func mergeWorkflowStepResult(raw json.RawMessage, step, status string, updatedAt time.Time) json.RawMessage {
 	payload := map[string]map[string]string{}
@@ -13303,7 +13352,7 @@ func buildLLMDecisionEngine(runtime *llmRuntime, fundID string) decision.Decisio
 // per-role differentiation is in the system prompt baked into
 // debate.LLMResearcher. Each researcher consumes the same fundID
 // so usage records and rate limits attribute correctly.
-func buildDebateRoundtable(runtime *llmRuntime, fundID string) debate.Roundtable {
+func buildDebateRoundtable(runtime *llmRuntime, fundID string, ownerUserID string, researcherAgentID string) debate.Roundtable {
 	if runtime == nil {
 		return nil
 	}
@@ -13311,13 +13360,73 @@ func buildDebateRoundtable(runtime *llmRuntime, fundID string) debate.Roundtable
 	if client == nil {
 		return nil
 	}
+	// All three personas (bull / bear / quant) share the same
+	// AgentID + UserID — they are rhetorical positions inside the
+	// debate orchestrator, not separate rows in the agents table.
+	// Using the fund's primary researcher AgentID lets the router
+	// honour any model the operator picked on that researcher
+	// (router.agentDefaults[researcherAgentID]). When no researcher
+	// exists or has no explicit model, the router falls through to
+	// userDefaults[standard] and finally the .env default — same
+	// fallback chain as the PM agent.
+	user := strings.TrimSpace(ownerUserID)
+	agent := strings.TrimSpace(researcherAgentID)
 	return &debate.LLMRoundtable{
 		Researchers: []debate.Researcher{
-			&debate.LLMResearcher{PersonaRole: debate.RoleBull, Client: client, ModelTier: llm.TierStandard, FundID: fundID, StepName: "debate"},
-			&debate.LLMResearcher{PersonaRole: debate.RoleBear, Client: client, ModelTier: llm.TierStandard, FundID: fundID, StepName: "debate"},
-			&debate.LLMResearcher{PersonaRole: debate.RoleQuant, Client: client, ModelTier: llm.TierStandard, FundID: fundID, StepName: "debate"},
+			&debate.LLMResearcher{PersonaRole: debate.RoleBull, Client: client, ModelTier: llm.TierStandard, FundID: fundID, StepName: "debate", UserID: user, AgentID: agent},
+			&debate.LLMResearcher{PersonaRole: debate.RoleBear, Client: client, ModelTier: llm.TierStandard, FundID: fundID, StepName: "debate", UserID: user, AgentID: agent},
+			&debate.LLMResearcher{PersonaRole: debate.RoleQuant, Client: client, ModelTier: llm.TierStandard, FundID: fundID, StepName: "debate", UserID: user, AgentID: agent},
 		},
 	}
+}
+
+// resolveFundOperatorRouting looks up the fund's operator UserID and
+// the AgentID of its primary researcher so per-step LLM calls
+// (sentiment / debate) carry routing hints the model router can match
+// against agentDefaults + userDefaults. Returns blank strings when
+// the team is empty or repo lookups fail — callers fall through to
+// the platform .env default, which is the safe behaviour.
+//
+// Two SQL roundtrips: ListByFund (single member array) plus one
+// GetByID per researcher hit until a non-empty UserID is found. The
+// runtime is cached per (fundID, tradingDate) so this fires at most
+// once per fund per trading day.
+func resolveFundOperatorRouting(ctx context.Context, fundID string, teamRepo *repository.TeamRepo, agentRepo *repository.AgentRepo) (ownerUserID string, researcherAgentID string) {
+	if teamRepo == nil || agentRepo == nil || strings.TrimSpace(fundID) == "" {
+		return "", ""
+	}
+	members, err := teamRepo.ListByFund(ctx, fundID)
+	if err != nil || len(members) == 0 {
+		return "", ""
+	}
+	// Two-pass scan: prefer a researcher (its model preference is
+	// what debate + sentiment should track), but on a team without
+	// any researcher we still grab the first member's UserID so
+	// userDefaults[simple/standard] routing kicks in for sentiment.
+	for _, m := range members {
+		if strings.ToLower(strings.TrimSpace(m.Role)) != "researcher" {
+			continue
+		}
+		agent, err := agentRepo.GetByID(ctx, m.AgentID)
+		if err != nil || agent == nil {
+			continue
+		}
+		if strings.TrimSpace(agent.UserID) == "" {
+			continue
+		}
+		return agent.UserID, agent.ID
+	}
+	for _, m := range members {
+		agent, err := agentRepo.GetByID(ctx, m.AgentID)
+		if err != nil || agent == nil {
+			continue
+		}
+		if strings.TrimSpace(agent.UserID) == "" {
+			continue
+		}
+		return agent.UserID, ""
+	}
+	return "", ""
 }
 
 // debateForceEnabledFromEnv reads FUND_DEBATE_ROUNDTABLE to flip the

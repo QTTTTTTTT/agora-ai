@@ -332,7 +332,7 @@ func TestResolveSentimentScorerDisabled(t *testing.T) {
 func TestBuildSentimentScorerFromRuntimeLLMDisabled(t *testing.T) {
 	t.Setenv("SENTIMENT_DISABLED", "")
 	t.Setenv("SENTIMENT_LLM_DISABLED", "1")
-	got := buildSentimentScorerFromRuntime(nil, "fund-1")
+	got := buildSentimentScorerFromRuntime(nil, "fund-1", "user-tong")
 	if _, ok := got.(*sentiment.KeywordScorer); !ok {
 		t.Errorf("expected *sentiment.KeywordScorer, got %T", got)
 	}
