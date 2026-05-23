@@ -32,6 +32,7 @@ import (
 	"github.com/fundai/server/internal/earnings"
 	"github.com/fundai/server/internal/exposure"
 	"github.com/fundai/server/internal/newsrecall"
+	"github.com/fundai/server/internal/pairspread"
 	"github.com/fundai/server/internal/quality"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/ranking"
@@ -103,6 +104,20 @@ type EarningsEvent = earnings.Event
 // Profitability / Growth / Safety z-scores plus the composite
 // the PM sorts by.
 type SymbolQualityScore = quality.Score
+
+// PairSpreadSnapshot is the prompt-facing shape for the Sprint
+// E #4 pairs-spread monitor. Alias for pairspread.Snapshot so
+// the decision package stays the single import point. Carries
+// the top-K extended pairs (by |z|) inside the configured
+// rolling window, with each pair's last log-spread, mean,
+// stdev, z-score, and the upstream rho.
+type PairSpreadSnapshot = pairspread.Snapshot
+
+// PairSpreadRow is the single-pair alias paired with the
+// snapshot so callers (the wiring layer + tests) can construct
+// DecisionInput.PairSpreads without importing the pairspread
+// package directly.
+type PairSpreadRow = pairspread.PairSpread
 
 // ExposureSnapshot is the prompt-facing shape for the Sprint C
 // #1 portfolio-level concentration check. Alias for
@@ -345,6 +360,30 @@ type DecisionInput struct {
 	// snapshot (service unwired or insufficient OHLC data);
 	// the prompt omits the block.
 	Correlations *CorrelationSnapshot
+
+	// Sprint E #4 (pairs spread monitor). Builds on the
+	// correlation snapshot above: for each high-correlation
+	// pair (|rho| ≥ correlation.HighCorrThreshold) we compute
+	// the rolling log-spread z-score over the same lookback
+	// window. The system prompt teaches the PM:
+	//
+	//   |z| < 1   = pair trading near its long-run ratio;
+	//               no special action
+	//   |z| 1..2  = mild divergence; size new entries with
+	//               caution but no forced exits
+	//   |z| ≥ 2   = 2-σ divergence; the CHEAP leg (negative
+	//               z = Left cheap vs Right) is a candidate
+	//               "add" and the RICH leg is a candidate
+	//               "reduce" for long-only mean-reversion
+	//
+	// The block is intentionally distinct from Correlations:
+	// the correlation block tells the PM what's TIGHT (the
+	// long-run relationship), while PairSpreads tells the PM
+	// what's CURRENTLY EXTENDED on top of that relationship.
+	// nil = no snapshot (no high-correlation input pairs or
+	// the spread service is unwired); the prompt omits the
+	// block.
+	PairSpreads *PairSpreadSnapshot
 
 	// Phase 3A-10 lesson replay. A multi-line block rendered
 	// upstream by attribution.BuildLessonReplay that paraphrases

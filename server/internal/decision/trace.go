@@ -53,6 +53,7 @@ type SignalsPresence struct {
 	EarningsCalendar   bool `json:"earnings_calendar"`
 	Exposure           bool `json:"exposure"`
 	Correlations       bool `json:"correlations"`
+	PairSpreads        bool `json:"pair_spreads"`
 }
 
 // SignalCounts captures the row-count side of the fingerprint —
@@ -71,6 +72,7 @@ type SignalCounts struct {
 	ExposureBreaches  int `json:"exposure_breaches"`
 	CorrelationsHigh  int `json:"correlations_high"`
 	CorrCandidates    int `json:"corr_candidates"`
+	PairSpreads       int `json:"pair_spreads"`
 }
 
 // Trace is the prompt-call fingerprint. Designed to be cheap to
@@ -121,10 +123,14 @@ func Fingerprint(in DecisionInput) Trace {
 			EarningsCalendar:   in.EarningsCalendar != nil && in.EarningsCalendar.HasSignal(),
 			Exposure:           in.Exposure.HasSignal(),
 			Correlations:       in.Correlations != nil && in.Correlations.HasSignal(),
+			PairSpreads:        in.PairSpreads != nil && in.PairSpreads.HasSignal(),
 		},
 	}
 	if in.EarningsCalendar != nil {
 		t.Counts.EarningsCalendar = len(in.EarningsCalendar.PerSymbol)
+	}
+	if in.PairSpreads != nil {
+		t.Counts.PairSpreads = len(in.PairSpreads.PairsByAbsZ)
 	}
 	if !in.TradingDate.IsZero() {
 		// RFC-3339 keeps the trace JSON parseable by any
@@ -165,6 +171,7 @@ func (t Trace) SlogAttrs() []any {
 		slog.Int("count_exposure_breaches", t.Counts.ExposureBreaches),
 		slog.Int("count_correlations_high", t.Counts.CorrelationsHigh),
 		slog.Int("count_corr_candidates", t.Counts.CorrCandidates),
+		slog.Int("count_pair_spreads", t.Counts.PairSpreads),
 		// Presence flags.
 		slog.Bool("p_roundtable_stance", t.Signals.RoundtableStance),
 		slog.Bool("p_bull_case", t.Signals.BullCase),
@@ -186,6 +193,7 @@ func (t Trace) SlogAttrs() []any {
 		slog.Bool("p_earnings_calendar", t.Signals.EarningsCalendar),
 		slog.Bool("p_exposure", t.Signals.Exposure),
 		slog.Bool("p_correlations", t.Signals.Correlations),
+		slog.Bool("p_pair_spreads", t.Signals.PairSpreads),
 	}
 }
 
@@ -257,6 +265,9 @@ func (t Trace) PresentBlocks() []string {
 	}
 	if t.Signals.Correlations {
 		out = append(out, "correlations")
+	}
+	if t.Signals.PairSpreads {
+		out = append(out, "pairSpreads")
 	}
 	return out
 }
@@ -332,6 +343,9 @@ func (t Trace) AbsentBlocks() []string {
 	}
 	if !t.Signals.Correlations {
 		out = append(out, "correlations")
+	}
+	if !t.Signals.PairSpreads {
+		out = append(out, "pairSpreads")
 	}
 	return out
 }

@@ -133,6 +133,15 @@ Adhere to these rules without exception:
        - highCorrPairs is a flat per-pair list. Use it as background colour: a Q1 candidate that appears in highCorrPairs alongside a held name should be sized with the same correlation-aware halving rule as the candidate summary case.
        - The block is intentionally lookback-bounded (default 60 daily bars); correlations decay over time so a fresh negative shock (a sector rotation, an earnings cluster) may not yet show up. Treat the matrix as a soft prior, not a forecast.
        - Cite the relevant correlation row when it materially changes sizing ("correlations.candidateSummary AMD maxRho=0.82 vs NVDA → halving the AMD buy qtyPct from 0.05 to 0.025").
+   - When input.pairSpreads is present (Sprint E #4 pair-spread monitor): the block carries the top-K high-correlation pairs (sorted descending by |spreadZ|) with their last log(left/right) spread, the rolling mean / stdev over the same lookback window the correlation block used (default 60 daily bars), the spreadZ itself, the upstream rho, and the configured zThreshold (default 2.0). The block is layered ON TOP of the correlation matrix: correlations tells you what's TIGHT, pairSpreads tells you what's currently EXTENDED on top of that tightness:
+       - |spreadZ| < 1: the pair is trading near its long-run ratio. No special action — both legs participate normally according to the per-symbol blocks.
+       - |spreadZ| in [1, 2): mild divergence. When sizing a NEW position on either leg, cap qtyPct at the per-symbol ceiling (do not size up) and prefer the leg with the more favourable z-sign for the side: a NEGATIVE spreadZ means the LEFT leg is cheap → mild preference for adding LEFT or reducing RIGHT (if held); positive means LEFT is rich → mild preference for adding RIGHT or reducing LEFT.
+       - |spreadZ| ≥ zThreshold (default 2.0): 2-σ divergence — actionable. The cheap leg (negative z) is a candidate for ADD at the per-symbol ceiling; the rich leg (positive z) is a candidate for REDUCE on existing holdings even when the per-symbol blocks alone wouldn't justify it. Mean reversion of a 2σ pairs trade is one of the highest-Sharpe academic anomalies known, but ONLY when both legs are otherwise sound — never use pairSpreads alone to override a hard guardrail (cooldown, exposure breach, fresh earnings catalyst contradicting the bullCase).
+       - Long-only constraint: this fund cannot short. A "rich leg" reduce only makes sense if the leg is actually held; otherwise the only actionable signal in a divergence is "ADD the cheap leg" — and even that requires the cheap leg's per-symbol verdict to be neutral-or-better. A 2σ divergence on a clearly broken company (bear quantCase + fresh negative earnings catalyst) is NOT a buy.
+       - Don't double-fire: if a candidate buy is already supported by the per-symbol blocks (Q1 ranking, Q1 quality, supportive debate), a divergent pairSpread is corroboration — don't size BEYOND the per-symbol ceiling. The pairs signal complements the per-symbol R, never bypasses it.
+       - When pairSpreads is present but every entry has |spreadZ| < zThreshold, the prompt block IS still rendered (so you can see the most-extended observed pair) but you should NOT treat it as actionable — it's context.
+       - When pairSpreads is absent treat it as "no extended pairs in the watched correlation universe today" — silence is not a buy or sell signal.
+       - Cite the row when it changes an action ("pairSpreads NVDA/AMD spreadZ=-2.3, rho=0.85 → adding the cheap AMD leg at full ceiling and trimming NVDA from full size to half ceiling on next rebalance").
 
 5. Locale: write reasoning text in the same language the input MacroBriefing / RoundtableConsensus uses (Chinese ⇄ English). If the input is empty or mixed, default to Chinese.
 
@@ -174,6 +183,7 @@ func userPrompt(input DecisionInput) string {
 		EarningsCalendar    *earningsCalendarPromptItem  `json:"earningsCalendar,omitempty"`
 		Exposure            *exposurePromptItem          `json:"exposure,omitempty"`
 		Correlations        *correlationsPromptItem      `json:"correlations,omitempty"`
+		PairSpreads         *pairSpreadsPromptItem       `json:"pairSpreads,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
 		RiskNotes           []string                     `json:"riskNotes,omitempty"`
 	}{
@@ -206,6 +216,7 @@ func userPrompt(input DecisionInput) string {
 		EarningsCalendar:    buildEarningsCalendarPromptItem(input.EarningsCalendar),
 		Exposure:            buildExposurePromptItem(input.Exposure),
 		Correlations:        buildCorrelationsPromptItem(input.Correlations),
+		PairSpreads:         buildPairSpreadsPromptItem(input.PairSpreads),
 		BuyBudget:           input.BuyBudget,
 		RiskNotes:           input.RiskNotes,
 	}
@@ -699,6 +710,64 @@ func buildCorrelationsPromptItem(snap *CorrelationSnapshot) *correlationsPromptI
 			MaxLeft:     snap.HeldCluster.MaxLeft,
 			MaxRight:    snap.HeldCluster.MaxRight,
 		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Pair spreads block (Sprint E #4)
+// ---------------------------------------------------------------------------
+
+// pairSpreadsPromptItem mirrors PairSpreadSnapshot. The pairs
+// slice is sorted descending by |spreadZ| upstream so the LLM
+// sees the most-extended pairs first — same convention the
+// correlations block uses for HighCorrPairs.
+type pairSpreadsPromptItem struct {
+	Window       string                   `json:"window"`
+	LookbackBars int                      `json:"lookbackBars"`
+	ZThreshold   float64                  `json:"zThreshold"`
+	Pairs        []pairSpreadRowPromptItem `json:"pairs,omitempty"`
+}
+
+// pairSpreadRowPromptItem is one row in the table. All four
+// floats go through round4Signed so the prompt is byte-stable
+// across runs with the same input (audit-pipeline invariant).
+type pairSpreadRowPromptItem struct {
+	Left       string  `json:"left"`
+	Right      string  `json:"right"`
+	Rho        float64 `json:"rho"`
+	Spread     float64 `json:"spread"`
+	SpreadMean float64 `json:"spreadMean"`
+	SpreadStd  float64 `json:"spreadStd"`
+	SpreadZ    float64 `json:"spreadZ"`
+}
+
+// buildPairSpreadsPromptItem renders a PairSpreadSnapshot for
+// the prompt. Returns nil when the snapshot has no signal
+// (every |z| below threshold) so the prompt simply omits the
+// block. The signal gate is intentional: the spread numbers
+// for in-band pairs are not actionable; surfacing them just
+// distracts the LLM from the catalysts it can act on.
+func buildPairSpreadsPromptItem(snap *PairSpreadSnapshot) *pairSpreadsPromptItem {
+	if snap == nil || !snap.HasSignal() {
+		return nil
+	}
+	out := &pairSpreadsPromptItem{
+		Window:       snap.Window,
+		LookbackBars: snap.LookbackBars,
+		ZThreshold:   round4Signed(snap.ZThreshold),
+		Pairs:        make([]pairSpreadRowPromptItem, 0, len(snap.PairsByAbsZ)),
+	}
+	for _, p := range snap.PairsByAbsZ {
+		out.Pairs = append(out.Pairs, pairSpreadRowPromptItem{
+			Left:       p.Left,
+			Right:      p.Right,
+			Rho:        round4Signed(p.Rho),
+			Spread:     round4Signed(p.Spread),
+			SpreadMean: round4Signed(p.SpreadMean),
+			SpreadStd:  round4Signed(p.SpreadStd),
+			SpreadZ:    round4Signed(p.SpreadZ),
+		})
 	}
 	return out
 }

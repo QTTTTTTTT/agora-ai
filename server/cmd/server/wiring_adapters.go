@@ -42,6 +42,7 @@ import (
 	"github.com/fundai/server/internal/marketplace"
 	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/ohlc"
+	"github.com/fundai/server/internal/pairspread"
 	"github.com/fundai/server/internal/quality"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/quota"
@@ -1386,6 +1387,15 @@ type runtimePMAgent struct {
 	// OHLC data; the prompt omits the block in that case and
 	// the PM falls back on per-symbol R sizing alone.
 	correlationSvc *correlation.Service
+	// pairSpreadSvc is the Sprint E #4 rolling spread monitor.
+	// Consumes the HighCorrPairs from the correlation snapshot
+	// (so the matrix runs first, the spread monitor second)
+	// and computes log(left/right) z-scores over the same
+	// lookback window. Reuses the OHLC cache so the second
+	// pass is nearly free. nil = feature off (no OHLC fetcher
+	// wired or no high-correlation pairs to monitor); the
+	// prompt omits the block.
+	pairSpreadSvc *pairspread.Service
 	// serverMetrics powers Sprint D #1 (Prometheus counters for
 	// PM decision-input observability). Optional — tests that
 	// build a runtimePMAgent directly leave this nil and the
@@ -5706,6 +5716,18 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// OHLC fetcher degrades to no-op Compute so
 				// the prompt block is simply omitted.
 				correlationSvc: correlation.NewService(s.ohlcFetcher, correlation.Options{}),
+				// Sprint E #4: rolling pair-spread monitor.
+				// Consumes the HighCorrPairs the
+				// correlationSvc emits, then fires its own
+				// OHLC fetches behind the shared cache so
+				// the second pass is nearly free. Default
+				// Options match the correlation lookback
+				// (60d) and the classical 2-σ entry
+				// threshold; MaxPairs=10 keeps the prompt
+				// block bounded. nil ohlcFetcher degrades
+				// to no-op Build so the prompt simply
+				// omits the block.
+				pairSpreadSvc: pairspread.NewService(s.ohlcFetcher, pairspread.Options{}),
 				// Sprint D #1 — Prometheus counters for PM
 				// decision-input observability. Shares the
 				// global metrics registry; nil-safe inside
@@ -13872,6 +13894,13 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	}
 	_ = fund // reserved for future fund-level routing overrides
 
+	// Sprint C #2 / E #4: correlation matrix is built first so
+	// its HighCorrPairs can feed the Sprint E #4 pair-spread
+	// monitor below. The OHLC cache shared between the two
+	// services makes the spread monitor's second pass cheap.
+	correlations := a.buildCorrelations(ctx, profile.Market, universe, decisionPositions, profile.CorrelationPolicy)
+	pairSpreads := a.buildPairSpreads(ctx, profile.Market, correlations)
+
 	input := decision.DecisionInput{
 		FundID:              fundID,
 		TradingDate:         tradingDate,
@@ -13905,7 +13934,8 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		NewsCatalysts:       a.buildNewsCatalysts(ctx, profile.Market, universe, decisionPositions, tradingDate),
 		EarningsCalendar:    a.buildEarningsCalendar(ctx, profile.Market, universe, decisionPositions),
 		Exposure:            buildExposureSnapshot(totalAssets, availableCash, decisionPositions, instrumentHints, profile.ExposurePolicy),
-		Correlations:        a.buildCorrelations(ctx, profile.Market, universe, decisionPositions, profile.CorrelationPolicy),
+		Correlations:        correlations,
+		PairSpreads:         pairSpreads,
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
 	}
@@ -14014,6 +14044,48 @@ func (a *runtimePMAgent) buildCorrelations(ctx context.Context, market string, u
 		return nil
 	}
 	return snap
+}
+
+// buildPairSpreads assembles the Sprint E #4 rolling spread
+// monitor from the correlation snapshot's HighCorrPairs. We
+// only look at pairs the correlation matrix already flagged as
+// "tight" (|rho| ≥ threshold) — spread divergence on a pair
+// without a stable long-run relationship isn't a tradeable
+// signal, just noise.
+//
+// Returns nil when:
+//   - the pair-spread service isn't wired
+//   - the correlation snapshot is nil / empty
+//   - the snapshot carries no HighCorrPairs to monitor
+//   - every spread computation drops out (insufficient OHLC bars)
+//
+// In any of those cases the prompt simply omits the block, and
+// the PM falls back on the per-symbol blocks above.
+func (a *runtimePMAgent) buildPairSpreads(ctx context.Context, market string, corr *decision.CorrelationSnapshot) *decision.PairSpreadSnapshot {
+	if a == nil || a.pairSpreadSvc == nil {
+		return nil
+	}
+	if corr == nil || len(corr.HighCorrPairs) == 0 {
+		return nil
+	}
+	requests := make([]pairspread.PairRequest, 0, len(corr.HighCorrPairs))
+	for _, p := range corr.HighCorrPairs {
+		left := strings.TrimSpace(p.Left)
+		right := strings.TrimSpace(p.Right)
+		if left == "" || right == "" {
+			continue
+		}
+		requests = append(requests, pairspread.PairRequest{
+			Left:   left,
+			Right:  right,
+			Market: market,
+			Rho:    p.Rho,
+		})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return a.pairSpreadSvc.Build(ctx, requests)
 }
 
 // buildExposureSnapshot reduces the wiring layer's view of the

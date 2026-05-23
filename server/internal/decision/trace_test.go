@@ -225,6 +225,7 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		"qualityScores":      {},
 		"exposure":           {},
 		"correlations":       {},
+		"pairSpreads":        {},
 	}
 	// Construct an input that flips every signal so PresentBlocks
 	// emits every supported entry exactly once.
@@ -233,6 +234,12 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 	earn := EarningsCalendarSnapshot{
 		HorizonDays: 14,
 		PerSymbol:   map[string]EarningsEvent{"A": {Symbol: "A", EventDate: time.Now().Add(48 * time.Hour)}},
+	}
+	pairs := PairSpreadSnapshot{
+		Window:       "60 daily bars",
+		LookbackBars: 60,
+		ZThreshold:   2.0,
+		PairsByAbsZ:  []PairSpreadRow{{Left: "A", Right: "B", Rho: 0.9, SpreadZ: 3.0}},
 	}
 	in := DecisionInput{
 		Universe:           []string{"A"},
@@ -256,6 +263,7 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		EarningsCalendar:   &earn,
 		Exposure:           ExposureSnapshot{TotalAssets: 100, PositionCount: 1},
 		Correlations:       &corr,
+		PairSpreads:        &pairs,
 	}
 	got := Fingerprint(in).PresentBlocks()
 	if len(got) != len(known) {
@@ -273,20 +281,26 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 // list should be empty.
 func TestAbsentBlocksEmptyInputReportsAllAbsent(t *testing.T) {
 	got := Fingerprint(DecisionInput{}).AbsentBlocks()
-	// 20 canonical signal blocks (matches PresentBlocksKnownVocabulary).
-	if len(got) != 20 {
-		t.Errorf("empty input AbsentBlocks = %d entries, want 20 (%v)", len(got), got)
+	// 21 canonical signal blocks (matches PresentBlocksKnownVocabulary).
+	if len(got) != 21 {
+		t.Errorf("empty input AbsentBlocks = %d entries, want 21 (%v)", len(got), got)
 	}
 }
 
 // PresentBlocks + AbsentBlocks must partition the canonical
-// signal vocabulary: no overlap, total = 20.
+// signal vocabulary: no overlap, total = 21.
 func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 	rb := RiskBudgetSnapshot{}
 	corr := CorrelationSnapshot{SampleSize: 2, HighCorrPairs: []HighCorrPair{{Left: "A", Right: "B", Rho: 0.9}}}
 	earn := EarningsCalendarSnapshot{
 		HorizonDays: 14,
 		PerSymbol:   map[string]EarningsEvent{"A": {Symbol: "A", EventDate: time.Now().Add(48 * time.Hour)}},
+	}
+	pairs := PairSpreadSnapshot{
+		Window:       "60 daily bars",
+		LookbackBars: 60,
+		ZThreshold:   2.0,
+		PairsByAbsZ:  []PairSpreadRow{{Left: "A", Right: "B", Rho: 0.9, SpreadZ: 3.0}},
 	}
 	for _, tc := range []struct {
 		name string
@@ -315,6 +329,7 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			EarningsCalendar:   &earn,
 			Exposure:           ExposureSnapshot{TotalAssets: 100, PositionCount: 1},
 			Correlations:       &corr,
+			PairSpreads:        &pairs,
 		}},
 		{"partial", DecisionInput{
 			BullCase:       "x",
@@ -326,8 +341,8 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			tr := Fingerprint(tc.in)
 			present := tr.PresentBlocks()
 			absent := tr.AbsentBlocks()
-			if len(present)+len(absent) != 20 {
-				t.Errorf("present(%d) + absent(%d) = %d, want 20 (present=%v absent=%v)",
+			if len(present)+len(absent) != 21 {
+				t.Errorf("present(%d) + absent(%d) = %d, want 21 (present=%v absent=%v)",
 					len(present), len(absent), len(present)+len(absent), present, absent)
 			}
 			seen := map[string]bool{}
@@ -389,6 +404,56 @@ func TestFingerprintEarningsCalendarEmptySnapshot(t *testing.T) {
 	}
 	if tr.Counts.EarningsCalendar != 0 {
 		t.Errorf("expected count = 0 on empty snapshot, got %d", tr.Counts.EarningsCalendar)
+	}
+}
+
+// Sprint E #4: PairSpreads presence + count must flow into the
+// trace fingerprint so dashboards can grep p_pair_spreads /
+// count_pair_spreads. An empty snapshot (no rows OR every row
+// below the action threshold) must NOT signal.
+func TestFingerprintPairSpreadsHasSignal(t *testing.T) {
+	snap := &PairSpreadSnapshot{
+		Window:       "60 daily bars",
+		LookbackBars: 60,
+		ZThreshold:   2.0,
+		PairsByAbsZ: []PairSpreadRow{
+			{Left: "A", Right: "B", Rho: 0.85, SpreadZ: 3.2},
+			{Left: "C", Right: "D", Rho: 0.90, SpreadZ: -2.4},
+		},
+	}
+	tr := Fingerprint(DecisionInput{PairSpreads: snap})
+	if !tr.Signals.PairSpreads {
+		t.Error("expected p_pair_spreads = true (at least one |z| >= threshold)")
+	}
+	if tr.Counts.PairSpreads != 2 {
+		t.Errorf("expected count_pair_spreads = 2, got %d", tr.Counts.PairSpreads)
+	}
+	found := false
+	for _, b := range tr.PresentBlocks() {
+		if b == "pairSpreads" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'pairSpreads' in PresentBlocks, got %v", tr.PresentBlocks())
+	}
+}
+
+func TestFingerprintPairSpreadsBelowThresholdNotPresent(t *testing.T) {
+	snap := &PairSpreadSnapshot{
+		Window: "60 daily bars", LookbackBars: 60, ZThreshold: 2.0,
+		PairsByAbsZ: []PairSpreadRow{
+			{Left: "A", Right: "B", Rho: 0.85, SpreadZ: 0.5},
+		},
+	}
+	tr := Fingerprint(DecisionInput{PairSpreads: snap})
+	if tr.Signals.PairSpreads {
+		t.Error("expected p_pair_spreads = false when every |z| < threshold")
+	}
+	// Counts ARE still bumped — the row exists, just not actionable.
+	if tr.Counts.PairSpreads != 1 {
+		t.Errorf("expected count = 1 even when below threshold, got %d", tr.Counts.PairSpreads)
 	}
 }
 
