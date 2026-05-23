@@ -355,6 +355,58 @@ func TestFallbackEngineBuysFirstUniverseSymbol(t *testing.T) {
 // every realistic PM call has room for both the reasoning pass and
 // the JSON body. Lowering the default again will silently break the
 // LLM decision path; bumping it deliberately is fine.
+// TestLLMDecisionEnginePrefersInputRoutingHintsOverEngineDefaults pins
+// down the P2 fix: the wiring layer builds one LLMDecisionEngine per
+// fund at workflow-construction time and at that point the PM agent
+// for the trading day hasn't been resolved yet. Threading UserID and
+// PMAgentID through DecisionInput is what lets ModelRouter's
+// agentDefaults lookup fire — otherwise every PM call routes to the
+// platform default, which was tong's symptom (claude configured,
+// gemini used). If the input fields are empty the engine's static
+// values are still used (legacy callers / tests).
+func TestLLMDecisionEnginePrefersInputRoutingHintsOverEngineDefaults(t *testing.T) {
+	fl := &fakeLLM{respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+		return &llm.ChatResponse{Content: `{"stance":"net long","confidence":0.7,"actions":[]}`}, nil
+	}}
+	engine := &LLMDecisionEngine{
+		Client:    fl,
+		ModelTier: llm.TierCritical,
+		UserID:    "engine-default-user",
+		AgentID:   "engine-default-agent",
+	}
+
+	if _, err := engine.Decide(context.Background(), DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		UserID:      "input-user",
+		PMAgentID:   "input-pm-agent",
+	}); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	if fl.lastReq.UserID != "input-user" {
+		t.Errorf("UserID = %q, want input-user", fl.lastReq.UserID)
+	}
+	if fl.lastReq.AgentID != "input-pm-agent" {
+		t.Errorf("AgentID = %q, want input-pm-agent", fl.lastReq.AgentID)
+	}
+
+	// Now verify the legacy fallback: when input hints are empty the
+	// engine's static fields still flow through.
+	if _, err := engine.Decide(context.Background(), DecisionInput{
+		FundID:      "f1",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Decide (legacy): %v", err)
+	}
+	if fl.lastReq.UserID != "engine-default-user" {
+		t.Errorf("legacy UserID = %q, want engine-default-user", fl.lastReq.UserID)
+	}
+	if fl.lastReq.AgentID != "engine-default-agent" {
+		t.Errorf("legacy AgentID = %q, want engine-default-agent", fl.lastReq.AgentID)
+	}
+}
+
 func TestLLMDecisionEngineMaxTokensDefaultLeavesRoomForThinkingModels(t *testing.T) {
 	const minSafe = 8000
 	got := (&LLMDecisionEngine{}).maxTokens()

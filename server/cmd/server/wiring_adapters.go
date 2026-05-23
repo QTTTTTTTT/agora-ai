@@ -212,6 +212,32 @@ type llmRuntime struct {
 	metrics             *serverMetrics
 	systemAPIKeys       map[llm.Provider]string
 	syncedUsers         map[string]struct{}
+	// agentRepo is the SECOND source of truth for an agent's model
+	// preference. The router previously only honoured user_model_configs
+	// rows of type 'agent_default'; the agents table's own
+	// model_provider / model_name columns were ignored — so PMs set
+	// via the agent editor (which writes the agents row directly with
+	// no user_model_configs row) silently routed to the platform
+	// default provider. Set via SetAgentRepo before any SyncAll call.
+	// nil = legacy behaviour (test wiring).
+	agentRepo agentModelLister
+}
+
+// agentModelLister narrows repository.AgentRepo to the two methods
+// llmRuntime needs, so wiring_test can stub it without dragging the
+// full sql.DB in.
+type agentModelLister interface {
+	ListByUser(ctx context.Context, userID string) ([]repository.Agent, error)
+	ListDistinctOwners(ctx context.Context) ([]string, error)
+}
+
+// SetAgentRepo wires the agents-table fallback source used by SyncUser
+// and SyncAll. Safe to call once before SyncAll.
+func (r *llmRuntime) SetAgentRepo(repo agentModelLister) {
+	if r == nil {
+		return
+	}
+	r.agentRepo = repo
 }
 
 type llmEffectivePlan struct {
@@ -444,6 +470,28 @@ func (r *llmRuntime) SyncAll(ctx context.Context) error {
 		return err
 	}
 	groupedOverrides, groupedEndpoints, groupedAgentDefaults, nextUsers := groupRuntimeConfigs(configs)
+	// Augment nextUsers with anyone who configured agent models
+	// directly through the agent editor (agents.model_provider/name)
+	// without a corresponding user_model_configs row. Otherwise the
+	// router never learns about their PM/researcher model preferences
+	// at startup, and the first call falls through to the platform
+	// default — the P2 symptom for tong on 2026-05-22.
+	if r.agentRepo != nil {
+		owners, listErr := r.agentRepo.ListDistinctOwners(ctx)
+		if listErr != nil {
+			slog.Warn("llm runtime: distinct owners list failed", "err", listErr)
+		} else {
+			for _, owner := range owners {
+				owner = strings.TrimSpace(owner)
+				if owner == "" {
+					continue
+				}
+				if _, ok := nextUsers[owner]; !ok {
+					nextUsers[owner] = struct{}{}
+				}
+			}
+		}
+	}
 	for userID := range r.syncedUsers {
 		if _, ok := nextUsers[userID]; !ok {
 			r.router.ReplaceUserConfigs(userID, nil, nil)
@@ -452,10 +500,58 @@ func (r *llmRuntime) SyncAll(ctx context.Context) error {
 	}
 	for userID := range nextUsers {
 		r.router.ReplaceUserConfigs(userID, groupedOverrides[userID], groupedEndpoints[userID])
-		r.router.ReplaceAgentConfigs(userID, groupedAgentDefaults[userID])
+		// Merge per-user agent_default rows with the agents-table
+		// fallback for this user. Explicit user_model_configs rows
+		// still win — fallback only fills the gaps.
+		merged := groupedAgentDefaults[userID]
+		if r.agentRepo != nil {
+			fallback := r.collectAgentsFallback(ctx, userID)
+			if len(fallback) > 0 {
+				if merged == nil {
+					merged = make(map[string]*llm.ModelConfig, len(fallback))
+				}
+				for agentID, cfg := range fallback {
+					if _, hasExplicit := merged[agentID]; hasExplicit {
+						continue
+					}
+					merged[agentID] = cfg
+				}
+			}
+		}
+		r.router.ReplaceAgentConfigs(userID, merged)
 	}
 	r.syncedUsers = nextUsers
 	return nil
+}
+
+// collectAgentsFallback returns the agents-table fallback agentDefaults
+// for one user. Best-effort: any read error is logged and an empty
+// map is returned so SyncAll still wires up user_model_configs.
+func (r *llmRuntime) collectAgentsFallback(ctx context.Context, userID string) map[string]*llm.ModelConfig {
+	if r == nil || r.agentRepo == nil || strings.TrimSpace(userID) == "" {
+		return nil
+	}
+	agents, err := r.agentRepo.ListByUser(ctx, userID)
+	if err != nil {
+		slog.Warn("llm runtime: agents fallback per-user list failed", "userId", userID, "err", err)
+		return nil
+	}
+	out := make(map[string]*llm.ModelConfig, len(agents))
+	for _, a := range agents {
+		id := strings.TrimSpace(a.ID)
+		if id == "" {
+			continue
+		}
+		provider := strings.TrimSpace(a.ModelProvider.String)
+		modelName := strings.TrimSpace(a.ModelName.String)
+		if provider == "" || modelName == "" {
+			continue
+		}
+		if cfg := agentRowToModelConfig(provider, modelName); cfg != nil {
+			out[id] = cfg
+		}
+	}
+	return out
 }
 
 func (r *llmRuntime) SyncUser(ctx context.Context, userID string) error {
@@ -484,6 +580,40 @@ func (r *llmRuntime) SyncUser(ctx context.Context, userID string) error {
 			agentDefaults[strings.TrimSpace(*cfg.AgentID)] = toLLMModelConfig(cfg)
 		}
 	}
+	// Agents-table fallback. The agent editor writes model_provider /
+	// model_name on the agents row directly, often without creating a
+	// corresponding user_model_configs(agent_default) row. Without
+	// this fallback the router can't see those preferences and every
+	// PM/researcher LLM call routes to the platform default — which
+	// was exactly tong's symptom (PM agent set to claude but every
+	// request went to gemini, see P2 diagnosis 2026-05-22). Explicit
+	// user_model_configs rows still win because we only fill gaps.
+	if r.agentRepo != nil {
+		agents, listErr := r.agentRepo.ListByUser(ctx, userID)
+		if listErr != nil {
+			slog.Warn("llm runtime: agents-table fallback list failed", "userId", userID, "err", listErr)
+		} else {
+			for _, a := range agents {
+				id := strings.TrimSpace(a.ID)
+				if id == "" {
+					continue
+				}
+				if _, hasExplicit := agentDefaults[id]; hasExplicit {
+					continue
+				}
+				provider := strings.TrimSpace(a.ModelProvider.String)
+				modelName := strings.TrimSpace(a.ModelName.String)
+				if provider == "" || modelName == "" {
+					continue
+				}
+				cfg := agentRowToModelConfig(provider, modelName)
+				if cfg == nil {
+					continue
+				}
+				agentDefaults[id] = cfg
+			}
+		}
+	}
 	r.router.ReplaceUserConfigs(userID, overrides, endpoints)
 	r.router.ReplaceAgentConfigs(userID, agentDefaults)
 	if len(overrides) == 0 && len(endpoints) == 0 && len(agentDefaults) == 0 {
@@ -492,6 +622,30 @@ func (r *llmRuntime) SyncUser(ctx context.Context, userID string) error {
 	}
 	r.syncedUsers[userID] = struct{}{}
 	return nil
+}
+
+// agentRowToModelConfig synthesises a router ModelConfig from the
+// provider/model_name stored on the agents row. Tier defaults to
+// Critical because PM / debate / sentiment paths all set ModelTier
+// explicitly anyway, and the router's finalizeConfig respects that
+// override. Provider-specific BaseURL is filled from providerDefaultBaseURL;
+// the ensureAPIKey path at request time will inject the system key.
+// Returns nil only on unknown providers (defensive — typed string
+// in the DB is supposed to be already normalised to llm.Provider).
+func agentRowToModelConfig(provider, modelName string) *llm.ModelConfig {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	modelName = strings.TrimSpace(modelName)
+	if provider == "" || modelName == "" {
+		return nil
+	}
+	cfg := &llm.ModelConfig{
+		Provider:    llm.Provider(provider),
+		ModelName:   modelName,
+		BaseURL:     providerDefaultBaseURL(llm.Provider(provider)),
+		MaxTokens:   4096,
+		Temperature: 0.7,
+	}
+	return cfg
 }
 
 // dollarBudgetGateAdapter satisfies llm.DollarBudgetGate by delegating
@@ -13193,6 +13347,20 @@ func (a *runtimePMAgent) runDecisionEngine(ctx context.Context, fund *repository
 		return nil, 0, fmt.Errorf("decision engine not configured")
 	}
 	input := a.buildDecisionInput(ctx, fund, pmAgent, positions, boughtTodayByKey, roundtable, tradingDate, fundID)
+	// P2 observability: a single line per PM decision call that lets
+	// operators confirm the agent the router resolved against. Kept
+	// permanent (not behind a debug flag) because the cost is one log
+	// per workflow run and the alternative is reproducing the silent
+	// "PM set to claude but ran on gemini" symptom from production.
+	if pmAgent != nil {
+		slog.Info("pm decision routing",
+			"fundId", fundID,
+			"userId", input.UserID,
+			"pmAgentId", input.PMAgentID,
+			"agentProvider", pmAgent.ModelProvider.String,
+			"agentModel", pmAgent.ModelName.String,
+		)
+	}
 	output, err := a.decisionEngine.Decide(ctx, input)
 	if err != nil {
 		return nil, 0, err
@@ -13312,6 +13480,24 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		availableCash = fund.CurrentCapital
 	}
 
+	// LLM routing hints: the PM agent and its owning user are what
+	// llm.ModelRouter.ResolveModel needs to fire the per-agent or
+	// per-user model override path. Without these, every PM LLM call
+	// falls through to the platform default provider regardless of
+	// what model the operator picked in the agent editor — that was
+	// the P2 symptom: tong's PM agent set to claude but every plan
+	// went to gemini. The owner is read from pmAgent.UserID (the
+	// agent table column), not the fund company, because models are
+	// configured per user, and the PM agent is what carries the
+	// routing identity end-to-end.
+	ownerUserID := ""
+	pmAgentID := ""
+	if pmAgent != nil {
+		ownerUserID = strings.TrimSpace(pmAgent.UserID)
+		pmAgentID = strings.TrimSpace(pmAgent.ID)
+	}
+	_ = fund // reserved for future fund-level routing overrides
+
 	return decision.DecisionInput{
 		FundID:              fundID,
 		TradingDate:         tradingDate,
@@ -13331,6 +13517,8 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		QuantCase:           quantCase,
 		SymbolVerdicts:      symbolVerdicts,
 		FundamentalSummary:  fundamentalSummary,
+		UserID:              ownerUserID,
+		PMAgentID:           pmAgentID,
 		SectorRotation:      sectorRotation,
 		NewsSentiment:       newsSentiment,
 		SleeveScorecard:     a.buildSleeveScorecard(ctx, fundID),

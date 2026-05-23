@@ -561,6 +561,17 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		usageTracker.Stop()
 		return nil, err
 	}
+	// Wire the agents-table fallback. Without this, SyncUser/SyncAll
+	// only read user_model_configs; agents whose model was set via the
+	// agent editor (which writes the agents row directly) silently
+	// fall through to the platform default provider — the P2 root
+	// cause. Resync once now so the fallback is in effect from the
+	// first request.
+	llmRuntime.SetAgentRepo(repository.NewAgentRepo(db))
+	if err := llmRuntime.SyncAll(context.Background()); err != nil {
+		usageTracker.Stop()
+		return nil, fmt.Errorf("llm runtime: resync after agentRepo wiring: %w", err)
+	}
 
 	marketDataService := marketdata.NewService(cfg.MarketData).WithTranslator(marketdata.NewTranslator(cfg.NewsTranslator))
 	// Boot the Binance / Coinbase websocket streamers (no-op when

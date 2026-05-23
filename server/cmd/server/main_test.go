@@ -823,11 +823,11 @@ func TestRuntimeRiskAgentReviewPlanPersistsMatchedSkillContext(t *testing.T) {
 		WithArgs("fund-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "company_id", "name", "description", "trading_mode", "initial_capital", "current_capital", "total_assets", "nav", "status", "config", "created_at", "updated_at"}).
 			AddRow("fund-1", "company-1", "Alpha Fund", nil, "simulation", 100000.0, 100000.0, 100000.0, 1.0, "active", []byte(`{"market":"us_equity","primaryDirection":"stocks","universe":{"symbols":["AAPL","MSFT"],"themes":["AI infra"]}}`), now, now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 			 FROM agents WHERE id = $1`)).
 		WithArgs("agent-risk-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-risk-1", "Risk Agent", "risk", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"risk-checklist","content":"重点检查单票权重与流动性","match":{"roles":["risk"],"workflowSteps":["risk_review"],"scenarioKeywords":["AAPL"]}}]}`), []byte(`{}`), []byte(`{}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-risk-1", "user-1", "Risk Agent", "risk", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"risk-checklist","content":"重点检查单票权重与流动性","match":{"roles":["risk"],"workflowSteps":["risk_review"],"scenarioKeywords":["AAPL"]}}]}`), []byte(`{}`), []byte(`{}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, company_id, name, description, trading_mode, initial_capital, current_capital, total_assets, nav, status, config, created_at, updated_at
 			 FROM funds WHERE id = $1`)).
 		WithArgs("fund-1").
@@ -886,11 +886,11 @@ func TestRuntimeTradingEngineExecutePersistsMatchedSkillContextBeforeExecution(t
 		WithArgs("fund-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "fund_id", "agent_id", "role", "focus", "joined_at", "status", "updated_at"}).
 			AddRow("member-1", "fund-1", "agent-trader-1", "trader", nil, now, "active", now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 			 FROM agents WHERE id = $1`)).
 		WithArgs("agent-trader-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-trader-1", "Trader Agent", "trader", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"trade-checklist","content":"拆单执行并检查流动性","match":{"roles":["trader"],"workflowSteps":["trade_execution"],"scenarioKeywords":["AAPL"]}}]}`), []byte(`{}`), []byte(`{}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-trader-1", "user-1", "Trader Agent", "trader", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"trade-checklist","content":"拆单执行并检查流动性","match":{"roles":["trader"],"workflowSteps":["trade_execution"],"scenarioKeywords":["AAPL"]}}]}`), []byte(`{}`), []byte(`{}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE plan_actions SET reasoning = $1 WHERE id = $2 AND plan_id = $3`)).
 		WithArgs(containsAllArg{"原始推理", "拆单执行并检查流动性", "匹配技能："}, "action-1", "plan-1").
@@ -1139,11 +1139,11 @@ func TestRuntimeResearcherPoolMacroBriefIncludesMatchedSkillContext(t *testing.T
 		WithArgs("fund-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "company_id", "name", "description", "trading_mode", "initial_capital", "current_capital", "total_assets", "nav", "status", "config", "created_at", "updated_at"}).
 			AddRow("fund-1", "company-1", "Macro Fund", nil, "simulation", 100000.0, 100000.0, 100000.0, 1.0, "active", []byte(`{"market":"us_equity","primaryDirection":"stocks","universe":{"symbols":["SPY","QQQ"],"themes":["macro"]}}`), now, now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 			 FROM agents WHERE id = $1`)).
 		WithArgs("agent-researcher-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-researcher-1", "Macro Researcher", "researcher", "macro", nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"macro-checklist","content":"重点跟踪 CPI 与 FOMC 之前的风险资产定价","match":{"roles":["researcher"],"focuses":["macro"],"workflowSteps":["macro_brief"]}}]}`), []byte(`{}`), []byte(`{}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-researcher-1", "user-1", "Macro Researcher", "researcher", "macro", nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"macro-checklist","content":"重点跟踪 CPI 与 FOMC 之前的风险资产定价","match":{"roles":["researcher"],"focuses":["macro"],"workflowSteps":["macro_brief"]}}]}`), []byte(`{}`), []byte(`{}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, company_id, name, description, trading_mode, initial_capital, current_capital, total_assets, nav, status, config, created_at, updated_at
 			 FROM funds WHERE id = $1`)).
 		WithArgs("fund-1").
@@ -1190,11 +1190,11 @@ func TestRuntimeResearcherPoolMacroBriefIncludesFundFocusContext(t *testing.T) {
 		WithArgs("fund-2").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "company_id", "name", "description", "trading_mode", "initial_capital", "current_capital", "total_assets", "nav", "status", "config", "created_at", "updated_at"}).
 			AddRow("fund-2", "company-1", "Sector Fund", nil, "simulation", 100000.0, 100000.0, 100000.0, 1.0, "active", []byte(`{"market":"hk_equity","assetClass":"equity","primaryDirection":"stocks","universe":{"mode":"manual","symbols":["0700.HK"],"themes":["AI"],"sectors":["technology"]}}`), now, now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 			 FROM agents WHERE id = $1`)).
 		WithArgs("agent-researcher-2").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-researcher-2", "Macro Researcher", "researcher", "macro", nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"macro-checklist","content":"关注科技权重的宏观敏感度","match":{"roles":["researcher"],"focuses":["macro"],"workflowSteps":["macro_brief"]}}]}`), []byte(`{}`), []byte(`{}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-researcher-2", "user-1", "Macro Researcher", "researcher", "macro", nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"macro-checklist","content":"关注科技权重的宏观敏感度","match":{"roles":["researcher"],"focuses":["macro"],"workflowSteps":["macro_brief"]}}]}`), []byte(`{}`), []byte(`{}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, company_id, name, description, trading_mode, initial_capital, current_capital, total_assets, nav, status, config, created_at, updated_at
 			 FROM funds WHERE id = $1`)).
 		WithArgs("fund-2").
@@ -1233,11 +1233,11 @@ func TestRuntimePMAgentGeneratePlanPersistsMatchedSkillContext(t *testing.T) {
 		WithArgs("fund-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "fund_id", "agent_id", "role", "focus", "joined_at", "status", "updated_at"}).
 			AddRow("member-1", "fund-1", "agent-pm-1", "pm", nil, now, "active", now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 			 FROM agents WHERE id = $1`)).
 		WithArgs("agent-pm-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-pm-1", "PM Agent", "pm", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"pm-checklist","content":"先校验主题集中度与仓位节奏","match":{"roles":["pm"],"workflowSteps":["pm_plan"],"scenarioKeywords":["新能源"]}}]}`), []byte(`{}`), []byte(`{}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-pm-1", "user-1", "PM Agent", "pm", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"pm-checklist","content":"先校验主题集中度与仓位节奏","match":{"roles":["pm"],"workflowSteps":["pm_plan"],"scenarioKeywords":["新能源"]}}]}`), []byte(`{}`), []byte(`{}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, company_id, name, description, trading_mode, initial_capital, current_capital, total_assets, nav, status, config, created_at, updated_at
 				 FROM funds WHERE id = $1`)).
 		WithArgs("fund-1").
@@ -1353,11 +1353,11 @@ func TestRuntimePMAgentBuildSkillContextIncludesFundFocusContext(t *testing.T) {
 		WithArgs("fund-pm-focus").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "company_id", "name", "description", "trading_mode", "initial_capital", "current_capital", "total_assets", "nav", "status", "config", "created_at", "updated_at"}).
 			AddRow("fund-pm-focus", "company-1", "Focus Fund", nil, "simulation", 100000.0, 100000.0, 100000.0, 1.0, "active", []byte(`{"market":"us_equity","primaryDirection":"stocks","universe":{"symbols":["NVDA","AVGO"],"themes":["CPO","AI infra"]}}`), now, now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 			 FROM agents WHERE id = $1`)).
 		WithArgs("agent-pm-focus").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-pm-focus", "PM Agent", "pm", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"pm-checklist","content":"先校验主题集中度与仓位节奏","match":{"roles":["pm"],"workflowSteps":["pm_plan"],"scenarioKeywords":["光模块"]}}]}`), []byte(`{}`), []byte(`{}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-pm-focus", "user-1", "PM Agent", "pm", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"pm-checklist","content":"先校验主题集中度与仓位节奏","match":{"roles":["pm"],"workflowSteps":["pm_plan"],"scenarioKeywords":["光模块"]}}]}`), []byte(`{}`), []byte(`{}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, company_id, name, description, trading_mode, initial_capital, current_capital, total_assets, nav, status, config, created_at, updated_at
 			 FROM funds WHERE id = $1`)).
 		WithArgs("fund-pm-focus").
@@ -1408,11 +1408,11 @@ func TestRuntimeRiskAgentReviewPlanPersistsFundFocusContext(t *testing.T) {
 		WithArgs("fund-2").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "company_id", "name", "description", "trading_mode", "initial_capital", "current_capital", "total_assets", "nav", "status", "config", "created_at", "updated_at"}).
 			AddRow("fund-2", "company-1", "Sector Fund", nil, "simulation", 100000.0, 100000.0, 100000.0, 1.0, "active", []byte(`{"market":"hk_equity","assetClass":"equity","primaryDirection":"stocks","universe":{"mode":"manual","symbols":["0700.HK"],"themes":["AI"],"sectors":["technology"]}}`), now, now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 			 FROM agents WHERE id = $1`)).
 		WithArgs("agent-risk-2").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-risk-2", "Risk Agent", "risk", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"risk-checklist","content":"检查港股单票流动性","match":{"roles":["risk"],"workflowSteps":["risk_review"],"scenarioKeywords":["0700.HK"]}}]}`), []byte(`{}`), []byte(`{}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-risk-2", "user-1", "Risk Agent", "risk", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"risk-checklist","content":"检查港股单票流动性","match":{"roles":["risk"],"workflowSteps":["risk_review"],"scenarioKeywords":["0700.HK"]}}]}`), []byte(`{}`), []byte(`{}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, company_id, name, description, trading_mode, initial_capital, current_capital, total_assets, nav, status, config, created_at, updated_at
 			 FROM funds WHERE id = $1`)).
 		WithArgs("fund-2").
@@ -1461,11 +1461,11 @@ func TestRuntimePMAgentBuildSkillContextIncludesSpecializationContext(t *testing
 		WithArgs("fund-pm-spec").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "company_id", "name", "description", "trading_mode", "initial_capital", "current_capital", "total_assets", "nav", "status", "config", "created_at", "updated_at"}).
 			AddRow("fund-pm-spec", "company-1", "Focus Fund", nil, "simulation", 100000.0, 100000.0, 100000.0, 1.0, "active", []byte(`{"market":"us_equity","primaryDirection":"stocks","universe":{"symbols":["NVDA","AVGO"],"themes":["CPO"]},"specialization":{"team":{"themes":["CPO"],"instruments":["NVDA","AVGO"],"styleHints":["growth"]}}}`), now, now))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 				 FROM agents WHERE id = $1`)).
 		WithArgs("agent-pm-spec").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "status", "created_at", "updated_at"}).
-			AddRow("agent-pm-spec", "PM Agent", "pm", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"pm-checklist","content":"先校验主题集中度与仓位节奏","match":{"roles":["pm"],"workflowSteps":["pm_plan"],"scenarioKeywords":["光模块"]}}]}`), []byte(`{"specialization":{"themes":["CPO"],"instruments":["NVDA"],"patterns":["concentrated growth"]}}`), []byte(`{"specializationLearning":{"themes":{"CPO":1.2},"instruments":{"NVDA":0.8},"recentLessons":["theme CPO ideas translated into stronger plan quality today"],"lastAdjustments":["keep sizing discipline on secondary names"]}}`), "active", now, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name", "system_prompt", "skill_config", "domain_config", "evolution_config", "pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at"}).
+			AddRow("agent-pm-spec", "user-1", "PM Agent", "pm", nil, nil, nil, nil, nil, []byte(`{"enabled":true,"skills":[{"key":"pm-checklist","content":"先校验主题集中度与仓位节奏","match":{"roles":["pm"],"workflowSteps":["pm_plan"],"scenarioKeywords":["光模块"]}}]}`), []byte(`{"specialization":{"themes":["CPO"],"instruments":["NVDA"],"patterns":["concentrated growth"]}}`), []byte(`{"specializationLearning":{"themes":{"CPO":1.2},"instruments":{"NVDA":0.8},"recentLessons":["theme CPO ideas translated into stronger plan quality today"],"lastAdjustments":["keep sizing discipline on secondary names"]}}`), []byte(`{}`), nil, "active", now, now))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, company_id, name, description, trading_mode, initial_capital, current_capital, total_assets, nav, status, config, created_at, updated_at
 				 FROM funds WHERE id = $1`)).
 		WithArgs("fund-pm-spec").

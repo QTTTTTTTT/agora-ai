@@ -13,6 +13,51 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
+// TestAgentRepoGetByIDIncludesUserID pins down the P2 root cause: the
+// SELECT in GetByID used to omit user_id, so every call site that
+// touched pmAgent.UserID got an empty string. That broke
+// ModelRouter.ResolveModel's agentDefaults lookup — owner=""
+// short-circuits straight to platform default. The schema column
+// order matters: UserID is the second field of the struct, second
+// column of the SELECT. If anyone ever drops user_id from the
+// projection again, this test will fail.
+func TestAgentRepoGetByIDIncludesUserID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	repo := NewAgentRepo(db)
+	now := time.Now().UTC()
+	rows := sqlmock.NewRows([]string{
+		"id", "user_id", "name", "role", "focus", "llm_model", "model_provider", "model_name",
+		"system_prompt", "skill_config", "domain_config", "evolution_config",
+		"pending_marketplace_snapshot", "marketplace_snapshot_imported_at", "status", "created_at", "updated_at",
+	}	).AddRow(
+		"agent-1", "user-tong", "Portfolio Manager", "pm", nil, nil, "claude", "claude-sonnet-4-20250514",
+		nil, []byte("{}"), []byte("{}"), []byte("{}"),
+		[]byte("{}"), nil, "active", now, now,
+	)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at")).
+		WithArgs("agent-1").
+		WillReturnRows(rows)
+
+	agent, err := repo.GetByID(context.Background(), "agent-1")
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if agent.UserID != "user-tong" {
+		t.Fatalf("agent.UserID = %q, want user-tong (P2 routing depends on this)", agent.UserID)
+	}
+	if agent.ModelProvider.String != "claude" {
+		t.Fatalf("agent.ModelProvider = %q, want claude", agent.ModelProvider.String)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
 func TestPlanRepoCreateWithActionsRollsBackOnActionInsertFailure(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

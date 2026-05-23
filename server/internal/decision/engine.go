@@ -135,6 +135,19 @@ type DecisionInput struct {
 	BuyBudget float64  // max absolute buy notional this plan can propose; 0 = no cap
 	RiskNotes []string // contextual notes (e.g., "A-share T+1 active") that the engine must respect
 
+	// LLM routing hints. The PMAgent loaded by the wiring layer knows
+	// its model_provider / model_name from the agents table; the
+	// LLMDecisionEngine forwards PMAgentID into ChatRequest.AgentID so
+	// llm.ModelRouter.ResolveModel can look up the per-agent default
+	// (stored in router.agentDefaults, sourced either from
+	// user_model_configs OR — after the P2 fix — from agents.* with an
+	// alias mapping the operator-typed model_name to a relay-supported
+	// variant). Empty fields fall back to the engine's static UserID /
+	// AgentID / platform default, preserving every existing behaviour.
+	// FallbackEngine ignores both.
+	UserID    string
+	PMAgentID string
+
 	// Now lets tests freeze the engine's "today". nil = use time.Now().
 	Now time.Time
 }

@@ -2256,11 +2256,20 @@ func createAgentOn(ctx context.Context, q DBTX, agent *Agent) (string, error) {
 
 func (r *AgentRepo) GetByID(ctx context.Context, id string) (*Agent, error) {
 	agent := &Agent{}
+	// Historically this query omitted user_id and the marketplace
+	// snapshot columns, so every caller got an Agent struct with
+	// UserID="". That was harmless until P2 — when the LLM decision
+	// engine started using pmAgent.UserID to drive ModelRouter's
+	// agent-default lookup, a blank UserID meant the router skipped
+	// the override path entirely and fell back to the platform
+	// default provider (gemini), even though the agent was configured
+	// to use claude. The query now mirrors GetOwnedByID's projection
+	// so every Agent loaded through this repo has full identity.
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, status, created_at, updated_at
+		`SELECT id, user_id, name, role, focus, llm_model, model_provider, model_name, system_prompt, skill_config, domain_config, evolution_config, pending_marketplace_snapshot, marketplace_snapshot_imported_at, status, created_at, updated_at
 		 FROM agents WHERE id = $1`,
 		id,
-	).Scan(&agent.ID, &agent.Name, &agent.Role, &agent.Focus, &agent.LLMModel, &agent.ModelProvider, &agent.ModelName, &agent.SystemPrompt, &agent.SkillConfig, &agent.DomainConfig, &agent.EvolutionConfig, &agent.Status, &agent.CreatedAt, &agent.UpdatedAt)
+	).Scan(&agent.ID, &agent.UserID, &agent.Name, &agent.Role, &agent.Focus, &agent.LLMModel, &agent.ModelProvider, &agent.ModelName, &agent.SystemPrompt, &agent.SkillConfig, &agent.DomainConfig, &agent.EvolutionConfig, &agent.PendingMarketplaceSnapshot, &agent.MarketplaceSnapshotImportedAt, &agent.Status, &agent.CreatedAt, &agent.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -2332,6 +2341,34 @@ func (r *AgentRepo) ListByUser(ctx context.Context, userID string) ([]Agent, err
 		agents = append(agents, agent)
 	}
 	return agents, rows.Err()
+}
+
+// ListDistinctOwners returns every user_id that owns at least one
+// agent with both model_provider and model_name populated. Used by
+// llmRuntime.SyncAll so the router's agent-default fallback fires
+// for users who configured their PM/researchers through the agent
+// editor (which writes the agents row) without ever creating a
+// user_model_configs row. Returns a sorted slice for stable iteration.
+func (r *AgentRepo) ListDistinctOwners(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT user_id
+		  FROM agents
+		 WHERE COALESCE(NULLIF(TRIM(model_provider), ''), '') <> ''
+		   AND COALESCE(NULLIF(TRIM(model_name),     ''), '') <> ''
+		 ORDER BY user_id`)
+	if err != nil {
+		return nil, fmt.Errorf("agent_repo: list distinct owners: %w", err)
+	}
+	defer rows.Close()
+	var owners []string
+	for rows.Next() {
+		var owner string
+		if err := rows.Scan(&owner); err != nil {
+			return nil, fmt.Errorf("agent_repo: scan distinct owner: %w", err)
+		}
+		owners = append(owners, owner)
+	}
+	return owners, rows.Err()
 }
 
 func (r *AgentRepo) MarkMarketplaceSnapshotImported(ctx context.Context, agentID string) error {

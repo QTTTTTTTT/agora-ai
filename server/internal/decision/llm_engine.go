@@ -75,6 +75,25 @@ func (e *LLMDecisionEngine) Decide(ctx context.Context, input DecisionInput) (*D
 		return nil, errors.New("llm decision engine: client not configured")
 	}
 
+	// Prefer the per-call routing hints (input.UserID / input.PMAgentID)
+	// over the engine's static fields. The wiring layer builds one
+	// LLMDecisionEngine per fund at workflow-construction time —
+	// before the PM agent for *this* trading day has been resolved —
+	// so the static AgentID is almost always empty. Threading the
+	// resolved PM through DecisionInput is what makes
+	// llm.ModelRouter.ResolveModel's agentDefaults lookup actually
+	// fire (otherwise every call falls through to the platform
+	// default provider, which was the root cause of "PM agent set to
+	// claude in the UI but every call went to gemini" — see
+	// agent-transcript dce9e865 2026-05-22 P2 investigation).
+	userID := input.UserID
+	if userID == "" {
+		userID = e.UserID
+	}
+	agentID := input.PMAgentID
+	if agentID == "" {
+		agentID = e.AgentID
+	}
 	req := llm.ChatRequest{
 		Messages: []llm.ChatMessage{
 			{Role: "system", Content: systemPrompt()},
@@ -83,8 +102,8 @@ func (e *LLMDecisionEngine) Decide(ctx context.Context, input DecisionInput) (*D
 		ModelTier:   e.ModelTier,
 		MaxTokens:   e.maxTokens(),
 		Temperature: e.temperature(),
-		UserID:      e.UserID,
-		AgentID:     e.AgentID,
+		UserID:      userID,
+		AgentID:     agentID,
 		StepName:    e.StepName,
 		FundID:      e.FundID,
 	}
