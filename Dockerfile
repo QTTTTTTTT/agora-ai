@@ -18,15 +18,31 @@
 #   **/.*
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build React frontend
+# Stage 1: Build React frontend (npm workspaces aware)
 # ---------------------------------------------------------------------------
+# The monorepo root owns the lockfile and declares `web`, `android`, and
+# `shared/*` as workspaces. The `web` package imports `@fundai/api-client`
+# (lives in `shared/api-client`), so we must:
+#   1) install from the root with the workspace topology preserved
+#   2) build the shared TypeScript package first (web reads its `dist/`)
+#   3) build web last
+# Doing a bare `cd web && npm ci` here would fail because the workspace
+# sibling resolution requires the root package.json + lockfile.
 FROM node:22-alpine AS frontend-builder
 
-WORKDIR /app/web
-COPY web/package*.json ./
-RUN npm ci --ignore-scripts && npm cache clean --force
-COPY web/ ./
-RUN npm run build
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+COPY web/package.json ./web/
+COPY shared/api-client/package.json ./shared/api-client/
+
+RUN npm ci --ignore-scripts --workspaces --include-workspace-root && npm cache clean --force
+
+COPY shared/ ./shared/
+RUN npm run build -w @fundai/api-client
+
+COPY web/ ./web/
+RUN npm run build -w ai-fund-platform
 
 # ---------------------------------------------------------------------------
 # Stage 2: Build Go backend
@@ -81,6 +97,7 @@ WORKDIR /app
 
 # Copy built artifacts
 COPY --from=backend-builder /fundai-server ./server
+# Frontend stage now lives at the monorepo root, so web/dist is at /app/web/dist.
 COPY --from=frontend-builder /app/web/dist ./web/dist
 COPY server/migrations ./migrations
 

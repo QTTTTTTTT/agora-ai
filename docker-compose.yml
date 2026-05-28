@@ -19,7 +19,14 @@ services:
   # PostgreSQL 16 — primary data store
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 = official postgres:16 + the `vector` extension
+    # preinstalled. Migration 047_memory_embeddings.sql does `CREATE
+    # EXTENSION IF NOT EXISTS vector;` so the stock postgres:16-alpine fails
+    # at boot with `extension "vector" is not available (0A000)`. This image
+    # is a drop-in replacement: same data directory layout, same env vars,
+    # same port. No data migration needed for the existing fundai-postgres
+    # volume because the schema is created lazily on first connect.
+    image: pgvector/pgvector:pg16
     container_name: fundai-postgres
     restart: unless-stopped
     environment:
