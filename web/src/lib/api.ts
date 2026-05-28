@@ -28,6 +28,7 @@ import type {
   SessionResponse as SharedSessionResponse,
   LoginInput as SharedLoginInput,
 } from "@fundai/api-client";
+import { dispatchSessionExpired } from "./sessionExpiryEvent";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const PRIMARY_TOKEN_STORAGE_KEY = "fundai.jwt";
@@ -238,6 +239,16 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     const normalized = normalizeErrorMessage(payload, fallback);
     if (response.status === 401) {
       clearApiToken();
+      // Notify the global SessionExpiryWatcher so the UI can show a
+      // friendly toast and soft-navigate to /login carrying ?next=…
+      // instead of leaving every page to paint its own raw "登录失效"
+      // banner. Throwing still happens — callers that already render
+      // localised inline error states keep working unchanged.
+      dispatchSessionExpired({
+        requestId: responseRequestId,
+        path,
+        reason: "api_request_401",
+      });
       throw new ApiError("登录状态已失效，请重新登录后再试。", response.status, normalized.detail, responseRequestId);
     }
     throw new ApiError(normalized.message, response.status, normalized.detail, responseRequestId);

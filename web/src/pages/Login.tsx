@@ -28,12 +28,26 @@ const Login: React.FC = () => {
   const location = useLocation();
   const { language } = useAppPreferences();
   const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
+  // SessionExpiryWatcher attaches the user's pre-401 deep link as
+  // `?next=<path>`. Honour it first so a user kicked off
+  // `/funds/abc/decisions` returns to exactly that page after re-auth
+  // — falling back to the legacy `location.state.from` pattern (used by
+  // AuthGate redirects), and finally to /companies for cold sign-ins.
+  const nextParam = useMemo(() => {
+    const raw = new URLSearchParams(location.search).get("next");
+    if (!raw) return null;
+    // Only allow same-origin relative paths to avoid an open-redirect.
+    // Absolute URLs (http://evil.com/...) and protocol-relative
+    // (//evil.com) are rejected — the canonical XSS-via-redirect class.
+    if (!raw.startsWith("/") || raw.startsWith("//")) return null;
+    if (raw === "/login") return null;
+    return raw;
+  }, [location.search]);
   const redirectTo = useMemo(() => {
-    if (from && from !== "/login") {
-      return from;
-    }
+    if (nextParam) return nextParam;
+    if (from && from !== "/login") return from;
     return "/companies";
-  }, [from]);
+  }, [nextParam, from]);
 
   const [mode, setMode] = useState<AuthMode>("login");
   const [form, setForm] = useState<FormState>(initialFormState);

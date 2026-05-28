@@ -85,18 +85,42 @@ function request(url, method, data, options) {
         }
         if (res.statusCode === 401) {
           if (!opts.suppressAutoLogin && !opts._retryAfterLogin) {
+            // First-chance silent recovery: kick off wx.login() to mint
+            // a fresh wechat session token, then retry the original
+            // request exactly once. The user sees nothing if it
+            // succeeds — which is the usual outcome when the only
+            // problem was a stale 12h-expired session.
             tryAutoRelogin()
               .then(function () {
                 var nextOpts = Object.assign({}, opts, { _retryAfterLogin: true });
                 request(url, method, data, nextOpts).then(resolve, reject);
               })
               .catch(function (err) {
-                wx.showToast({ title: '登录已过期', icon: 'none' });
+                // wx.login itself failed (network down, miniapp not
+                // in the wechat session ring, etc). Tell the user the
+                // recovery path: they have to back out of the miniapp
+                // and re-enter so the launcher can redo the OAuth
+                // handshake from scratch.
+                wx.showToast({
+                  title: '登录已失效，请退出小程序重新进入',
+                  icon: 'none',
+                  duration: 3000,
+                });
                 reject({ code: 401, message: '未授权', data: res.data, detail: err });
               });
             return;
           }
-          wx.showToast({ title: '登录已过期', icon: 'none' });
+          // The retry-after-login attempt also came back 401 — the
+          // server has actively rejected the freshly minted token.
+          // This is the "your account was force-logged-out" branch
+          // (admin revoke, password change on another device, etc).
+          // Same recovery path, but distinct copy so the user knows
+          // it's not a transient hiccup.
+          wx.showToast({
+            title: '会话已被服务器注销，请重新登录',
+            icon: 'none',
+            duration: 3000,
+          });
           reject({ code: 401, message: '未授权', data: res.data });
           return;
         }

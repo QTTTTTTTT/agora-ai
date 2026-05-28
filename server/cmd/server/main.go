@@ -1511,6 +1511,15 @@ func kycLevelRank(level string) int {
 // this guard, a typo'd API path silently returns 200 + index.html which is
 // near-impossible to debug from a curl/fetch caller. The SSE event-stream
 // path also needs to be excluded so misrouted /events requests fail loudly.
+//
+// Static asset paths (anything with a file extension like .js, .css, .png)
+// that don't resolve to a real file must also 404 instead of falling back
+// to index.html. Otherwise the browser's dynamic `import()` sees a 200 +
+// text/html response and throws "Failed to fetch dynamically imported
+// module" — which is exactly what happens when a user keeps a stale tab
+// open across a frontend rebuild: the old entry chunk lazy-imports a
+// hashed chunk name that no longer exists, and the SPA fallback masks
+// the 404 as a misleading "module" failure.
 func spaHandler(dir string) http.Handler {
 	fsys := http.Dir(dir)
 	fileServer := http.FileServer(fsys)
@@ -1532,12 +1541,23 @@ func spaHandler(dir string) http.Handler {
 
 		f, err := fsys.Open(path)
 		if err != nil {
+			// Asset-style paths (anything with a file extension) must 404
+			// — falling back to index.html corrupts module imports.
+			if isStaticAssetPath(path) {
+				writeJSON(w, http.StatusNotFound, map[string]any{
+					"error": "not_found",
+					"path":  r.URL.Path,
+				})
+				return
+			}
 			r.URL.Path = "/"
+			setSPACacheHeaders(w, "/index.html")
 			fileServer.ServeHTTP(w, r)
 			return
 		}
 		_ = f.Close()
 
+		setSPACacheHeaders(w, path)
 		fileServer.ServeHTTP(w, r)
 	})
 }
@@ -1550,6 +1570,45 @@ func isAPILikePath(path string) bool {
 		path == "/api" ||
 		strings.HasPrefix(path, "/events/") ||
 		path == "/events"
+}
+
+// isStaticAssetPath reports whether `path` looks like a static asset request
+// (i.e. the last path segment has a file extension). React-router paths are
+// extension-less ("/", "/dashboard", "/funds/abc/settings") so they correctly
+// route to the SPA fallback; "/assets/foo-HASH.js", "/favicon.ico", and
+// "/vite.svg" all match and so return real 404s when missing.
+func isStaticAssetPath(path string) bool {
+	last := path
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		last = path[i+1:]
+	}
+	if last == "" {
+		return false
+	}
+	return strings.Contains(last, ".")
+}
+
+// setSPACacheHeaders writes Cache-Control headers tuned for a Vite-style
+// build:
+//
+//   - Hashed chunks under /assets/ are content-addressed (filename embeds
+//     the rolldown hash), so they can be cached aggressively forever.
+//     `immutable` tells the browser it never even needs to revalidate.
+//   - index.html must not be cached: it's the entry that pins the current
+//     hashed chunk names, and a stale copy is precisely how users end up
+//     loading deleted chunks after a rebuild. `no-cache` forces a
+//     revalidation hop (ETag-based) on every request so users pick up the
+//     new entry as soon as we redeploy.
+//   - Everything else gets a short, conservative default.
+func setSPACacheHeaders(w http.ResponseWriter, path string) {
+	switch {
+	case strings.HasPrefix(path, "/assets/"):
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	case path == "/index.html" || strings.HasSuffix(path, "/index.html"):
+		w.Header().Set("Cache-Control", "no-cache")
+	default:
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	}
 }
 
 // ---------------------------------------------------------------------------

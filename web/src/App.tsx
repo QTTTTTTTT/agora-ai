@@ -1,4 +1,4 @@
-import React, { Component, ReactNode, Suspense, lazy, useMemo } from "react";
+import React, { Component, ReactNode, Suspense, useMemo } from "react";
 import {
   BrowserRouter,
   Routes,
@@ -11,37 +11,47 @@ import {
 import AuthGate, { AdminGate } from "./components/AuthGate";
 import FundLayout from "./components/FundLayout";
 import PreferenceDock from "./components/PreferenceDock";
+import SessionExpiryWatcher from "./components/SessionExpiryWatcher";
 import { useAppPreferences } from "./lib/preferences";
+import { lazyWithRetry } from "./lib/lazyWithRetry";
 
-const Companies = lazy(() => import("./pages/Companies"));
-const Login = lazy(() => import("./pages/Login"));
-const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
-const ResetPassword = lazy(() => import("./pages/ResetPassword"));
-const VerifyEmail = lazy(() => import("./pages/VerifyEmail"));
-const AccountSecurity = lazy(() => import("./pages/AccountSecurity"));
-const Dashboard = lazy(() => import("./pages/Dashboard"));
-const TeamManagement = lazy(() => import("./pages/TeamManagement"));
-const DecisionCenter = lazy(() => import("./pages/DecisionCenter"));
-const ABTestCompare = lazy(() => import("./pages/ABTestCompare"));
-const ForwardGate = lazy(() => import("./pages/ForwardGate"));
-const Backtest = lazy(() => import("./pages/Backtest"));
-const FundPerformance = lazy(() => import("./pages/FundPerformance"));
-const AgentLearning = lazy(() => import("./pages/AgentLearning"));
-const AgentLineage = lazy(() => import("./pages/AgentLineage"));
-const AuditLog = lazy(() => import("./pages/AuditLog"));
-const MemoryCenter = lazy(() => import("./pages/MemoryCenter"));
-const TradeHistory = lazy(() => import("./pages/TradeHistory"));
-const FundSettings = lazy(() => import("./pages/FundSettings"));
-const Subscription = lazy(() => import("./pages/Subscription"));
-const ModelConfig = lazy(() => import("./pages/ModelConfig"));
-const Usage = lazy(() => import("./pages/Usage"));
-const Admin = lazy(() => import("./pages/Admin"));
-const SkillInbox = lazy(() => import("./pages/SkillInbox"));
-const Wallet = lazy(() => import("./pages/Wallet"));
-const KYC = lazy(() => import("./pages/KYC"));
-const Marketplace = lazy(() => import("./pages/Marketplace"));
-const Auctions = lazy(() => import("./pages/Auctions"));
-const Promotions = lazy(() => import("./pages/Promotions"));
+// Every page goes through `lazyWithRetry` instead of the bare React.lazy.
+// Naked `lazy(() => import(...))` has zero protection against the well-known
+// "Failed to fetch dynamically imported module" race (network blip, route
+// switch cancelling the in-flight fetch, or a stale entry chunk after a
+// redeploy). `lazyWithRetry` retries the import a few times with backoff,
+// and as a last resort issues a single `location.reload()` so the user
+// picks up the fresh `index.html` (and its updated chunk hash map). See
+// the file header in `./lib/lazyWithRetry.ts` for the full rationale.
+const Companies = lazyWithRetry(() => import("./pages/Companies"));
+const Login = lazyWithRetry(() => import("./pages/Login"));
+const ForgotPassword = lazyWithRetry(() => import("./pages/ForgotPassword"));
+const ResetPassword = lazyWithRetry(() => import("./pages/ResetPassword"));
+const VerifyEmail = lazyWithRetry(() => import("./pages/VerifyEmail"));
+const AccountSecurity = lazyWithRetry(() => import("./pages/AccountSecurity"));
+const Dashboard = lazyWithRetry(() => import("./pages/Dashboard"));
+const TeamManagement = lazyWithRetry(() => import("./pages/TeamManagement"));
+const DecisionCenter = lazyWithRetry(() => import("./pages/DecisionCenter"));
+const ABTestCompare = lazyWithRetry(() => import("./pages/ABTestCompare"));
+const ForwardGate = lazyWithRetry(() => import("./pages/ForwardGate"));
+const Backtest = lazyWithRetry(() => import("./pages/Backtest"));
+const FundPerformance = lazyWithRetry(() => import("./pages/FundPerformance"));
+const AgentLearning = lazyWithRetry(() => import("./pages/AgentLearning"));
+const AgentLineage = lazyWithRetry(() => import("./pages/AgentLineage"));
+const AuditLog = lazyWithRetry(() => import("./pages/AuditLog"));
+const MemoryCenter = lazyWithRetry(() => import("./pages/MemoryCenter"));
+const TradeHistory = lazyWithRetry(() => import("./pages/TradeHistory"));
+const FundSettings = lazyWithRetry(() => import("./pages/FundSettings"));
+const Subscription = lazyWithRetry(() => import("./pages/Subscription"));
+const ModelConfig = lazyWithRetry(() => import("./pages/ModelConfig"));
+const Usage = lazyWithRetry(() => import("./pages/Usage"));
+const Admin = lazyWithRetry(() => import("./pages/Admin"));
+const SkillInbox = lazyWithRetry(() => import("./pages/SkillInbox"));
+const Wallet = lazyWithRetry(() => import("./pages/Wallet"));
+const KYC = lazyWithRetry(() => import("./pages/KYC"));
+const Marketplace = lazyWithRetry(() => import("./pages/Marketplace"));
+const Auctions = lazyWithRetry(() => import("./pages/Auctions"));
+const Promotions = lazyWithRetry(() => import("./pages/Promotions"));
 
 interface ErrorBoundaryCopy {
   unexpectedError: string;
@@ -143,6 +153,13 @@ const AppRoutes: React.FC = () => {
   return (
     <BrowserRouter>
       <PreferenceDock />
+      {/* Single global listener for `fundai:session-expired` events
+          dispatched from api.ts whenever a request hits a 401. Lives
+          inside <BrowserRouter> so it can call useNavigate. See
+          components/SessionExpiryWatcher.tsx for the dedup + carve-out
+          rationale. Rendered as a portal-style toast, no layout impact
+          when idle. */}
+      <SessionExpiryWatcher />
       <ErrorBoundary copy={copy}>
         <Suspense fallback={<RouteFallback copy={copy} />}>
           <Routes>
