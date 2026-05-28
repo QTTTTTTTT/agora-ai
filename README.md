@@ -74,9 +74,11 @@ chmod +x scripts/start.sh
 ```bash
 # 1. 创建环境配置
 cp .env.example .env
-# 推荐只先补三类配置：DATABASE_URL、默认 LLM（LLM_PROVIDER/LLM_MODEL/LLM_API_KEY）、至少一个市场数据源
-# 行情可配 QUANTDINGER_URL 或 MCP_CHINA_STOCK_URL / MCP_AKSHARE_URL；新闻推荐直接配置 SERPAPI_KEYS / TAVILY_API_KEYS
-# 若切到生产环境，必须替换 JWT_SECRET、MODEL_CONFIG_API_KEY_SECRET、DATABASE_URL、CORS_ORIGINS
+# 必填只有 4 个 (见下方 ".env.example 配置说明")：
+#   DATABASE_URL / JWT_SECRET / MODEL_CONFIG_API_KEY_SECRET
+#   + LLM_PROVIDER + LLM_MODEL + LLM_API_KEY (或任一 provider 别名)
+# 推荐再补：至少一个行情源 + 至少一个新闻源
+# 切生产时同步替换 CORS_ORIGINS / APP_PUBLIC_URL / APP_ENV / APP_DATABASE_SSLMODE
 
 # 2. 先只启动 PostgreSQL，确保本机有可复现数据库
 docker compose up -d postgres
@@ -390,33 +392,236 @@ ai-fund-platform-v3-full/
 
 `miniapp/` 目录包含首页、团队、决策、记忆、更多等页面，以及 subscription / model-config / usage 等分包页面骨架；当前 README 仅说明其存在，不把它描述为与后端完全联动的正式交付端。
 
-## 环境变量
+## .env.example 配置说明
 
-参见 [.env.example](.env.example) 获取完整配置说明。当前建议优先关注下面几组配置：
+`.env.example` 是单一可信清单 —— 凡是后端真正 `os.Getenv()` 读到的变量，都
+分组列在这个文件里，每组顶部有一段中文说明告诉你"什么时候需要、为什么需要、
+怎么填"。**复制到 `.env` 后再编辑，不要把真实密钥提交到仓库。**
 
-| 分组 | 关键变量 | 说明 |
-|------|----------|------|
-| 运行时 | `APP_ENV`, `APP_PORT`, `MIGRATIONS_PATH`, `STATIC_FILES_PATH` | 基础服务启动参数 |
-| 数据库 | `DATABASE_URL`, `POSTGRES_*`, `DB_*` | 本地开发可直接复用 compose；生产环境必须显式设置安全 `DATABASE_URL` |
-| 安全 | `JWT_SECRET`, `MODEL_CONFIG_API_KEY_SECRET`, `CORS_ORIGINS` | 生产环境必须替换默认占位值 |
-| 默认 LLM | `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY` | 全局默认模型入口；未单独配置的 team agent 会继承这里 |
-| tier 覆盖 | `LLM_CRITICAL_*`, `LLM_STANDARD_*`, `LLM_SIMPLE_*` | 可按 critical / standard / simple 覆盖默认模型 |
-| provider alias | `OPENAI_*`, `CLAUDE_*`, `ANTHROPIC_*`, `DEEPSEEK_*`, `QWEN_*` | 可直接沿用 provider 原生命名；当 `LLM_*` 未填满时会自动作为 fallback |
-| 行情链路 | `MARKETDATA_QUOTE_PROVIDERS`, `QUANTDINGER_URL`, `MCP_CHINA_STOCK_URL`, `MCP_AKSHARE_URL`, `MARKETDATA_COINGECKO_BASE_URL` | 控制全局 quote provider 启用与 fallback 顺序；`QUANTDINGER_URL` 现在只影响 quote。`MARKETDATA_COINGECKO_BASE_URL` 留空走公网免 key 端点（30 req/min 限额），需要 Pro 套餐时可指向自建反代以注入 Authorization 头。**Crypto 默认链已升级为 WS 优先**：`binance → coinbase → coingecko → yahoo`，前两者来自后台 WebSocket 实时推流，详见 F8 行 |
-| 团队实时活动 (F2.4) | 路由 `GET /api/funds/{fundId}/team/activity`（REST backfill）与 `GET /api/funds/{fundId}/team/activity/stream`（SSE） | 进程内 ring buffer（默认 200 events/fund）+ 按 fund 隔离的 SSE 广播。前端 TeamManagement 页面会自动接入 `TeamActivityPanel`，显示组合经理、研究员、风控、交易员逐步执行的实时时间线；SSE 断线后用 `?sinceSeq=N` 调 REST 端点做缺口补齐。SSE 依赖 `fundai_session` cookie 鉴权（EventSource 无法设置 Authorization 头）。慢 client 的事件会被 drop（每个订阅器独立计数），不会阻塞工作流 |
-| 自学习长期反思 (F3) | 路由 `GET /api/funds/{fundId}/reflections?limit=N`；底层 `memory.Reflect()` 会在每次 `DailyReview` 末尾基于最近 30 天的 `daily`/`agent` 学习记录自动跑一次（按 fund 7 天冷却防止 LLM 烧钱），把同主题（chip、crude、rates…）的若干日学习蒸馏成 1–2 句长期 lesson，写入 `memories.layer=long_term`。前端 `AgentLearning` 页面新增 "长期反思" 区块从这个端点拉取并按主题渲染。**A/B 隔离**：所有读写都按 `fund_id` 在 SQL 层过滤，treatment 基金的反思绝不会泄漏到 control / production 基金，由 `TestRunReflectionCyclePersistsToCorrectFundOnly` 永久锁定。LLM Runtime 未配置时反思整段跳过、不报错 |
-| 候选技能库 (F4) | 路由 `GET /api/agents/{agentId}/skills` + `POST .../approve` + `DELETE ...`；每次反思持久化后自动调用 `runtimeSkillProposer` 给基金团队的每个 agent 追加一条 `parsedSkillEntry`，`status=proposed`、`enabled=false`、`source=reflection:<id>`、`match.roles=[agent.role]`、`key=reflection:<reflection-id>`（幂等，重复反思不会写重复）。**安全闸门**：`skillEntryIsActive` 把 `status=proposed` 一律当作非活跃，即使 `enabled` 被外部置为 true 也不会进 prompt resolver，保证未审批的候选技能绝不污染 agent 行为。前端 `AgentLearning` 页面新增 "技能库" 区块，按 PROPOSED / APPROVED 分组展示，用户点 Approve 后服务端置 `status=approved`+`enabled=true`+`approvedAt`，技能立刻被 researcher/PM/trader 的 `appendSkillContext` 调用；Reject 直接从 SkillConfig 移除（下一次反思命中相同主题会重新生成候选） |
-| 拍卖市场 + 钱包冻结 (F5) | 路由 `POST /api/marketplace/auctions`（发起）、`POST .../{id}/bids`（出价）、`POST .../{id}/settle`（卖方/cron 结算）。底层模式 `agent_market_listings.mode='auction'`，新增 `auction_started_at/ends_at/reserve_minor/min_increment_minor/anti_snipe_seconds/current_bid_minor/current_bidder_user_id/current_bid_id/winning_bid_id/settled_at` 列。**钱包冻结三步法**：`WalletRepo.HoldFundsWithTx` 锁定账户行 + 校验余额 + 余额-X + 写 `wallet_hold` ledger 行 + 插入 `wallet_holds`（status=active，带 idempotency_key 防重复冻结）；`ReleaseHoldWithTx` 退款 + ledger 反向条目 + 标记 released；`CaptureHoldWithTx` 先退款再走 `TransferWithTx` 转给卖方，buyer ledger 留三行（hold-, release+, settlement-）净额仍为 hold-, seller 只见 settlement+。**英式递增 + anti-sniping**：`PlaceBid` 锁住 listing 行后校验 `bid >= MinNextBidMinor(starting, current_top, min_increment)`；先冻结新出价人的钱、再插入 bid（带 hold_id）、再释放上一个 top bidder 的 hold 并把他的 bid 置 `outbid`、最后用 `ApplyAntiSnipe(ends_at, now, anti_snipe_seconds)` 计算可能延长后的 ends_at 一并写回。后台 `auctionSettlementLoop` 每 5 秒扫一次 `mode='auction' AND status='active' AND ends_at<=now`：达到保留价就 `CaptureHoldWithTx` 转账给卖方 + 克隆 agent + 写 `agent_market_orders` + 标 `status='sold'`；未达保留价或无出价则把所有活跃 hold 退回、标 `status='cancelled'`。前端 `/auctions` 页提供开拍/出价/结算的最小可用闭环 |
-| A/B 经验晋升 + 回滚 (F6) | 路由复用 `POST /api/abtests/{testId}/promote-learning` 与 `POST .../{promotionId}/rollback`。Migration 025 把 `ab_test_learning_promotions` 扩 `promoted_memory_ids/promoted_skill_keys/previous_skill_config`。**晋升=三联写（同一事务）**：(1) `agents.evolution_config` 注入 `recentLessons/promotedABLearning` 元数据（沿用旧路径）；(2) `MemoryRepo.CreateWithTx` 把 shadow lessons 物化成 `layer=long_term` 反思插入控制基金 `memories` 表（每条带标签 `ab_promotion`、`ab:<testId>`、`variant:<key>`、`source:ab_test`，最多 12 条）；(3) `mergePromotedSkillsIntoConfig` 把 shadow adjustments 转成 `status=proposed`、`enabled=false`、`source=ab_promotion:<testId>:<variantKey>`、`match.roles=[agent.role]` 的候选技能追加进控制 agent 的 `skill_config`（mode=overwrite 时丢弃前次的 `ab_promotion:*` 旧条目避免堆积；重复 key 仍记入 inserted 列表，让回滚永远幂等）。**安全**：候选技能落地时已被 `skillEntryIsActive` 双闸门拦在 prompt 外，A/B 赢的只是"证据"，最终上线仍走 F4 审批闸门。**回滚**：`RollbackLearningPromotion` 在同事务里恢复 `evolution_config` snapshot、恢复 `skill_config` snapshot、`MemoryRepo.DeleteByIDsWithTx` 精确删除晋升时新增的反思行，并把 `promoted_memory_ids/skill_keys` 清零，因此重复点回滚也是 no-op。**前端**：`ABTestCompare` 在结果卡片新增"已晋升: 反思 ×N · 候选技能 ×M"和"回滚: −N 反思 · −M 候选技能"汇总徽章，把整条经验流水线从 A/B 跑分一路拉到控制基金的反思和技能管理面 |
-| Crypto WebSocket 实时推流 (F8) | `MARKETDATA_CRYPTO_WS_ENABLED`（默认 `true`）、`MARKETDATA_BINANCE_WS_URL`、`MARKETDATA_BINANCE_WS_SYMBOLS`、`MARKETDATA_COINBASE_WS_URL`、`MARKETDATA_COINBASE_WS_PRODUCTS`、`MARKETDATA_CRYPTO_WS_STALE_AFTER`（默认 `30s`） | 启动时 `marketdata.Service.StartCryptoStreams` 拉起两条后台 goroutine，分别长连 Binance `wss://data-stream.binance.vision/ws`（订阅 `<symbol>@ticker`）和 Coinbase Exchange `wss://ws-feed.exchange.coinbase.com`（订阅 ticker channel）。两者都**免 key、免费**，每条连接订阅默认 25/22 个主流币对（可用 `_SYMBOLS` / `_PRODUCTS` 覆盖），ticker 事件解析后写入进程内 `cryptoTickerCache`（按 `BTCUSDT`/`BTC-USD` 归一化键存最新 `QuoteSnapshot`）。**默认 crypto 链已重排为 `binance → coinbase → coingecko → yahoo`**：`Quote()` 命中 cache 且新鲜（默认 30s 内）则微秒返回 `Source=binance-ws`/`coinbase-ws`；cache miss 或 stale 则回退到 CoinGecko/Yahoo polling，永不阻塞决策。**重连**：每条流独立的指数退避（1s→30s 上限），断线自动恢复，记入 `provider_health` 表（super-admin `GET /api/admin/marketdata/health` 可见 `binance-ws`/`coinbase-ws` 累计成功/失败次数与最近错误）。**优雅退出**：`Services.Stop` 调 `MarketDataService.Close(5s)` 触发 ctx cancel + 等待 goroutine 退出。`coder/websocket`（零 transitive deps）做底层 WS 客户端，protocol 帧自动 ping/pong，每帧带 90s read 超时兜底僵尸连接 |
-| 每日工作流调度可观察 + 手工触发 (F7) | `fundWorkflowScheduler` 现在每个 tick 产出结构化 `FundSchedulerSnapshot`：`lastPollAt/nextPollAt/isLeader/totalActive/triggeredCount` 全局指标 + 每只活跃基金的 `nextTriggerAt`、`nextTradingDay`、`due`、`started`、`lastStatus`、`skipReason`（`not-yet-due`/`next-trigger-error`/`start-error`）、`error`。Snapshot 是线程安全 copy-on-read，admin 端任意频率读取都不会阻塞 leader 的 tick。**REST**：`GET /api/admin/workflow/scheduler` 返回当前 snapshot（super-admin only，调度器未接线时降级 503）；`POST /api/admin/workflow/scheduler/trigger/{fundId}`（body 可空，可带 `{"tradingDate":"YYYY-MM-DD"}` 指定交易日）走 `workflowService.AdminTriggerFund` → `startWorkflowForFundWithMode(forceImmediate=true)`，与 cron 共用 `workflow_run` 行 claim 防止双触发；操作写 audit log。**Schedule interface 解耦**：`fundWorkflowScheduler.service` 改为 `schedulerService` 接口（6 个窄方法：ListActiveFunds/GetWorkflowRun/NextWorkflowStart/SessionForDate/TradingProfileForFund/StartWorkflowForFund），生产由 `workflowServiceAdapter` 实现，测试用 `stubSchedulerService` 即可端到端验证 due/notDue × 无 run/completed/failed/running 触发矩阵。**前端**：`/admin` 页新增"每日工作流调度器"卡片，每 20s 拉一次 snapshot，按下一触发时刻排序展示每只基金的日历 / 下次开跑时间 / outcome 徽章 / "立即开跑"按钮 |
-| 行情按市场分链 (F1.5) | `MARKETDATA_QUOTE_PROVIDERS_{CNSTOCK\|USSTOCK\|HKSTOCK\|FUTURES\|CRYPTO}` | 每个市场独立覆盖 provider 链。若设置则该市场用此列表覆盖全局 `MARKETDATA_QUOTE_PROVIDERS`，全局列表与默认链仍会在尾部追加（去重）以保证 fallback。推荐基线：`_CNSTOCK=tencent,akshare`、`_USSTOCK=yahoo`、`_FUTURES=akshare,yahoo`（akshare 覆盖 SHFE/DCE/CZCE/INE，yahoo 兜底 `GC=F` 等全球期货）、`_CRYPTO=binance,coinbase,coingecko,yahoo`（前两者来自后台 WS 推流即开即用，coingecko/yahoo 兜底） |
-| 新闻链路 | `MARKETDATA_NEWS_PROVIDERS`, `SERPAPI_KEYS`, `TAVILY_API_KEYS`, `MCP_WEB_SEARCH_URL`, `WEB_SEARCH_FEED_URL`, `EASTMONEY_NEWS_BASE_URL`, `SINA_NEWS_BASE_URL`, `MARKETDATA_NEWS_HYBRID` | 控制 news/search provider 启用与 fallback 顺序；A 股标的会自动优先走 `eastmoney` + `sina` 两个免 key 的中文原生新闻源，其它市场仍沿用 SerpAPI / Tavily / `web-search-mcp` RSS。`MARKETDATA_NEWS_HYBRID=true`（默认）会把 ZH 与 EN 两条 provider 链路并发拉取后合并去重，让用户同时看到本地中文报道与英文宏观/分析师视角；设为 `false` 回到传统的单链路 fallback |
-| 新闻翻译 | `MARKETDATA_TRANSLATOR_PROVIDER`, `MARKETDATA_TRANSLATOR_BASE_URL`, `MARKETDATA_TRANSLATOR_API_KEY`, `MARKETDATA_TRANSLATOR_MODEL`, `MARKETDATA_TRANSLATOR_TIMEOUT` | 可插拔的 news 翻译器，把 hybrid 拉到的中文/英文标题与摘要补齐为另一种语言。`none`（默认）= 不翻译；`libretranslate` = 调用 LibreTranslate 兼容服务；`openai-compat` = 调用任意 OpenAI 兼容 `/chat/completions`（DeepSeek、OpenAI、Qwen-compat、本地 LLM 等），需要同时填 `_MODEL`。翻译结果以 `titleZh/titleEn/summaryZh/summaryEn` 形式返回，前端按用户语言选择展示 |
-| 行情韧性 | `MARKETDATA_STALE_AFTER`, `MARKETDATA_CIRCUIT_FAILURES`, `MARKETDATA_CIRCUIT_COOLDOWN`, `MARKETDATA_ADAPTIVE_TTL` | Phase 3a 加固：当 `QuoteSnapshot.AsOf` 超过 `STALE_AFTER`（默认 15m）时 `isStale=true`，决策中心会附带 `quote outdated (age: …)` 提示；同一 provider 连续失败到 `CIRCUIT_FAILURES`（默认 3）次后熔断 `CIRCUIT_COOLDOWN`（默认 30s）才允许重试；`ADAPTIVE_TTL=true`（默认）在主要市场休市时段把 news TTL 放大到 3×（上限 10m）以节省上游配额。每个 provider 的累计调用数、连续失败次数、上次错误、EMA 延迟可通过 super-admin 的 `GET /api/admin/marketdata/health` 查看 |
-| 硬风控 / 风控阻断 | 内置 `StaleQuoteGuard`（fund 配置中的 `hardRisk.maxQuoteAgeSeconds`，默认 15m，最长 24h） | Phase 3c：执行层会把当前报价的 `AsOf` 与 `isStale` 注入 `risk.ProposedTrade`。如果是 risk-increasing 单（买/加仓/开空）但报价过期，硬风控直接 reject 并附 `hard_stale_quote_guard` 规则名，前端会在决策中心弹出"先刷新报价再下单"的提示；卖出/平仓/减仓不受此规则限制，保证报价异常时仍能 de-risk |
-| 硬风控 fund 级覆盖 | 基金设置页 → "硬风控覆盖" / "Hard risk overrides" 区块，对应 API `PUT /api/funds/:fundId` 中的 `hardRisk.maxQuoteAgeSeconds`（int 秒，范围 `1..86400`，传 `0` 表示清除该 fund 的覆盖回到平台默认） | Phase 3e：每只基金可以独立设置 `StaleQuoteGuard` 的容忍时间。对长线策略可以放宽到 1h，对高频或事件驱动策略可以收紧到 60s。表单为空时自动继承平台默认；超过 24h 或非整数的取值会在 server 端被静默丢弃，避免运营误操作把硬风控关掉 |
-| Prometheus 观测 | `GET /api/metrics` 现在多出 5 个 `fundai_marketdata_provider_*` 指标 | `_calls_total{provider}` / `_failures_total` / `_consecutive_failures` / `_circuit_open` / `_latency_ms_ema`。可以直接接 Prom + Grafana 报警面板。Admin 后台的"行情数据源健康"卡片也基于同一份数据，每 15s 自动刷新 |
+文件目前一共划分 15 个分区，对应下方一张总览表与本节后面的"按分区
+逐条说明"。如果你只想跑起来，先填【必填四件套】即可，其它分区都允许留空、
+全部带 fail-safe 退化路径（要么走平台默认、要么对应功能软关）。
+
+### 必填四件套（最小可运行集）
+
+| 变量 | 用途 | 不填会怎样 |
+|------|------|------------|
+| `DATABASE_URL` | PostgreSQL 连接串（容器内用 `APP_DATABASE_URL`） | 服务直接退出 |
+| `JWT_SECRET` | 登录 token 签发；至少 32 字符随机串 | 启动校验 fail，生产模式拒绝启动 |
+| `MODEL_CONFIG_API_KEY_SECRET` | 加密用户存进 DB 的第三方模型 key；必须独立于 `JWT_SECRET` | 用户保存模型 API key 时报 500 |
+| `LLM_PROVIDER` / `LLM_MODEL` / `LLM_API_KEY` | 默认 LLM 入口（或填一组 provider 别名 `OPENAI_*` 等） | 所有 agent 调用都会回退到代码内置兜底，输出质量塌方 |
+
+> 不填 `MARKETDATA_*` 也能起来：行情链路全部带公网 fallback；只有 A 股 MCP /
+> QuantDinger 这种"自建上游"才需要显式给 URL。
+
+### 分区总览
+
+| # | 分区 | 关键变量 | 必填？ |
+|---|------|----------|--------|
+| 1  | 应用运行时 | `APP_ENV`, `APP_PORT`, `LOG_LEVEL`, `MIGRATIONS_PATH`, `STATIC_FILES_PATH`, `SESSION_TTL`, `ALLOW_INTERNAL_COMPOSE_DB` | ✗（除 `APP_ENV` 决定生产校验） |
+| 2  | PostgreSQL | `DATABASE_URL` (+ 容器内 `APP_DATABASE_URL`, `APP_DATABASE_SSLMODE`)，老式 `DB_*` 回退，连接池 `DB_MAX_*` | ✓ `DATABASE_URL` |
+| 3  | 安全 / 密钥 | `JWT_SECRET`, `JWT_SECRETS_JSON`（多 key 轮换）, `MODEL_CONFIG_API_KEY_SECRET`, `CORS_ORIGINS`, `API_KEY_ENCRYPTION_SECRET`（历史别名） | ✓ JWT + Model secret |
+| 4  | 站点公开地址 / 品牌 | `APP_PUBLIC_URL`, `BRAND_NAME` | ✗ 但生产必填正确域名（影响 reset/verify 邮件链接） |
+| 5  | SMTP / 事务邮件 | `SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/FROM_NAME`, `SMTP_USE_TLS/STARTTLS/TIMEOUT` | ✗（`SMTP_HOST` 留空走 in-memory recorder，邮件正文回写到 JSON response） |
+| 6  | 微信小程序登录 | `WECHAT_MINIAPP_APPID/SECRET`, `WECHAT_JSCODE_SESSION_URL`, `WECHAT_LOGIN_TIMEOUT` | ✗（未配 `/api/auth/wechat-login` 返回 503，小程序自动 fall back 到邮箱登录） |
+| 7  | 默认 LLM | `LLM_PROVIDER/MODEL/BASE_URL/API_KEY` + tier 覆盖 `LLM_CRITICAL_*` / `LLM_STANDARD_*` / `LLM_SIMPLE_*` | ✓（或用分区 8 的 provider 别名替代） |
+| 8  | provider 原生别名 | `OPENAI_*`, `CLAUDE_*` / `ANTHROPIC_*`, `DEEPSEEK_*`, `QWEN_*`, `GEMINI_*` / `GOOGLE_*` | ✗（仅 `LLM_*` 缺项时 fallback） |
+| 9  | L3 记忆 embedding | `RECALL_OPENAI_API_KEY/BASE_URL`, `RECALL_EMBED_MODEL` | ✗ 留空 → backfill worker 不启动（功能软关） |
+| 10 | 行情链路 | `MARKETDATA_QUOTE_PROVIDERS` + 各市场 `*_CNSTOCK/USSTOCK/HKSTOCK/FUTURES/CRYPTO`, `QUANTDINGER_URL`, `MCP_*_URL`, `BINANCE_OHLC_URL`, `OHLC_/FUNDAMENTAL_/SECTORFLOW_CACHE_TTL`, `YAHOO_EARNINGS_*`, `MCP_WEB_SEARCH_URL`, `MARKETDATA_COINGECKO_BASE_URL` | ✗（公网链兜底，但 A 股 / 期货推荐起 MCP） |
+| 11 | Crypto WebSocket | `MARKETDATA_CRYPTO_WS_ENABLED`, `MARKETDATA_BINANCE_WS_*`, `MARKETDATA_COINBASE_WS_*`, `MARKETDATA_CRYPTO_WS_STALE_AFTER` | ✗（关掉后退到 CoinGecko/Yahoo 轮询，30 req/min 配额成为瓶颈） |
+| 12 | 新闻 provider | `MARKETDATA_NEWS_PROVIDERS`, `MARKETDATA_NEWS_HYBRID`, `EASTMONEY/SINA_NEWS_BASE_URL`, `SERPAPI_KEYS`, `TAVILY_API_KEYS` (+ `*_BASE_URL`) | ✗（A 股自动带 eastmoney + sina，其它市场最好补 SerpAPI / Tavily） |
+| 13 | 新闻翻译（可选） | `MARKETDATA_TRANSLATOR_PROVIDER/BASE_URL/API_KEY/MODEL/TIMEOUT` | ✗ 默认 `none` |
+| 14 | 行情韧性 / 缓存 / 风控 | `MARKETDATA_STALE_AFTER`, `MARKETDATA_CIRCUIT_FAILURES/COOLDOWN`, `MARKETDATA_THROTTLE_COOLDOWN`, `MARKETDATA_ADAPTIVE_TTL`, `MARKETDATA_ADAPTIVE_QUOTE_TTL`, `MARKETDATA_QUOTE_TTL[_INSESSION/_OFFSESSION]`, `MARKETDATA_NEWS_TTL`, `MARKETDATA_PROVIDER_TIMEOUT`, `MARKETDATA_QUOTE_RATE_LIMITS` | ✗（默认值就是生产推荐基线） |
+| 15 | Feature flags / debug | `FUND_DEBATE_ROUNDTABLE`, `BACKTEST_DISABLED` | ✗（关掉对应能力，仅特殊场景需要） |
+
+### 按分区逐条说明
+
+> 下面每个分区只解释"为什么这么设计"和"踩坑点"。具体每个变量的中文注释、
+> 默认值和合法格式，都在 [`.env.example`](.env.example) 同名分区头部。
+
+#### ① 应用运行时
+
+- `APP_ENV=production` 触发额外启动校验：DB 必须远程 + SSL、JWT/Model secret
+  必须强随机且互不相同、`CORS_ORIGINS` 不能包含 `*` / localhost。dev 模式
+  全部宽松。
+- `MIGRATIONS_PATH` / `STATIC_FILES_PATH` 同时支持旧名 `MIGRATIONS_DIR` /
+  `STATIC_DIR`，方便兼容老部署脚本。
+- `ALLOW_INTERNAL_COMPOSE_DB=1` 与 `RUNNING_IN_CONTAINER=1` 同时为真，才允许
+  `DATABASE_URL` 指向 compose 内部主机名 `postgres`。生产部署千万别开。
+
+#### ② 数据库
+
+- 优先级：`DATABASE_URL` > 容器内 `APP_DATABASE_URL` > 旧 `DB_*` 拼接。
+- 生产硬条件由代码做静态校验：禁用 localhost / 禁用 `sslmode=disable` /
+  禁用 demo/placeholder 凭据。
+- 连接池：`DB_MAX_OPEN_CONNS=25` / `DB_MAX_IDLE_CONNS=10` /
+  `DB_CONN_MAX_LIFETIME=5m`，与 RDS / Cloud SQL 默认 quota 兼容。
+
+#### ③ 安全 / 密钥
+
+- `JWT_SECRET` 与 `MODEL_CONFIG_API_KEY_SECRET` **必须不同**且都 ≥ 32 字符。
+  生产模式下 `change_me_*`、`dev-secret-*`、长度不足都会被 `isInsecureJWTSecret`
+  直接拒绝启动。
+- 多 key 轮换：写 `JWT_SECRETS_JSON=[{"kid":"k2","secret":"...","active":true},
+  {"kid":"k1","secret":"..."}]`，`active=true` 的 key 用来签新 token，其它 key
+  仅用来校验未过期的旧 token，做无停机轮换。
+- `MODEL_CONFIG_API_KEY_SECRET` 改值后，已存进 DB 的第三方模型 API key 需要
+  让用户重新录入（旧密钥用旧 secret 加密、无法解出）。
+- `CORS_ORIGINS` 逗号分隔；生产必须替换为真实 HTTPS 站点。
+
+#### ④ 站点公开地址 / 品牌
+
+- `APP_PUBLIC_URL` 用于构造邮件链接（如 reset:
+  `${APP_PUBLIC_URL}/reset-password?token=...`）。Android 深链 `fundai://reset`
+  与小程序自带 scheme 不依赖这里，但 web 端必须配对。
+- `BRAND_NAME` 是邮件模板里的产品名占位符。
+
+#### ⑤ SMTP / 事务邮件
+
+- 留空 `SMTP_HOST` 走 **in-memory recorder**：邮件正文（含 6 位 verify code 或
+  reset 链接）会直接回写到 JSON response 里。本地 onboarding / e2e 测试不需要
+  真邮箱即可跑完。
+- 中国大陆推荐阿里云 DM / 腾讯云 SES（直送 QQ / 163 / Outlook 收件率最高）；
+  全球推荐 SendGrid / Postmark / Amazon SES；dev 用 MailHog
+  `docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog`。
+
+#### ⑥ 微信小程序登录
+
+- 来源：mp.weixin.qq.com → 设置 → 开发设置；详细配置见
+  [docs/MINIAPP_DEPLOYMENT.md](docs/MINIAPP_DEPLOYMENT.md)。
+- 留空时小程序自动 fall back 到邮箱/密码登录（不会卡住用户）。
+
+#### ⑦ + ⑧ LLM 配置
+
+- 解析优先级：
+  1. 请求显式 model
+  2. agent 单独模型配置（DB 里的 ModelConfig）
+  3. 用户 tier 覆盖
+  4. `.env` 里的 tier 默认（`LLM_CRITICAL_*` / `LLM_STANDARD_*` / `LLM_SIMPLE_*`）
+  5. 全局 `LLM_*`
+  6. provider 原生别名（`OPENAI_*` / `CLAUDE_*` 等）
+  7. 代码内置兜底
+- Gemini 走原生 `generateContent` 协议（**不是** OpenAI 兼容）。写法：
+  ```env
+  LLM_PROVIDER=gemini
+  LLM_MODEL=
+  LLM_BASE_URL=
+  LLM_API_KEY=
+  GEMINI_MODEL=gemini-3.1-pro-preview
+  GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+  GEMINI_API_KEY=your_gemini_key
+  ```
+  也可以直接写到全局 `LLM_*` 上。`custom` 仍然表示 OpenAI 兼容自定义端点，
+  **不要**把 Gemini 原生地址配置到 `custom`。
+
+#### ⑨ L3 记忆 embedding
+
+- `RECALL_OPENAI_API_KEY` 是 L3 长期记忆 pgvector backfill worker 的开关。
+- 留空 → loop 不启动（功能软关，不报错）；填了就会用同一组 `OPENAI_*`
+  endpoint 把 `memories` 表里的内容向量化进 pgvector 列。
+- 默认模型 `text-embedding-3-small`，与 OpenAI 兼容；DeepSeek / Qwen
+  自带 embedding 时也可以指过去（API 兼容即可）。
+
+#### ⑩ 行情链路
+
+- 全局 fallback 链：`MARKETDATA_QUOTE_PROVIDERS=quantdinger,china-stock,akshare`。
+- 各市场单独覆盖（F1.5）：`MARKETDATA_QUOTE_PROVIDERS_{MARKET}`，全局链与
+  默认链仍会去重追加在尾部，确保 fallback 永远兜得住。推荐基线见
+  `.env.example` 第 10 区注释。
+- A 股 MCP 推荐起 `china-stock-mcp` + `akshare-mcp`：
+  `docker compose --profile market-data up -d`。
+- CoinGecko 默认走免 key v3（30 req/min 免费）。有 Pro key 时把
+  `MARKETDATA_COINGECKO_BASE_URL` 指向自建反代（反代注入 Authorization 头），
+  不要把 key 直接暴露在客户端。
+- Yahoo 财报、OHLC / 基本面 / 板块资金流缓存 TTL 都在这一区。
+
+#### ⑪ Crypto WebSocket 实时推流 (F8)
+
+- 启动时 `marketdata.Service.StartCryptoStreams` 拉起 Binance + Coinbase 两条
+  免 key 公网 WS goroutine，进程内 `cryptoTickerCache` 微秒返回。
+- 默认 crypto 链：`binance → coinbase → coingecko → yahoo`。WS cache miss /
+  stale (`MARKETDATA_CRYPTO_WS_STALE_AFTER`, 默认 30s) 才回 REST。
+- **网络可达性**：Binance + Coinbase market-data 端点在中国大陆公网会被静默
+  丢包（TLS 握手成功但 ticker 不推）。两个选项：
+  1. 部署到无限制区域（HK / SG / Tokyo / EU / US）
+  2. `MARKETDATA_CRYPTO_WS_ENABLED=false`，接受 CoinGecko 30 req/min 轮询
+- 重连：每条流独立指数退避（1s → 30s），断线自动恢复，记入 `provider_health`
+  表（super-admin `GET /api/admin/marketdata/health` 可见
+  `binance-ws` / `coinbase-ws` 累计 ok / fail 次数与最近错误）。
+
+#### ⑫ 新闻 provider
+
+- A 股标的自动在前面追加 `eastmoney` + `sina`（免 key，中文原生），其它市场
+  仍沿用 SerpAPI / Tavily / `web-search-mcp` RSS。
+- `MARKETDATA_NEWS_HYBRID=true`（默认）：ZH 与 EN 两条链并发拉取后合并去重，
+  让用户同时看到本地中文报道与英文宏观/分析师视角。设为 `false` 回到传统
+  单链路 fallback（调试成本飙升时再关）。
+- SerpAPI / Tavily key 多个用逗号分隔，server 端做轮询配额分摊。
+
+#### ⑬ 新闻翻译（可选）
+
+- 三种 provider：
+  - `none` 不翻译（默认）
+  - `libretranslate` 调 LibreTranslate 兼容服务（开源；可自建）
+  - `openai-compat` 调任意 OpenAI 兼容 `/chat/completions`（DeepSeek / OpenAI /
+    Qwen-compat / 本地 LLM），需要同时填 `MARKETDATA_TRANSLATOR_MODEL`
+- 配置后翻译器把缺失的 `titleZh / titleEn / summaryZh / summaryEn` 补齐，前端
+  按用户语言选择展示。
+
+#### ⑭ 行情韧性 / 缓存 / 风控 (Phase 3a / 3c)
+
+- `MARKETDATA_STALE_AFTER`（默认 15m）：`QuoteSnapshot.AsOf` 超过该阈值
+  → `isStale=true`。硬风控的 **StaleQuoteGuard** 会因此 reject "买入/加仓/开空"，
+  但放行 "卖出/平仓/减仓"，保证报价异常时仍能 de-risk。
+- 熔断：单 provider 连续失败 `CIRCUIT_FAILURES`（默认 3）次 → 熔断
+  `CIRCUIT_COOLDOWN`（默认 30s）；单次成功立即关熔断。429 单独走
+  `THROTTLE_COOLDOWN`（默认 5m）防止打爆配额。
+- 自适应 TTL：`MARKETDATA_ADAPTIVE_TTL` 和 `MARKETDATA_ADAPTIVE_QUOTE_TTL` 共享
+  一个总开关思路 —— 主要市场开盘时走 `_INSESSION`（5s），休市时走 `_OFFSESSION`
+  （60s），节省上游配额。
+- `MARKETDATA_QUOTE_RATE_LIMITS=coingecko=0.5,yahoo=4` 这种格式做上游 QPS 限速。
+- fund 级覆盖：每只基金可以在「基金设置 → 硬风控覆盖」里把
+  `hardRisk.maxQuoteAgeSeconds` 调到 60s（高频）或 1h（长线），不写则继承平台默认。
+
+#### ⑮ Feature flags / debug
+
+- `FUND_DEBATE_ROUNDTABLE=on` 切到圆桌讨论模式（多 agent 轮发言）；默认关。
+- `BACKTEST_DISABLED=1` 关掉回测引擎（CI / 演示环境用）。
+
+### 团队实时活动 / 学习闭环 / 拍卖市场（运行时能力，不需要 env 配置）
+
+下列能力在代码层默认开启、无需额外 env，但属于"读 README 想看见的事"，
+和上面 15 个分区一起列在这里方便交叉对照：
+
+- **团队实时活动 (F2.4)**：`GET /api/funds/{fundId}/team/activity`（REST backfill）
+  与 `GET .../team/activity/stream`（SSE，依赖 `fundai_session` cookie）。前端
+  TeamManagement 页自动接入 `TeamActivityPanel`。慢 client 事件会被 drop 不阻塞
+  工作流；断线后用 `?sinceSeq=N` 调 REST 缺口补齐。
+- **自学习长期反思 (F3)**：`GET /api/funds/{fundId}/reflections?limit=N`。每次
+  `DailyReview` 末尾 `memory.Reflect()` 把近 30 天的 daily/agent 学习蒸馏成 1–2
+  句长期 lesson（每基金 7 天 cooldown 防 LLM 烧钱）。LLM runtime 没配置就整段
+  跳过，不报错。**A/B 隔离**：所有读写都按 `fund_id` SQL 层过滤，treatment 基金
+  反思绝不泄漏到 control / production 基金。
+- **候选技能库 (F4)**：`GET /api/agents/{agentId}/skills` + `POST .../approve` +
+  `DELETE ...`。反思持久化后自动 propose 一条 `status=proposed, enabled=false`
+  的候选技能。**双闸门**：`skillEntryIsActive` 把 `proposed` 一律当非活跃，未审批
+  的候选绝不污染 agent prompt。前端 `/agent-learning` 页可一键 Approve / Reject。
+- **拍卖市场 + 钱包冻结 (F5)**：`POST /api/marketplace/auctions` /
+  `POST .../bids` / `POST .../settle`。`WalletRepo` 的 hold / release / capture 三步
+  保证英式拍卖资金安全；`auctionSettlementLoop` 5s/次扫描结算；anti-snipe 自动
+  延长 `ends_at`。前端 `/auctions` 页提供最小可用闭环。
+- **A/B 经验晋升 + 回滚 (F6)**：`POST /api/abtests/{testId}/promote-learning` +
+  `POST .../{promotionId}/rollback`。晋升 = 同一事务三联写（evolution_config /
+  long_term 反思 / 候选技能），回滚精确反向。候选技能落地仍卡在 F4 审批闸门，
+  A/B 赢的只是"证据"，不会绕开人工审核。
+- **工作流调度可观察 + 手工触发 (F7)**：`GET /api/admin/workflow/scheduler`
+  +`POST /api/admin/workflow/scheduler/trigger/{fundId}`（super-admin）。前端
+  `/admin` 页"每日工作流调度器"卡片每 20s 拉一次 snapshot，按下一触发时刻
+  排序展示 + 立即开跑按钮。
+- **Prometheus 观测**：`GET /api/metrics` 自带 5 个
+  `fundai_marketdata_provider_*` 指标（calls_total / failures_total /
+  consecutive_failures / circuit_open / latency_ms_ema），直接接 Prom + Grafana。
+  Admin 后台「行情数据源健康」卡片用同一份数据，15s 自动刷新。
 
 ### 离线探针：`marketdata-probe`
 
