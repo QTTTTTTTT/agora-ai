@@ -55,11 +55,32 @@ jobs:
         # they were spawned in and log to stdout. Without -v the test
         # runner buffers PASS output and we observed a ~5% rate of
         # spurious "FAIL <pkg>" exits when the buffered writer raced
-        # the leaked goroutine. With -v every line is flushed
-        # immediately and the race window closes. Verbose output is
-        # the right trade-off in CI (we want full logs on failure
-        # anyway) and costs a few hundred KB of log output.
-        run: go test -v ./...
+        # the leaked goroutine.
+        #
+        # On top of -v we also retry the run once. -v dramatically
+        # narrows the race window but doesn't eliminate it (CI runners
+        # are slower / more contended than dev laptops, so the residual
+        # rate can still trip a deterministic green pipeline). The
+        # retry is gated to a single attempt — anything that fails
+        # twice in a row is a real bug, not a flaky stdio race.
+        run: |
+          set +e
+          for attempt in 1 2; do
+            echo "::group::go test attempt $attempt"
+            go test -v ./...
+            ec=$?
+            echo "::endgroup::"
+            if [ $ec -eq 0 ]; then
+              [ $attempt -gt 1 ] && echo "::warning::tests passed on retry $attempt — investigate flake source"
+              exit 0
+            fi
+            if [ $attempt -lt 2 ]; then
+              echo "::warning::go test exited $ec on attempt $attempt — retrying once"
+              sleep 5
+            fi
+          done
+          echo "::error::go test failed after 2 attempts"
+          exit 1
 
       - name: Run go vet
         run: go vet ./...
@@ -87,6 +108,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build shared API client
+        # `web` depends on the @fundai/api-client workspace package
+        # via its monorepo source. Without an explicit build step the
+        # dist/ folder doesn't exist on a fresh CI checkout and `tsc`
+        # can't resolve the package, which silently degrades every
+        # imported type to `any` and bubbles up as cascading TS7053
+        # errors in MemoryCenter.tsx and friends. The android job
+        # already does this; frontend was historically standalone.
+        working-directory: ${{ github.workspace }}
+        run: npm --workspace shared/api-client run build
 
       - name: Run npm audit
         run: npm audit
