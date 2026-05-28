@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,10 @@ import (
 	"github.com/fundai/server/internal/earnings"
 	"github.com/fundai/server/internal/exitmanager"
 	"github.com/fundai/server/internal/exposure"
+	"github.com/fundai/server/internal/contradiction"
+	"github.com/fundai/server/internal/intraday"
+	"github.com/fundai/server/internal/recall"
+	"github.com/fundai/server/internal/lowbeta"
 	"github.com/fundai/server/internal/regime"
 	"github.com/fundai/server/internal/strategy"
 	"github.com/fundai/server/internal/fundamental"
@@ -43,6 +48,7 @@ import (
 	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/ohlc"
 	"github.com/fundai/server/internal/pairspread"
+	"github.com/fundai/server/internal/pead"
 	"github.com/fundai/server/internal/quality"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/quota"
@@ -54,6 +60,7 @@ import (
 	"github.com/fundai/server/internal/sentiment"
 	"github.com/fundai/server/internal/sizing"
 	"github.com/fundai/server/internal/subscription"
+	"github.com/fundai/server/internal/value"
 	"github.com/fundai/server/internal/workflow"
 )
 
@@ -1108,6 +1115,17 @@ type workflowServiceAdapter struct {
 	// silently skips the attribution pass. Wired by main.go
 	// alongside the api.AttributionService adapter.
 	attribution        *attribution.Service
+	// recallService + recallEmbedder are the Sprint 3 / L3
+	// pgvector-backed semantic memory recall pair. Both nil
+	// = feature off (DecisionInput.SemanticRecall stays
+	// empty). recallEmbedder may be set without recallService
+	// (e.g. backfill only) or vice versa; the runtimePMAgent
+	// checks both before issuing a Query.
+	recallService      *recall.Service
+	recallEmbedder     recall.Embedder
+	// planLifecycleNotifier is the Sprint 4 / android-core push
+	// fan-out hook. Optional — nil = no push notifications.
+	planLifecycleNotifier workflow.PlanLifecycleNotifier
 	mu                 sync.Mutex
 	runtimes           map[string]*workflowRuntime
 	scheduler          *fundWorkflowScheduler
@@ -1143,6 +1161,32 @@ func (s *workflowServiceAdapter) WithAttributionService(svc *attribution.Service
 	if s != nil {
 		s.attribution = svc
 	}
+	return s
+}
+
+// WithSemanticRecall wires the Sprint 3 / L3 pgvector-backed semantic
+// memory recall stack: a recall.Service (read side) + an Embedder
+// (query side, used to encode the current daily context into the
+// vector the service searches with). Passing nil to either leaves
+// SemanticRecall absent from the prompt — same silent-degrade contract
+// as IntradaySnapshots.
+func (s *workflowServiceAdapter) WithSemanticRecall(svc *recall.Service, embedder recall.Embedder) *workflowServiceAdapter {
+	if s == nil {
+		return s
+	}
+	s.recallService = svc
+	s.recallEmbedder = embedder
+	return s
+}
+
+// WithPlanLifecycleNotifier wires the Sprint 4 / android-core push
+// fan-out hook. Nil = no push notifications, orchestrator still
+// works (workflow.notifyPlan no-ops with a nil notifier).
+func (s *workflowServiceAdapter) WithPlanLifecycleNotifier(n workflow.PlanLifecycleNotifier) *workflowServiceAdapter {
+	if s == nil {
+		return s
+	}
+	s.planLifecycleNotifier = n
 	return s
 }
 
@@ -1261,9 +1305,25 @@ type runtimeResearcherPool struct {
 	// than rummaging through raw headlines. Nil-safe: when unset
 	// the pool falls back to passing raw headlines as before.
 	sentimentScorer sentiment.Scorer
+	// llmRuntime is the Sprint 1 / S3 hook for true LLM-driven
+	// research summarisation. When non-nil, MacroBrief / RunAll /
+	// QuantSignals run the raw provider-text content through a
+	// TierStandard LLM call that emits a structured
+	// {summary, bullets[], confidence} payload; the formatted
+	// result is then prepended to the legacy provider text so
+	// downstream consumers (debate, persistence) still see the
+	// raw signals AND the LLM synthesis. Nil → legacy behaviour
+	// (formatter only, no LLM enrichment); failures inside the
+	// LLM path also degrade gracefully to the legacy text.
+	llmRuntime *llmRuntime
 }
 
 type runtimePMAgent struct {
+	// db is the raw DB handle, used by Sprint 3 / M1 lesson hit-rate
+	// lookups that sit outside the typed repos. Nil-safe — lookup
+	// silently returns 0/0 when missing.
+	db *sql.DB
+
 	planRepo     *repository.PlanRepo
 	fundRepo     *repository.FundRepo
 	positionRepo *repository.PositionRepo
@@ -1325,6 +1385,27 @@ type runtimePMAgent struct {
 	// historical wins/losses on cells the mute didn't silence.
 	// Nil → no scorecard injection (legacy behaviour).
 	attribution *attribution.Service
+	// intradayBuilder is the Sprint 3 / L1 intraday (5/15/60m) snapshot
+	// builder. Same OHLC fetcher as quantSnapshot but different cadence
+	// (5m default). Nil = feature off (intraday OHLC disabled / not
+	// wired); the prompt then omits the block.
+	intradayBuilder *intraday.Builder
+
+	// recall + recallEmbedder is the Sprint 3 / L3 semantic memory
+	// recall pair. Both nil = feature off (no pgvector / no embed
+	// provider) and DecisionInput.SemanticRecall stays empty —
+	// silent degrade. The PM uses recall.Service.Query() with an
+	// embedding generated on-the-fly from today's MacroBriefing +
+	// universe to fetch the top-k similar memories.
+	recall         *recall.Service
+	recallEmbedder recall.Embedder
+
+	// contradiction is the Sprint 3 / L3 cross-agent contradiction
+	// checker. Nil = feature off. When set, the PM runs it right
+	// before serialising DecisionInput, appending any warning /
+	// block notes into RiskNotes so the LLM PM gets them in-context.
+	contradiction *contradictionRunner
+
 	// quantSnapshot is the Sprint A #1 per-symbol regime + ATR
 	// + position-size-ceiling builder. The PM calls BuildBatch
 	// for the union of universe + held positions on every
@@ -1367,11 +1448,14 @@ type runtimePMAgent struct {
 	// NewsSentiment text blob.
 	newsCatalystSvc *newsrecall.Service
 	// earningsSvc is the Sprint E #2 scheduled-earnings catalyst
-	// service. Default deployment ships with earnings.NoopFetcher
-	// so the block is silently absent; operators can plug in a
-	// hand-curated StaticFetcher (or a future Finnhub / Polygon
-	// adapter) via the wiring layer's earnings.Service constructor.
-	// nil = feature off; the prompt omits the block.
+	// service. Default deployment uses earnings.YahooProvider
+	// (zero-config, keyless Yahoo Finance v10 quoteSummary)
+	// via buildEarningsFetcherFromEnv(); env knobs
+	// EARNINGS_DISABLED=1 / YAHOO_EARNINGS_DISABLED=1 fall back
+	// to NoopFetcher so the prompt block is silently absent.
+	// Operators can still plug in a hand-curated StaticFetcher
+	// (or a future Finnhub / Polygon adapter) by editing the
+	// builder. nil = feature off; the prompt omits the block.
 	earningsSvc *earnings.Service
 	// qualitySvc is the Sprint E #3 cross-sectional quality-factor
 	// score builder. Reuses the cached fundamental.Fetcher the
@@ -1380,6 +1464,33 @@ type runtimePMAgent struct {
 	// feature off (fundamental data unwired); the prompt omits
 	// the block.
 	qualitySvc *quality.Service
+	// valueSvc is the Sprint F #1 cross-sectional value-factor
+	// (Fama-French HML lineage) score builder. Shares the same
+	// fundamental.Fetcher cache as qualitySvc so quality + value
+	// composites come back from a single per-symbol Fetch.
+	// Together the two sleeves implement the AQR QMJ + HML
+	// "Quality at a Reasonable Price" double-overlay the system
+	// prompt teaches the PM to recognise. nil = feature off
+	// (fundamental data unwired); the prompt omits the block.
+	valueSvc *value.Service
+	// lowBetaSvc is the Sprint F #2 Frazzini-Pedersen
+	// Betting-Against-Beta defensive overlay. Shares the same
+	// cached ohlc.Fetcher with quantSnapshot / ranker /
+	// correlation / pairspread so its per-symbol bar fetches
+	// hit the warm cache. nil = feature off (no OHLC fetcher
+	// wired) — the prompt omits the block and the PM falls
+	// back on quantSnapshots regime + riskBudget alone for
+	// any defensive-tilt decision.
+	lowBetaSvc *lowbeta.Service
+	// peadSvc is the Sprint F #3 Post-Earnings Announcement
+	// Drift overlay (Bernard-Thomas 1989). Depends on an
+	// earnings.HistoryService + the shared ohlc.Fetcher.
+	// Default wiring uses earnings.YahooHistoryProvider so US
+	// names get historical earnings out-of-the-box; A-share /
+	// HK funds where Yahoo coverage is poor fall back to the
+	// NoopHistoryFetcher → snapshot stays nil → prompt block
+	// omitted. nil peadSvc = feature off entirely.
+	peadSvc *pead.Service
 	// correlationSvc is the Sprint C #2 pairwise correlation
 	// matrix. Shares the same OHLC fetcher as quantSnapshot and
 	// ranker so the cache layer makes the third pass cheap.
@@ -1403,6 +1514,31 @@ type runtimePMAgent struct {
 	// receiver-nil guard. Wired by newRuntime when the global
 	// metrics registry is available.
 	serverMetrics *serverMetrics
+	// lastTraceByFund is the G1 #2 attribution bridge. The
+	// buildDecisionInput → GeneratePlan path produces the
+	// trace at the START of a plan tick (when we know what
+	// signals were available) but persists the plan at the
+	// END (when we know the reasoning text). Threading the
+	// trace through 3 layers of return values would touch
+	// every test that calls buildPlanActions; this small
+	// per-fund cache is the surgical alternative.
+	//
+	// Contract:
+	//   - buildDecisionInput STORES the trace keyed by fundID
+	//     at the end of the function.
+	//   - GeneratePlan LOADS-AND-DELETES the trace right after
+	//     CreateWithActions succeeds, then writes the
+	//     attribution payload via SetBlockContributions.
+	//   - Stale entries never accumulate because each store
+	//     overwrites the previous one for the same fundID;
+	//     the per-fund PM tick cadence (typically once per
+	//     trading day) keeps the map small (≤ N_funds rows).
+	//
+	// Concurrency: PM ticks per fund are sequential by design
+	// (the workflow runner serialises them); sync.Map handles
+	// the cross-fund case where two different funds tick
+	// simultaneously.
+	lastTraceByFund sync.Map
 }
 
 type runtimeRiskAgent struct {
@@ -1460,6 +1596,12 @@ type hardRiskState struct {
 }
 
 type runtimeMemorySystem struct {
+	// db is the raw DB handle — required by Sprint 3 / M1 lesson
+	// lineage writes (which sit outside any of the typed repo
+	// surfaces below). Optional in tests; nil ⇒ lineage write is
+	// skipped silently.
+	db *sql.DB
+
 	fundRepo     *repository.FundRepo
 	agentRepo    *repository.AgentRepo
 	teamRepo     *repository.TeamRepo
@@ -1493,6 +1635,17 @@ type learningContext struct {
 	actions     []repository.PlanAction
 	trades      []repository.TradeExecution
 	positions   []repository.HoldingPosition
+
+	// fundDayTradeCount is the fund-wide trade count for the trading
+	// day, regardless of which plan a trade was attributed to. This
+	// matters for the LLM-lesson gate (Step D): on funds with 30-min
+	// intraday cadence the LAST plan of the day is often a "watch
+	// only" tick that has zero plan-scoped trades, even though earlier
+	// plans the same day produced real fills. Without this fallback
+	// the gate would mark every day as "no signal" once the last tick
+	// rolls in. attribution/templates still consume `trades` (plan
+	// scoped) so per-plan attribution is unaffected.
+	fundDayTradeCount int
 }
 
 type learningResult struct {
@@ -1842,6 +1995,100 @@ func buildFundamentalFetcherFromEnv() fundamental.Fetcher {
 		}
 	}
 	return fundamental.NewCache(reg, ttl)
+}
+
+// buildEarningsFetcherFromEnv assembles the Sprint E #2 earnings
+// catalyst provider. Default = Yahoo Finance's keyless v10
+// quoteSummary endpoint (zero-config, US-focused). Operators
+// can disable for funds that don't trade catalysts (A-share-only
+// portfolios where Yahoo coverage is poor) or swap to a future
+// Finnhub / Polygon adapter without touching this signature.
+//
+// Env knobs:
+//
+//	EARNINGS_DISABLED=1            Force-disable entirely (NoopFetcher).
+//	YAHOO_EARNINGS_DISABLED=1      Skip the Yahoo provider.
+//	YAHOO_EARNINGS_BASE_URL=...    Override the Yahoo base URL
+//	                               (default https://query2.finance.yahoo.com).
+//	                               Used by acceptance tests pointing at
+//	                               a stub server.
+//	YAHOO_EARNINGS_CONCURRENCY=N   Per-fetch worker count (default 3).
+//
+// Returns earnings.NoopFetcher when nothing useful is wired so
+// the runtime's `earnings.NewService(...)` call stays infallible
+// (and the prompt block is silently absent).
+//
+// G1 #1: the returned provider is ALWAYS wrapped in
+// earnings.Cache so the upstream Yahoo call rate is capped at
+// roughly N_funds × N_universe per TTL window (default 6h),
+// regardless of how many PM ticks fire inside that window. The
+// TTL is operator-tuneable via YAHOO_EARNINGS_TTL.
+func buildEarningsFetcherFromEnv() earnings.Fetcher {
+	if envBool("EARNINGS_DISABLED") {
+		return earnings.NoopFetcher{}
+	}
+	if envBool("YAHOO_EARNINGS_DISABLED") {
+		// No other providers wired yet → degrade to noop.
+		// When Finnhub / Polygon land, they slot in here.
+		return earnings.NoopFetcher{}
+	}
+	provider := &earnings.YahooProvider{
+		BaseURL: strings.TrimSpace(os.Getenv("YAHOO_EARNINGS_BASE_URL")),
+	}
+	if raw := strings.TrimSpace(os.Getenv("YAHOO_EARNINGS_CONCURRENCY")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 20 {
+			provider.Concurrency = n
+		}
+	}
+	return earnings.NewCache(provider, earnings.CacheOptions{
+		TTL: parseDurationEnv("YAHOO_EARNINGS_TTL", 0),
+	})
+}
+
+// buildEarningsHistoryFetcherFromEnv assembles the Sprint F #3
+// historical earnings provider used by the PEAD overlay. Default
+// = Yahoo Finance's keyless v10 earningsHistory module (zero-
+// config, US-focused). Operators can disable per env knob.
+//
+// Env knobs (mirror buildEarningsFetcherFromEnv):
+//
+//	EARNINGS_DISABLED=1                 Force-disable entirely (NoopHistoryFetcher).
+//	YAHOO_EARNINGS_HISTORY_DISABLED=1   Skip the Yahoo history provider.
+//	YAHOO_EARNINGS_BASE_URL=...         Shared base URL with the forward
+//	                                    calendar — flipping this for tests
+//	                                    moves both providers to the same
+//	                                    stub server.
+//	YAHOO_EARNINGS_CONCURRENCY=N        Shared concurrency (default 3).
+//
+// Returns earnings.NoopHistoryFetcher when nothing is wired so
+// the earnings.NewHistoryService(...) call stays infallible and
+// the PEAD snapshot silently disappears from the prompt.
+//
+// G1 #1: the returned provider is ALWAYS wrapped in
+// earnings.HistoryCache. The default 24h TTL is appropriate
+// because epsActual/epsEstimate is fixed once the print lands;
+// the only freshness concern is "did a new quarter just print
+// inside the last 24h" which the longer TTL accepts (worst
+// case: 24h lag on a brand-new print, which is still well
+// inside the 60d PEAD window).
+func buildEarningsHistoryFetcherFromEnv() earnings.HistoryFetcher {
+	if envBool("EARNINGS_DISABLED") {
+		return earnings.NoopHistoryFetcher{}
+	}
+	if envBool("YAHOO_EARNINGS_HISTORY_DISABLED") {
+		return earnings.NoopHistoryFetcher{}
+	}
+	provider := &earnings.YahooHistoryProvider{
+		BaseURL: strings.TrimSpace(os.Getenv("YAHOO_EARNINGS_BASE_URL")),
+	}
+	if raw := strings.TrimSpace(os.Getenv("YAHOO_EARNINGS_CONCURRENCY")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 20 {
+			provider.Concurrency = n
+		}
+	}
+	return earnings.NewHistoryCache(provider, earnings.CacheOptions{
+		TTL: parseDurationEnv("YAHOO_EARNINGS_HISTORY_TTL", 0),
+	})
 }
 
 // buildSectorFlowFetcherFromEnv assembles the Phase 2D sector-flow
@@ -2968,7 +3215,13 @@ type bilingualDiscussion struct {
 	ConsensusEn []string      `json:"consensusEn"`
 }
 
-const llmEnrichmentTimeout = 240 * time.Second
+// llmEnrichmentTimeout matches the global 5-minute LLM budget
+// declared in llm/client.go (llmTotalRequestTimeout). Keeping the
+// two in sync means a translation / decision-trace enrichment never
+// times out before the underlying llm.Client gives up on its own
+// 5-min cap (which would otherwise cause confusing "context deadline"
+// errors mid-flight).
+const llmEnrichmentTimeout = 5 * time.Minute
 
 // decisionTraceTranslationCache memoises translation results across
 // decision-trace requests so opening the same plan twice — or any two
@@ -5603,6 +5856,7 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			fundamentalFetcher: s.fundamentalFetcher,
 			sectorFlowFetcher:  s.sectorFlowFetcher,
 			sentimentScorer:    buildSentimentScorerFromRuntime(s.runtime, fund.ID, ownerUserID),
+			llmRuntime:         s.runtime,
 		},
 		func() *runtimePMAgent {
 			// Sprint A #1: regime service + ATR snapshot builder
@@ -5614,6 +5868,7 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			// quantSnapshots block, preserving legacy behaviour.
 			regimeSvc := regime.NewService(s.ohlcFetcher)
 			return &runtimePMAgent{
+				db:             s.db,
 				planRepo:       planRepo,
 				fundRepo:       fundRepo,
 				positionRepo:   positionRepo,
@@ -5642,6 +5897,27 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// when s.attribution is nil (legacy / smoke
 				// builds) the PMAgent skips the scorecard step.
 				attribution: s.attribution,
+				// Sprint 3 / L1: intraday snapshot builder
+				// shares the same OHLC fetcher. 5m default
+				// because A 股 + US 都默认提供 5m bars; funds
+				// that want 15m / 60m for less-active universes
+				// can swap the interval here. nil ohlcFetcher
+				// → Build returns no rows, prompt omits block.
+				intradayBuilder: intraday.NewBuilder(s.ohlcFetcher, intraday.Interval5m),
+
+				// Sprint 3 / L3: semantic memory recall (pgvector
+				// cosine similarity). Both fields are set together
+				// via the buildSemanticRecallStack helper so the
+				// nil-checks stay clean — when either piece is
+				// missing the whole stack degrades silently.
+				recall:         s.recallService,
+				recallEmbedder: s.recallEmbedder,
+
+				// Sprint 3 / L3: cross-agent contradiction checker.
+				// Same llmRuntime as other LLM steps, simple tier,
+				// 20s timeout. Nil runtime → disabled.
+				contradiction: newContradictionRunner(s.runtime),
+
 				// Sprint A #1: same regimeSvc + ohlcFetcher
 				// pair. Options defaults are deliberate
 				// (50bps risk, 2x ATR stop, 0.5%-10% ceiling)
@@ -5678,15 +5954,15 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// the constructor stays unconditional.
 				newsCatalystSvc: newsrecall.NewService(s.marketData, newsrecall.Options{}),
 				// Sprint E #2: scheduled-earnings catalyst
-				// snapshot. Ships with NoopFetcher so the
-				// block is silently absent until an operator
-				// wires a real provider — same opt-in pattern
-				// as the other catalyst services. The fetcher
-				// can be swapped to earnings.StaticFetcher
-				// (hand-curated YAML) or a future
-				// Finnhub / Polygon / Akshare adapter without
-				// touching this constructor.
-				earningsSvc: earnings.NewService(earnings.NoopFetcher{}, earnings.Options{}),
+				// snapshot. Default = Yahoo Finance v10
+				// quoteSummary (zero-auth, US-focused) via
+				// buildEarningsFetcherFromEnv; falls back to
+				// NoopFetcher when env disables the provider.
+				// The fetcher can be swapped to
+				// earnings.StaticFetcher (hand-curated YAML)
+				// or a future Finnhub / Polygon adapter via
+				// the same env-driven builder.
+				earningsSvc: earnings.NewService(buildEarningsFetcherFromEnv(), earnings.Options{}),
 				// Sprint A #2: cross-sectional ranker shares
 				// the same OHLC fetcher so bars asked for
 				// by the quant snapshot pass come back from
@@ -5704,6 +5980,38 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// degrades gracefully (BuildScores returns
 				// nil, the prompt skips the block).
 				qualitySvc: quality.NewService(s.fundamentalFetcher, quality.Options{}),
+				// Sprint F #1: cross-sectional value factor
+				// (B/P + E/P + D/P composite, Fama-French
+				// HML lineage). Same cached fundamental
+				// fetcher as qualitySvc so quality and value
+				// composites come from a single per-symbol
+				// Fetch. nil fetcher degrades to no-op.
+				valueSvc: value.NewService(s.fundamentalFetcher, value.Options{}),
+				// Sprint F #2: Frazzini-Pedersen Betting-
+				// Against-Beta defensive overlay. Reuses the
+				// shared ohlc.Fetcher cache (warm from
+				// quantSnapshot / ranker / correlation /
+				// pairspread) plus one extra fetch per
+				// market for the benchmark index (SPY / CSI300
+				// ETF / Tracker Fund of HK). nil fetcher
+				// degrades to no-op.
+				lowBetaSvc: lowbeta.NewService(s.ohlcFetcher, lowbeta.Options{}),
+				// Sprint F #3: Post-Earnings Announcement
+				// Drift overlay. Composes the historical
+				// earnings.HistoryService (default = Yahoo
+				// v10 earningsHistory module via
+				// buildEarningsHistoryFetcherFromEnv) with
+				// the shared ohlc.Fetcher. nil components
+				// degrade gracefully (block omitted from the
+				// prompt).
+				peadSvc: pead.NewService(
+					earnings.NewHistoryService(
+						buildEarningsHistoryFetcherFromEnv(),
+						earnings.HistoryOptions{},
+					),
+					s.ohlcFetcher,
+					pead.Options{},
+				),
 				// Sprint C #2: pairwise correlation matrix
 				// over the universe ∪ positions set. Reuses
 				// the same OHLC fetcher so the third pass
@@ -5757,6 +6065,7 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			uow:          uow,
 		},
 		&runtimeMemorySystem{
+			db:           s.db,
 			fundRepo:     fundRepo,
 			agentRepo:    agentRepo,
 			teamRepo:     teamRepo,
@@ -5777,6 +6086,10 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			agentRepo:    agentRepo,
 		}),
 		workflow.WithSchedule(schedule),
+		// Sprint 4 / android-core: terminal plan transitions fan
+		// out to FCM via the device-token registry. Notifier is
+		// optional — nil-safe in workflow's defensive recover.
+		workflow.WithPlanLifecycleNotifier(s.planLifecycleNotifier),
 	)
 	return runtime
 }
@@ -11011,10 +11324,192 @@ func workflowEventPersistsState(eventType string) bool {
 	}
 }
 
+// researcherMaxInstrumentsPerStep is the soft safety cap that
+// replaced the hardcoded `i >= 3` truncation in
+// buildUniverseResearchContent / buildQuantResearchContent (Sprint 1
+// / S3). A 12-symbol fund was losing 75% of its coverage to the
+// old cap; 16 keeps production funds (≤ 12 symbols typical) at
+// 100% coverage while still bounding the prompt for a
+// misconfigured 100-symbol universe. Increase via PR if a future
+// universe legitimately needs more.
+const researcherMaxInstrumentsPerStep = 16
+
+// researchLLMSynthesis is the shape the Sprint 1 / S3 LLM call
+// returns. summary is the single-sentence headline; bullets the
+// most-actionable 3-5 observations; confidence is the LLM's own
+// 0..1 rating of how decisive the underlying signals are.
+type researchLLMSynthesis struct {
+	Summary    string   `json:"summary"`
+	Bullets    []string `json:"bullets"`
+	Confidence float64  `json:"confidence"`
+}
+
+// summariseResearchWithLLM runs the provider-stitched research text
+// through a TierStandard LLM call and returns the legacy text with
+// an LLM-generated synthesis prepended. Sprint 1 / S3 wiring.
+//
+// Failures degrade gracefully: any error path (no runtime, empty
+// input, LLM error, JSON parse failure) returns the original
+// content unchanged. The synthesis adds 3-8 lines to the top of the
+// research text; the downstream debate / persistence layer sees
+// both the synthesis AND the original signals so no information is
+// lost.
+//
+// stepKind is a short tag ("macro" / "stock" / "fundamental" /
+// "quant") used both for the LLM step_name attribute and the
+// human-readable section header.
+func (p runtimeResearcherPool) summariseResearchWithLLM(ctx context.Context, agent *repository.Agent, fundID, stepKind, providerText string) string {
+	if p.llmRuntime == nil {
+		return providerText
+	}
+	cleaned := strings.TrimSpace(providerText)
+	if cleaned == "" {
+		return providerText
+	}
+	// Bail if there's no meaningful content (just a "unavailable"
+	// stub) — running an LLM on "macro brief unavailable: market
+	// data source disabled" wastes a token budget.
+	lower := strings.ToLower(cleaned)
+	if strings.Contains(lower, "unavailable") && len(cleaned) < 200 {
+		return providerText
+	}
+	lang := LanguageFromContext(ctx)
+	zh := lang != UserLanguageEN
+
+	systemPrompt := "You are a senior buy-side research analyst. The user will give you a researcher's raw notes for one trading day. Distil them into JSON of the shape {\"summary\":string,\"bullets\":[string],\"confidence\":number 0..1}. Rules: summary is one decisive sentence; produce 3-5 bullets, each a short actionable observation citing concrete numbers from the notes; confidence reflects how decisive the underlying signals are (0.4 for thin/conflicting, 0.75 for strong, 0.9 for unambiguous). Reply ONLY with the JSON object — no markdown, no preamble."
+	if zh {
+		systemPrompt = "你是一名资深买方研究员。用户会给你一份研究员当日的原始笔记，请精炼为 JSON：{\"summary\":字符串,\"bullets\":[字符串数组],\"confidence\":0..1数字}。规则：summary 一句话给出关键判断；bullets 输出 3-5 条，每条含原文里的具体数字或事件；confidence 是你对信号确定性的评分（0.4 信号薄弱/冲突，0.75 较强，0.9 明确）。只输出 JSON，不要 markdown 包裹，不要任何前言。"
+	}
+	header := fmt.Sprintf("【%s 研究综述】", stepKind)
+	if !zh {
+		header = fmt.Sprintf("[%s research synthesis]", stepKind)
+	}
+
+	userID := ""
+	if agent != nil {
+		userID = strings.TrimSpace(agent.UserID)
+	}
+	// Cap the input we send to the LLM: provider text can run
+	// several KB on a 12-symbol universe with full fundamentals.
+	// 16 KB is comfortably under any TierStandard input budget while
+	// preserving the per-symbol blocks intact.
+	maxInputBytes := 16 * 1024
+	bounded := cleaned
+	if len(bounded) > maxInputBytes {
+		bounded = bounded[:maxInputBytes] + "\n...(input truncated for prompt budget)"
+	}
+
+	stepName := "research_synthesis_" + strings.ToLower(strings.TrimSpace(stepKind))
+	llmCtx, cancel := llmEnrichmentContext()
+	defer cancel()
+	resp, err := p.llmRuntime.Chat(llmCtx, llm.ChatRequest{
+		UserID:    userID,
+		FundID:    fundID,
+		ModelTier: llm.TierStandard,
+		StepName:  stepName,
+		Messages: []llm.ChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: bounded},
+		},
+	})
+	if err != nil || resp == nil {
+		if err != nil {
+			slog.Debug("research llm synthesis failed", "step", stepKind, "fund", fundID, "err", err)
+		}
+		return providerText
+	}
+	body := strings.TrimSpace(resp.Content)
+	if body == "" {
+		return providerText
+	}
+	// Strip optional markdown code fences (`{...}` or ```json {...}```).
+	body = stripCodeFences(body)
+	var parsed researchLLMSynthesis
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		// One more attempt: extract the first {...} block — the
+		// LLM occasionally wraps the JSON with prose despite the
+		// instruction.
+		if start, end := strings.Index(body, "{"), strings.LastIndex(body, "}"); start >= 0 && end > start {
+			if jsonErr := json.Unmarshal([]byte(body[start:end+1]), &parsed); jsonErr != nil {
+				slog.Debug("research llm synthesis parse failed", "step", stepKind, "err", err, "snippet", trimForLog(body, 200))
+				return providerText
+			}
+		} else {
+			return providerText
+		}
+	}
+	parsed.Summary = strings.TrimSpace(parsed.Summary)
+	cleanedBullets := make([]string, 0, len(parsed.Bullets))
+	for _, b := range parsed.Bullets {
+		b = strings.TrimSpace(b)
+		if b == "" {
+			continue
+		}
+		cleanedBullets = append(cleanedBullets, "- "+b)
+	}
+	if parsed.Summary == "" && len(cleanedBullets) == 0 {
+		return providerText
+	}
+	if parsed.Confidence < 0 {
+		parsed.Confidence = 0
+	}
+	if parsed.Confidence > 1 {
+		parsed.Confidence = 1
+	}
+	confLabel := "confidence"
+	if zh {
+		confLabel = "置信度"
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	b.WriteString("\n")
+	if parsed.Summary != "" {
+		b.WriteString(parsed.Summary)
+		b.WriteString("\n")
+	}
+	if len(cleanedBullets) > 0 {
+		b.WriteString(strings.Join(cleanedBullets, "\n"))
+		b.WriteString("\n")
+	}
+	b.WriteString(fmt.Sprintf("(%s: %.2f)\n\n", confLabel, parsed.Confidence))
+	b.WriteString(providerText)
+	return b.String()
+}
+
+// stripCodeFences removes ``` fences and an optional language tag.
+func stripCodeFences(s string) string {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "```") {
+		return t
+	}
+	t = strings.TrimPrefix(t, "```")
+	if idx := strings.Index(t, "\n"); idx >= 0 {
+		t = t[idx+1:]
+	}
+	t = strings.TrimSuffix(t, "```")
+	return strings.TrimSpace(t)
+}
+
+// trimForLog truncates a string to a max-length safe for slog Debug.
+func trimForLog(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
 func (p runtimeResearcherPool) MacroBrief(ctx context.Context, fundID string, tradingDate string) (workflow.ResearchReport, error) {
 	agent := p.findResearcherAgent(ctx, fundID, workflow.FocusMacro)
 	fundFocusContext, specializationContext := buildRuntimeFundContextsByID(ctx, fundID, agent, p.fundRepo)
 	content := p.buildMacroResearchContent(ctx, fundID, tradingDate)
+	// Sprint 1 / S3: run the provider-stitched macro text through a
+	// TierStandard LLM to produce a structured synthesis; prepend it
+	// to the raw content so downstream consumers (debate, persistence)
+	// still see the underlying signals. Failures degrade gracefully.
+	content = p.summariseResearchWithLLM(ctx, agent, fundID, "macro", content)
 	content = appendSkillContext(content, fundFocusContext)
 	content = appendSkillContext(content, specializationContext)
 	content = appendSkillContext(content, buildResearcherSkillContext(LanguageFromContext(ctx), agent, workflow.StepMacroBrief.String(), nil))
@@ -11027,10 +11522,12 @@ func (p runtimeResearcherPool) RunAll(ctx context.Context, fundID string, tradin
 	stockFundFocusContext, stockSpecializationContext := buildRuntimeFundContextsByID(ctx, fundID, stockAgent, p.fundRepo)
 	fundamentalFundFocusContext, fundamentalSpecializationContext := buildRuntimeFundContextsByID(ctx, fundID, fundamentalAgent, p.fundRepo)
 	stockContent := p.buildUniverseResearchContent(ctx, fundID, workflow.FocusStock, tradingDate)
+	stockContent = p.summariseResearchWithLLM(ctx, stockAgent, fundID, "stock", stockContent)
 	stockContent = appendSkillContext(stockContent, stockFundFocusContext)
 	stockContent = appendSkillContext(stockContent, stockSpecializationContext)
 	stockContent = appendSkillContext(stockContent, buildResearcherSkillContext(LanguageFromContext(ctx), stockAgent, workflow.StepResearchParallel.String(), nil))
 	fundamentalContent := p.buildUniverseResearchContent(ctx, fundID, workflow.FocusFundamental, tradingDate)
+	fundamentalContent = p.summariseResearchWithLLM(ctx, fundamentalAgent, fundID, "fundamental", fundamentalContent)
 	fundamentalContent = appendSkillContext(fundamentalContent, fundamentalFundFocusContext)
 	fundamentalContent = appendSkillContext(fundamentalContent, fundamentalSpecializationContext)
 	fundamentalContent = appendSkillContext(fundamentalContent, buildResearcherSkillContext(LanguageFromContext(ctx), fundamentalAgent, workflow.StepResearchParallel.String(), nil))
@@ -11044,6 +11541,7 @@ func (p runtimeResearcherPool) QuantSignals(ctx context.Context, fundID string, 
 	agent := p.findResearcherAgent(ctx, fundID, workflow.FocusStock)
 	fundFocusContext, specializationContext := buildRuntimeFundContextsByID(ctx, fundID, agent, p.fundRepo)
 	content := p.buildQuantResearchContent(ctx, fundID, tradingDate)
+	content = p.summariseResearchWithLLM(ctx, agent, fundID, "quant", content)
 	content = appendSkillContext(content, fundFocusContext)
 	content = appendSkillContext(content, specializationContext)
 	content = appendSkillContext(content, buildResearcherSkillContext(LanguageFromContext(ctx), agent, workflow.StepQuantSignals.String(), nil))
@@ -11737,8 +12235,13 @@ func (p runtimeResearcherPool) buildUniverseResearchContent(ctx context.Context,
 		instruments = append(instruments, defaultInstrumentRef(fund, focus, inferWorkflowSymbol(fund, nil)))
 	}
 	sections := []string{focusLabel}
+	// Sprint 1 / S3: drop the hardcoded i >= 3 cap. A 12-symbol
+	// universe was previously losing 75% of its coverage. Replace
+	// with a soft safety bound (16) so a misconfigured universe
+	// can't blow the LLM token budget; production funds stay well
+	// inside the bound.
 	for i, instrument := range instruments {
-		if i >= 3 {
+		if i >= researcherMaxInstrumentsPerStep {
 			break
 		}
 		research, err := p.marketResearch(ctx, instrument, benchmarkPointer(benchmark))
@@ -11791,8 +12294,9 @@ func (p runtimeResearcherPool) buildQuantResearchContent(ctx context.Context, fu
 		return noUniverse
 	}
 	lines := []string{header}
+	// Sprint 1 / S3: same cap-removal as buildUniverseResearchContent.
 	for i, instrument := range instruments {
-		if i >= 3 {
+		if i >= researcherMaxInstrumentsPerStep {
 			break
 		}
 		research, err := p.marketResearch(ctx, instrument, benchmarkPointer(benchmark))
@@ -12059,12 +12563,77 @@ func (a *runtimePMAgent) GeneratePlan(ctx context.Context, fundID, tradingDate s
 	if err != nil {
 		return nil, mapRepositoryError(err)
 	}
+	// G1 #2: attribution writer needs the LLM's per-action
+	// reasoning (where the PM names blocks like "qualityScores",
+	// "valueScores", etc.) plus the high-level summary. The
+	// summary alone — buildReadablePMPlanReasoning — paraphrases
+	// roundtable cases and rarely mentions block vocabulary, so
+	// the per-action JSON reasoning is where most citations
+	// actually live.
+	a.persistBlockContributions(ctx, fundID, id, combineReasoning(reasoning, actions))
 	return &workflow.InvestmentPlanResult{
 		ID:           id,
 		FundID:       fundID,
 		Status:       workflow.PlanStatusPendingUser,
 		RoundtableID: roundtable.ID,
 	}, nil
+}
+
+// combineReasoning concatenates the plan's top-level summary
+// with every action's per-action reasoning into one big text
+// blob, separated by line breaks so the citation regex can scan
+// the entire surface. We strip empty entries to keep noise
+// down. The output is consumed by BuildContributions; it never
+// goes back into the database.
+func combineReasoning(summary string, actions []repository.PlanAction) string {
+	parts := make([]string, 0, 1+len(actions))
+	if s := strings.TrimSpace(summary); s != "" {
+		parts = append(parts, s)
+	}
+	for _, a := range actions {
+		if a.Reasoning.Valid {
+			if s := strings.TrimSpace(a.Reasoning.String); s != "" {
+				parts = append(parts, s)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// persistBlockContributions is the G1 #2 attribution writer. It
+// pairs the trace stashed by buildDecisionInput with the final
+// reasoning text and writes the JSON payload onto the freshly-
+// created plan. Soft-fail throughout — attribution is a
+// dashboard signal, not a correctness one; a missing trace
+// (legacy path took over OR the fund had no decision input
+// built this tick) silently drops the write, and DB errors are
+// logged-and-swallowed so the plan-create response is
+// unaffected.
+func (a *runtimePMAgent) persistBlockContributions(ctx context.Context, fundID, planID, reasoning string) {
+	if a == nil || a.planRepo == nil || strings.TrimSpace(planID) == "" {
+		return
+	}
+	raw, ok := a.lastTraceByFund.LoadAndDelete(fundID)
+	if !ok {
+		// Legacy path / decision engine off / fundID empty —
+		// no attribution to record.
+		return
+	}
+	trace, ok := raw.(decision.Trace)
+	if !ok {
+		return
+	}
+	contributions := decision.BuildContributions(trace, reasoning)
+	payload, err := contributions.EncodeToJSON()
+	if err != nil {
+		slog.Warn("plan attribution: encode contributions failed",
+			"fundId", fundID, "planId", planID, "err", err)
+		return
+	}
+	if err := a.planRepo.SetBlockContributions(ctx, planID, payload); err != nil {
+		slog.Warn("plan attribution: persist contributions failed",
+			"fundId", fundID, "planId", planID, "err", err)
+	}
 }
 
 // stampDefaultAttribution fills in any blank sleeve / signal_source
@@ -13844,7 +14413,7 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	var consensus []string
 	var roundtableStance, bullCase, bearCase, quantCase string
 	var symbolVerdicts []decision.RoundtableSymbolVerdict
-	var fundamentalSummary, sectorRotation, newsSentiment string
+	var fundamentalSummary, sectorRotation, newsSentiment, macroBriefing string
 	if roundtable != nil {
 		consensus = append(consensus, roundtable.Consensus...)
 		roundtableStance = roundtable.OverallStance
@@ -13854,6 +14423,11 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		fundamentalSummary = roundtable.FundamentalSummary
 		sectorRotation = roundtable.SectorRotation
 		newsSentiment = roundtable.NewsSentiment
+		// Sprint 1 / S2: pick up the macro brief the orchestrator
+		// stitched onto the roundtable after StepMacroBrief. The PM
+		// prompt has consumed this slot since Phase 1; it was just
+		// never being populated.
+		macroBriefing = strings.TrimSpace(roundtable.MacroBriefing)
 		if len(roundtable.Symbols) > 0 {
 			symbolVerdicts = make([]decision.RoundtableSymbolVerdict, 0, len(roundtable.Symbols))
 			for _, sd := range roundtable.Symbols {
@@ -13901,6 +14475,15 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	correlations := a.buildCorrelations(ctx, profile.Market, universe, decisionPositions, profile.CorrelationPolicy)
 	pairSpreads := a.buildPairSpreads(ctx, profile.Market, correlations)
 
+	// Sprint 1 / S1: populate the three learning-loop blocks that
+	// surface the agent learning system's state directly to the PM.
+	// Each helper is soft-failing — if the repo lookup errors out or
+	// returns nothing, the prompt simply omits the corresponding
+	// optional JSON key (per omitempty in prompt.go).
+	agentSkills := a.collectAgentSkillContexts(ctx, fundID)
+	recentLessons := a.collectRecentLessonContexts(ctx, fundID, tradingDate)
+	longTermReflections := a.collectLongTermReflectionContexts(ctx, fundID, tradingDate)
+
 	input := decision.DecisionInput{
 		FundID:              fundID,
 		TradingDate:         tradingDate,
@@ -13920,15 +14503,24 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		QuantCase:           quantCase,
 		SymbolVerdicts:      symbolVerdicts,
 		FundamentalSummary:  fundamentalSummary,
+		MacroBriefing:       macroBriefing,
 		UserID:              ownerUserID,
 		PMAgentID:           pmAgentID,
 		SectorRotation:      sectorRotation,
 		NewsSentiment:       newsSentiment,
+		AgentSkills:         agentSkills,
+		RecentLessons:       recentLessons,
+		LongTermReflections: longTermReflections,
 		SleeveScorecard:     a.buildSleeveScorecard(ctx, fundID),
 		LessonReplay:        a.buildLessonReplay(ctx, fundID),
 		QuantSnapshots:      a.buildQuantSnapshots(ctx, profile.Market, universe, decisionPositions),
+		IntradaySnapshots:   a.buildIntradaySnapshots(ctx, profile.Market, universe, decisionPositions, tradingDate),
+		SemanticRecall:      a.buildSemanticRecall(ctx, fundID, macroBriefing, universe),
 		UniverseRanking:     a.buildUniverseRanking(ctx, profile.Market, universe, decisionPositions),
 		QualityScores:       a.buildQualityScores(ctx, profile.Market, universe, decisionPositions),
+		ValueScores:         a.buildValueScores(ctx, profile.Market, universe, decisionPositions),
+		LowBetaScores:       a.buildLowBetaScores(ctx, profile.Market, universe, decisionPositions),
+		PEAD:                a.buildPEAD(ctx, profile.Market, universe, decisionPositions),
 		Cooldowns:           a.buildCooldowns(ctx, fundID, universe, decisionPositions, tradingDate),
 		RiskBudget:          a.buildRiskBudget(ctx, fundID, tradingDate),
 		NewsCatalysts:       a.buildNewsCatalysts(ctx, profile.Market, universe, decisionPositions, tradingDate),
@@ -13938,6 +14530,22 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		PairSpreads:         pairSpreads,
 		BuyBudget:           planBuyAmountWithinRiskCap(fund),
 		Now:                 tradingDate,
+	}
+
+	// Sprint 3 / L3: cross-agent contradiction check. Runs only
+	// when bull/bear/quant cases are all populated (a true 3-way
+	// roundtable produced them); single-researcher or stub paths
+	// yield <2 views and the runner short-circuits to nil. Notes
+	// land in RiskNotes so the PM prompt's risk_notes block
+	// catches them — no prompt schema change needed.
+	if a != nil && a.contradiction != nil {
+		researcherViews := buildContradictionViews(bullCase, bearCase, quantCase, roundtableStance)
+		if len(researcherViews) >= 2 {
+			notes := a.contradiction.Check(ctx, fundID, tradingDate, universe, macroBriefing, "", researcherViews, ownerUserID, pmAgentID)
+			if len(notes) > 0 {
+				input.RiskNotes = append(input.RiskNotes, notes...)
+			}
+		}
 	}
 
 	// Sprint C #3 — decision-input fingerprint observability.
@@ -13953,6 +14561,14 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	if blocks := trace.PresentBlocks(); len(blocks) > 0 {
 		input.RiskNotes = append(input.RiskNotes,
 			"signal_blocks_present: "+strings.Join(blocks, ", "))
+	}
+	// G1 #2: stash the trace so the GeneratePlan path can
+	// pair it with the final Reasoning text and persist the
+	// per-plan attribution payload. The store overwrites any
+	// earlier entry for the same fund, so the map stays small
+	// (≤ N_funds rows live at once).
+	if a != nil && strings.TrimSpace(fundID) != "" {
+		a.lastTraceByFund.Store(fundID, trace)
 	}
 
 	// Sprint D #1 — Prometheus counters for signal-block presence,
@@ -13997,6 +14613,229 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	}
 
 	return input
+}
+
+// collectAgentSkillContexts walks every agent on the fund's team and
+// returns the approved + enabled skill cards as decision-engine
+// AgentSkillContext rows. Sprint 1 / S1 wiring: the LLM PM gets to
+// read its own playbook before producing actions, instead of after.
+//
+// Soft-failing: any repo error along the way returns an empty slice
+// (the decision prompt then simply omits the agentSkills block per
+// omitempty). We never want a skill lookup glitch to block a tick.
+func (a *runtimePMAgent) collectAgentSkillContexts(ctx context.Context, fundID string) []decision.AgentSkillContext {
+	if a == nil || strings.TrimSpace(fundID) == "" || a.teamRepo == nil || a.agentRepo == nil {
+		return nil
+	}
+	members, err := a.teamRepo.ListByFund(ctx, fundID)
+	if err != nil || len(members) == 0 {
+		return nil
+	}
+	out := make([]decision.AgentSkillContext, 0, 8)
+	seen := make(map[string]struct{}) // dedupe across team rows (one agent multiple roles)
+	for i := range members {
+		member := members[i]
+		agent, err := a.agentRepo.GetByID(ctx, member.AgentID)
+		if err != nil || agent == nil {
+			continue
+		}
+		cfg := parseSkillConfig(agent.SkillConfig)
+		// parsedSkillConfig.Enabled at the top level is the
+		// "skill library globally enabled" master switch — when
+		// false the agent ignores skills entirely.
+		if !cfg.Enabled {
+			continue
+		}
+		for _, skill := range cfg.Skills {
+			if !skillEntryIsActive(skill) {
+				continue
+			}
+			name := strings.TrimSpace(skill.Name)
+			if name == "" {
+				name = strings.TrimSpace(skill.Key)
+			}
+			if name == "" {
+				continue
+			}
+			role := strings.ToLower(strings.TrimSpace(member.Role))
+			dedupKey := role + "::" + strings.ToLower(name)
+			if _, dup := seen[dedupKey]; dup {
+				continue
+			}
+			seen[dedupKey] = struct{}{}
+			// Prefer Description over Content for the prompt
+			// (Content is the full skill body, often a long
+			// paragraph; Description is the one-liner). Fall back
+			// to Content's first 240 chars if Description is
+			// empty.
+			desc := strings.TrimSpace(skill.Description)
+			if desc == "" {
+				desc = strings.TrimSpace(skill.Content)
+			}
+			out = append(out, decision.AgentSkillContext{
+				AgentRole:   role,
+				AgentName:   strings.TrimSpace(agent.Name),
+				Name:        name,
+				Description: desc,
+				Source:      strings.ToLower(strings.TrimSpace(skill.Source)),
+			})
+		}
+	}
+	return out
+}
+
+// collectRecentLessonContexts pulls the most recent agent-level +
+// daily-level lesson memories for the fund. Sprint 1 / S1 wiring.
+// We read 7 days of layer="agent" personalised lessons and 14 days of
+// layer="daily" fund-wide summaries, sort by most-recent, and cap the
+// total to 12 entries (the prompt-side cap will further trim if a
+// future deployment loosens these numbers).
+//
+// Soft-failing: a repo error returns an empty slice; the decision
+// prompt then omits the block.
+func (a *runtimePMAgent) collectRecentLessonContexts(ctx context.Context, fundID string, tradingDate time.Time) []decision.RecentLessonContext {
+	if a == nil || strings.TrimSpace(fundID) == "" || a.memoryRepo == nil {
+		return nil
+	}
+	const (
+		agentLookbackDays = 7
+		dailyLookbackDays = 14
+		hardCap           = 12
+	)
+	if tradingDate.IsZero() {
+		tradingDate = time.Now().UTC()
+	}
+	cutoffAgent := tradingDate.AddDate(0, 0, -agentLookbackDays)
+	cutoffDaily := tradingDate.AddDate(0, 0, -dailyLookbackDays)
+
+	out := make([]decision.RecentLessonContext, 0, hardCap)
+	agentMems, err := a.memoryRepo.ListByFund(ctx, fundID, "agent", 40)
+	if err == nil {
+		for _, m := range agentMems {
+			when := lessonContextTradingDate(m)
+			if when.Before(cutoffAgent) {
+				continue
+			}
+			ctxLesson := decision.RecentLessonContext{
+				TradingDate: when.Format("2006-01-02"),
+				Layer:       "agent",
+				AgentRole:   lessonContextAgentRole(ctx, a.agentRepo, m),
+				Title:       strings.TrimSpace(m.Title.String),
+				Content:     strings.TrimSpace(m.Content),
+				Tags:        m.Tags,
+			}
+			// Sprint 3 / M1: surface "该 lesson 历史命中率" to the
+			// PM prompt so it can deprioritise lessons whose past
+			// predictions consistently failed. Soft-failing: a
+			// lineage lookup error just leaves the rate at 0 and
+			// the prompt renderer omits the marker.
+			if a.db != nil {
+				if rate, total, lerr := lessonHitRate(ctx, a.db, m.ID); lerr == nil && total > 0 {
+					ctxLesson.HitRate = rate
+					ctxLesson.SamplesObserved = total
+				}
+			}
+			out = append(out, ctxLesson)
+		}
+	}
+	dailyMems, err := a.memoryRepo.ListByFund(ctx, fundID, "daily", 30)
+	if err == nil {
+		for _, m := range dailyMems {
+			when := lessonContextTradingDate(m)
+			if when.Before(cutoffDaily) {
+				continue
+			}
+			out = append(out, decision.RecentLessonContext{
+				TradingDate: when.Format("2006-01-02"),
+				Layer:       "daily",
+				Title:       strings.TrimSpace(m.Title.String),
+				Content:     strings.TrimSpace(m.Content),
+				Tags:        m.Tags,
+			})
+		}
+	}
+	// Stable sort: newest trading_date first, then agent-layer
+	// before daily so personalised lessons surface first when ties
+	// exist on the same date.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].TradingDate != out[j].TradingDate {
+			return out[i].TradingDate > out[j].TradingDate
+		}
+		if out[i].Layer != out[j].Layer {
+			return out[i].Layer == "agent"
+		}
+		return false
+	})
+	if len(out) > hardCap {
+		out = out[:hardCap]
+	}
+	return out
+}
+
+// collectLongTermReflectionContexts surfaces at most 5 of the newest
+// long-term reflection memories (layer="long_term") within the last
+// 30 days. Sprint 1 / S1 wiring.
+func (a *runtimePMAgent) collectLongTermReflectionContexts(ctx context.Context, fundID string, tradingDate time.Time) []decision.LongTermReflectionContext {
+	if a == nil || strings.TrimSpace(fundID) == "" || a.memoryRepo == nil {
+		return nil
+	}
+	const (
+		lookbackDays = 30
+		hardCap      = 5
+	)
+	if tradingDate.IsZero() {
+		tradingDate = time.Now().UTC()
+	}
+	cutoff := tradingDate.AddDate(0, 0, -lookbackDays)
+	mems, err := a.memoryRepo.ListByFund(ctx, fundID, "long_term", 20)
+	if err != nil || len(mems) == 0 {
+		return nil
+	}
+	out := make([]decision.LongTermReflectionContext, 0, hardCap)
+	for _, m := range mems {
+		when := m.CreatedAt
+		if m.TradingDate.Valid {
+			when = m.TradingDate.Time
+		}
+		if when.Before(cutoff) {
+			continue
+		}
+		out = append(out, decision.LongTermReflectionContext{
+			CreatedAt: when.UTC().Format("2006-01-02"),
+			Title:     strings.TrimSpace(m.Title.String),
+			Content:   strings.TrimSpace(m.Content),
+			Tags:      m.Tags,
+		})
+		if len(out) >= hardCap {
+			break
+		}
+	}
+	return out
+}
+
+// lessonContextTradingDate picks the lesson's effective trading-day
+// stamp: prefer the explicit memories.trading_date column when set,
+// otherwise fall back to created_at. Both come from the same repo
+// scan so no extra round-trip is needed.
+func lessonContextTradingDate(m repository.Memory) time.Time {
+	if m.TradingDate.Valid {
+		return m.TradingDate.Time
+	}
+	return m.CreatedAt
+}
+
+// lessonContextAgentRole resolves the agent's role for a per-agent
+// lesson memory. Returns "" when the memory lacks an agent_id or the
+// lookup fails (memory is then rendered as fund-wide context).
+func lessonContextAgentRole(ctx context.Context, agentRepo *repository.AgentRepo, m repository.Memory) string {
+	if agentRepo == nil || !m.AgentID.Valid {
+		return ""
+	}
+	agent, err := agentRepo.GetByID(ctx, m.AgentID.String)
+	if err != nil || agent == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(agent.Role))
 }
 
 // buildCorrelations is the Sprint C #2 entry point. Composes the
@@ -14455,6 +15294,165 @@ func (a *runtimePMAgent) buildQualityScores(ctx context.Context, fundMarket stri
 	return a.qualitySvc.BuildScores(ctx, requests)
 }
 
+// buildValueScores assembles the Sprint F #1 cross-sectional
+// value-factor table for the LLM prompt. Same universe ∪
+// positions request set as buildQualityScores; the fundamental
+// fetcher's cache makes the second pass effectively free.
+//
+// Returns nil when the value service isn't wired (legacy /
+// fundamental-disabled deployments) or when nothing in the
+// candidate set is non-empty. The prompt builder treats nil
+// as "feature off" and silently omits the block. The PM falls
+// back on the existing FundamentalSummary text + QualityScores.
+func (a *runtimePMAgent) buildValueScores(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition) []decision.SymbolValueScore {
+	if a == nil || a.valueSvc == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	requests := make([]value.SymbolRequest, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, value.SymbolRequest{Symbol: key, Market: market})
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := market
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, value.SymbolRequest{Symbol: key, Market: mk})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return a.valueSvc.BuildScores(ctx, requests)
+}
+
+// buildLowBetaScores assembles the Sprint F #2 Frazzini-Pedersen
+// Betting-Against-Beta defensive overlay table for the LLM
+// prompt. Same universe ∪ positions request set as
+// buildQuantSnapshots; the ohlc fetcher's cache makes the
+// per-symbol bar fetches free (they were already requested by
+// quantSnapshot / ranker / correlation). The lowbeta service
+// also fires one extra fetch per distinct market for the
+// market-index bars (SPY / CSI300 ETF / Tracker Fund of HK)
+// which is amortised across the whole fund's portfolio.
+//
+// Returns nil when the lowbeta service isn't wired (legacy /
+// OHLC-disabled deployments) or when nothing in the candidate
+// set is non-empty. The prompt builder treats nil as
+// "feature off" and silently omits the block.
+func (a *runtimePMAgent) buildLowBetaScores(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition) []decision.SymbolLowBetaScore {
+	if a == nil || a.lowBetaSvc == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	requests := make([]lowbeta.SymbolRequest, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, lowbeta.SymbolRequest{Symbol: key, Market: market})
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := market
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, lowbeta.SymbolRequest{Symbol: key, Market: mk})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return a.lowBetaSvc.BuildScores(ctx, requests)
+}
+
+// buildPEAD assembles the Sprint F #3 Post-Earnings Announcement
+// Drift snapshot. Reuses the universe ∪ positions candidate set
+// the rest of the per-symbol blocks already build off. The
+// service internally:
+//   - calls earnings.HistoryService once to pull the trailing
+//     60d earnings prints (Yahoo by default)
+//   - calls ohlc.Fetch once per symbol with a recent print to
+//     compute (entryClose, currentClose) → drift
+//   - classifies each into {continuing, complete, faded, neutral}
+//
+// Both the earnings history call and the OHLC pulls hit the
+// shared caches (history doesn't have a cache layer yet — Sprint
+// G candidate — but Yahoo's keyless endpoint is fast enough for
+// the symbol counts we run).
+//
+// Returns nil when the PEAD service isn't wired OR when nothing
+// in the candidate set has a recent print → the prompt block is
+// silently absent.
+func (a *runtimePMAgent) buildPEAD(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition) *decision.PEADSnapshot {
+	if a == nil || a.peadSvc == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	requests := make([]pead.SymbolRequest, 0, len(universe)+len(positions))
+	for _, sym := range universe {
+		key := strings.ToUpper(strings.TrimSpace(sym))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		requests = append(requests, pead.SymbolRequest{Symbol: key, Market: market})
+	}
+	for _, pos := range positions {
+		key := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		mk := market
+		if posMarket := strings.ToLower(strings.TrimSpace(pos.Market)); posMarket != "" {
+			mk = posMarket
+		}
+		requests = append(requests, pead.SymbolRequest{Symbol: key, Market: mk})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	return a.peadSvc.BuildSnapshot(ctx, requests)
+}
+
 // buildQuantSnapshots assembles the per-symbol regime + ATR +
 // position-size-ceiling block for the LLM prompt. Sprint A #1.
 //
@@ -14526,6 +15524,172 @@ func (a *runtimePMAgent) buildQuantSnapshots(ctx context.Context, fundMarket str
 		return nil
 	}
 	return out
+}
+
+// buildIntradaySnapshots is the Sprint 3 / L1 builder. Mirrors
+// buildQuantSnapshots' dedup-then-fetch shape but uses the cheaper
+// 5m intraday provider and returns DecisionInput.IntradaySnapshots.
+// nil-safe: when the intraday builder is unwired (legacy fund profiles
+// without intraday OHLC) it returns nil and the prompt block is
+// silently omitted.
+func (a *runtimePMAgent) buildIntradaySnapshots(ctx context.Context, fundMarket string, universe []string, positions []decision.DecisionPosition, asOf time.Time) []decision.IntradayContext {
+	if a == nil || a.intradayBuilder == nil {
+		return nil
+	}
+	market := strings.ToLower(strings.TrimSpace(fundMarket))
+	seen := make(map[string]struct{}, len(universe)+len(positions))
+	symbols := make([]string, 0, len(universe)+len(positions))
+	addSym := func(raw string) {
+		key := strings.ToUpper(strings.TrimSpace(raw))
+		if key == "" {
+			return
+		}
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		symbols = append(symbols, key)
+	}
+	for _, s := range universe {
+		addSym(s)
+	}
+	for _, p := range positions {
+		addSym(p.Symbol)
+	}
+	if len(symbols) == 0 {
+		return nil
+	}
+	snaps := a.intradayBuilder.Build(ctx, symbols, market, asOf)
+	if len(snaps) == 0 {
+		return nil
+	}
+	out := make([]decision.IntradayContext, 0, len(snaps))
+	for _, s := range snaps {
+		out = append(out, decision.IntradayContext{
+			Symbol:         s.Symbol,
+			Interval:       s.Interval,
+			TrendDirection: s.TrendDirection,
+			LastClose:      s.LastClose,
+			OpenClose:      s.OpenClose,
+			VolZScore:      s.VolZScore,
+			VolRatio:       s.VolRatio,
+		})
+	}
+	return out
+}
+
+// buildSemanticRecall is the Sprint 3 / L3 hook. It encodes the
+// current daily context (macro briefing + universe symbols) into an
+// embedding vector and asks recall.Service for the k most-similar
+// past memories. Returns nil on every soft-failure path — the prompt
+// builder then simply omits the SemanticRecall block.
+//
+// Soft failure cases (no error propagated):
+//   - recall service / embedder unwired (no OPENAI_API_KEY or
+//     pgvector extension missing — embed_loop also short-circuits in
+//     that case, so the column is unpopulated and Query returns
+//     nothing).
+//   - embed call fails (network, rate limit).
+//   - Query returns zero rows (no embedded memories exist yet for
+//     this fund).
+func (a *runtimePMAgent) buildSemanticRecall(ctx context.Context, fundID, macroBriefing string, universe []string) []decision.SemanticRecallContext {
+	if a == nil || a.recall == nil || a.recallEmbedder == nil {
+		return nil
+	}
+	query := buildSemanticRecallQueryText(macroBriefing, universe)
+	if strings.TrimSpace(query) == "" {
+		return nil
+	}
+	embedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	vec, err := a.recallEmbedder.Embed(embedCtx, query)
+	if err != nil {
+		slog.Debug("semantic recall: embed query failed",
+			"fund_id", fundID,
+			"err", err,
+		)
+		return nil
+	}
+	if len(vec) == 0 {
+		return nil
+	}
+	hits, err := a.recall.Query(ctx, fundID, "", vec, 8)
+	if err != nil {
+		slog.Debug("semantic recall: query failed",
+			"fund_id", fundID,
+			"err", err,
+		)
+		return nil
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+	out := make([]decision.SemanticRecallContext, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, decision.SemanticRecallContext{
+			CreatedAt:  h.CreatedAt.Format(time.RFC3339),
+			Layer:      h.Layer,
+			Title:      h.Title,
+			Snippet:    h.Snippet,
+			Tags:       h.Tags,
+			Similarity: h.Similarity,
+		})
+	}
+	return out
+}
+
+// buildContradictionViews materialises a []ResearcherView from the
+// orchestrator's already-extracted bull/bear/quant cases. We drop
+// blank cases so the checker doesn't lose count of "real" voices —
+// a debate where only bull spoke would otherwise look like a 3-view
+// run with 2 empty bodies and the checker would short-circuit on the
+// wrong condition.
+func buildContradictionViews(bull, bear, quant, stance string) []contradiction.ResearcherView {
+	views := make([]contradiction.ResearcherView, 0, 3)
+	addView := func(role, body string) {
+		body = strings.TrimSpace(body)
+		if body == "" {
+			return
+		}
+		views = append(views, contradiction.ResearcherView{
+			Role:   role,
+			Stance: strings.TrimSpace(stance),
+			Body:   body,
+		})
+	}
+	addView("bull", bull)
+	addView("bear", bear)
+	addView("quant", quant)
+	return views
+}
+
+// buildSemanticRecallQueryText composes the embed-input text from the
+// (a) current MacroBriefing summary and (b) the trimmed candidate
+// universe. Truncated tight so the embed cost stays bounded — for
+// recall purposes the macro summary is what should drive the search;
+// universe symbols are tail context that may or may not survive
+// truncation downstream.
+func buildSemanticRecallQueryText(macroBriefing string, universe []string) string {
+	var sb strings.Builder
+	macro := strings.TrimSpace(macroBriefing)
+	if macro != "" {
+		if len(macro) > 600 {
+			macro = macro[:600]
+		}
+		sb.WriteString(macro)
+	}
+	if len(universe) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("Universe: ")
+		max := 20
+		if len(universe) < max {
+			max = len(universe)
+		}
+		sb.WriteString(strings.Join(universe[:max], ", "))
+	}
+	return sb.String()
 }
 
 // buildSleeveScorecard renders the attribution scorecard for the
@@ -15330,20 +16494,48 @@ func (a *runtimeApprovalGateway) runAutoExecuteGuardrails(
 	return decision
 }
 
-// extractPlanConfidence reads the plan-level confidence from the
-// preferred sources in order:
+// extractPlanConfidence resolves the plan-level confidence that the
+// auto-execute gate compares against MinConfidence.
 //
-//  1. dbPlan.Confidence (the typed column added in migration 033).
-//     Always set when the LLM decision engine ran.
-//  2. risk_review JSON {"confidence": ...} as a fallback for plans
+// Resolution order:
+//
+//  1. Server-side enforcement of the system-prompt rule "plan-level
+//     confidence is the lower bound across actions you actually want
+//     executed; don't inflate it." When at least one executing-verb
+//     action (buy/sell/add/reduce) carries a valid action-level
+//     confidence, the minimum across those actions becomes
+//     authoritative. This deliberately overrides whatever the PM
+//     reported as plan-level confidence, because we've observed the
+//     PM mis-applying the rule in two directions:
+//       - under-pricing: averaging in watch/hold conf and reporting
+//         plan_conf below the executing min (real prod incident on
+//         OCS fund 2026-05-26T02:10 UTC — buy@0.74 + watch@0.50 →
+//         plan_conf 0.55 → auto-rejected by the 0.60 floor; same
+//         buy fired again 4h later with plan_conf=0.75 and filled);
+//       - inflation: stamping plan_conf above what its weakest
+//         executing action supports, slipping a marginal trade past
+//         the gate.
+//     Watch/hold confidences are intentionally excluded because the
+//     prompt says they are not part of the bar.
+//
+//  2. dbPlan.Confidence (the typed column added in migration 033).
+//     Always set when the LLM decision engine ran; used when the
+//     plan has zero executing actions (pure watch/hold day) or every
+//     executing action has null confidence.
+//
+//  3. risk_review JSON {"confidence": ...} as a fallback for plans
 //     written before migration 033 (or by callers that haven't yet
 //     been wired through PlanRepo.UpdateConfidence).
-//  3. The arithmetic mean of action-level confidences when both
-//     above are missing, so a legacy plan still has *some* number.
+//
+//  4. The arithmetic mean of all action-level confidences as a last
+//     resort, so a legacy plan still has *some* number.
 //
 // Returns 0 when no signal is available — the gate then fails the
 // confidence guardrail, which is the conservative outcome.
 func extractPlanConfidence(plan *repository.InvestmentPlan, actions []repository.PlanAction) float64 {
+	if execMin, ok := minExecutingActionConfidence(actions); ok {
+		return execMin
+	}
 	if plan != nil && plan.Confidence.Valid {
 		return plan.Confidence.Float64
 	}
@@ -15370,6 +16562,46 @@ func extractPlanConfidence(plan *repository.InvestmentPlan, actions []repository
 		return 0
 	}
 	return sum / float64(count)
+}
+
+// isExecutingAction reports whether an action verb actually moves
+// capital. The PM's universe is {buy, sell, add, reduce, hold,
+// watch}; only the first four place orders. Used by the auto-execute
+// confidence floor and anywhere else that needs to separate
+// "actually trading" from "advisory only".
+func isExecutingAction(verb string) bool {
+	switch strings.ToLower(strings.TrimSpace(verb)) {
+	case "buy", "sell", "add", "reduce":
+		return true
+	default:
+		return false
+	}
+}
+
+// minExecutingActionConfidence returns the smallest action-level
+// confidence across the subset of actions that will actually trade.
+// When no such action carries a valid confidence (watch-only plan,
+// legacy plan with null action conf, etc.) it reports ok=false so
+// the caller can fall back to the PM-reported plan-level number.
+func minExecutingActionConfidence(actions []repository.PlanAction) (float64, bool) {
+	minConf := math.Inf(1)
+	ok := false
+	for _, a := range actions {
+		if !a.Confidence.Valid {
+			continue
+		}
+		if !isExecutingAction(a.Action) {
+			continue
+		}
+		if a.Confidence.Float64 < minConf {
+			minConf = a.Confidence.Float64
+		}
+		ok = true
+	}
+	if !ok {
+		return 0, false
+	}
+	return minConf, true
 }
 
 // persistAutoExecuteAudit writes the gate decision into the plan's
@@ -15684,6 +16916,37 @@ func terminalActionStatus(s string) string {
 	}
 }
 
+// ReportPartialFill implements workflow.PartialFillReporter (Sprint 3 / L2).
+// Returns true when the plan has BOTH successful and failed plan_actions.
+// "Successful" = execution_status ∈ {filled, executed, partial}. "Failed"
+// = execution_status ∈ {failed, cancelled, rejected}. Pending / blank
+// status counts toward neither — partial fail is only stamped when we
+// have hard evidence of at least one fill and at least one miss.
+func (e *runtimeTradingEngine) ReportPartialFill(ctx context.Context, planID string) (bool, error) {
+	if e == nil || e.planRepo == nil {
+		return false, nil
+	}
+	actions, err := e.planRepo.GetActions(ctx, planID)
+	if err != nil {
+		return false, fmt.Errorf("partial-fill: list actions: %w", err)
+	}
+	hasSuccess := false
+	hasFailure := false
+	for _, a := range actions {
+		status := strings.ToLower(strings.TrimSpace(a.ExecutionStatus))
+		switch status {
+		case "filled", "executed", "partial":
+			hasSuccess = true
+		case "failed", "cancelled", "rejected":
+			hasFailure = true
+		}
+		if hasSuccess && hasFailure {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (e *runtimeTradingEngine) Settle(ctx context.Context, fundID string, tradingDate string) error {
 	fund, err := e.fundRepo.GetByID(ctx, fundID)
 	if err != nil {
@@ -15826,6 +17089,22 @@ func (e *runtimeTradingEngine) executePlanAction(
 		}
 		return status, err
 	}
+	// Sprint 1 / S6: for TWAP / VWAP requested strategies, slice the
+	// order into N child fills with a simulated intraday-VWAP-anchored
+	// execution price. The simulator stays single-trade-per-DB-row
+	// (slicing across rows would explode the audit trail), but the
+	// orderPrice we record is the SLICE-AVERAGED VWAP, which gives the
+	// LLM PM honest feedback that "asking for TWAP on a 20% NAV buy
+	// would have got me X bps better than immediate."
+	if priceAdj, sliced := e.applyStrategyExecutionPrice(action, side, orderPrice, planPrice); sliced {
+		orderPrice = priceAdj
+		amount = roundCurrency(float64(quantity) * orderPrice)
+		feeCommission = roundCurrency(amount * 0.001)
+		if side == "sell" {
+			feeStampTax = roundCurrency(amount * 0.001)
+		}
+		filledPrice = sql.NullFloat64{Float64: orderPrice, Valid: orderPrice > 0}
+	}
 	if side == "buy" {
 		totalDebit := amount + feeCommission + feeTransfer + feeStampTax
 		if totalDebit > *availableCash+0.0001 {
@@ -15862,6 +17141,113 @@ func (e *runtimeTradingEngine) executePlanAction(
 	*availableCash = roundCurrency(*availableCash + netCredit)
 	recordHardRiskTrade(hardRisk, action, side, quantity, orderPrice, amount, status)
 	return status, nil
+}
+
+// applyStrategyExecutionPrice is the Sprint 1 / S6 execution-strategy
+// dispatch. It returns (adjustedPrice, sliced=true) when the action's
+// strategy hint asks for a TWAP/VWAP simulation, and (orderPrice, false)
+// otherwise so the caller knows whether to re-derive notional / fees.
+//
+// We model a TWAP/VWAP fill in the simulator as a single DB row whose
+// filled_price equals the average of N slices (default 5) of the day's
+// reference price ± a small random slippage per slice. The average is
+// what the live broker would have reported back; keeping it to one DB
+// row preserves the audit trail and avoids cascading changes through
+// position lots / NAV snapshots. The slippage budget is bounded by the
+// per-strategy cap so a buggy or hostile plan can't move the simulated
+// price arbitrarily.
+//
+// strategy hint resolution:
+//   - "twap" / "vwap"   → slice and average
+//   - "limit"           → reserved; falls back to immediate (the limit-
+//                          book simulator lands in Sprint 5).
+//   - "" / "immediate"  → no change
+//   - unknown values    → no change (forward-compatible)
+func (e *runtimeTradingEngine) applyStrategyExecutionPrice(action repository.PlanAction, side string, orderPrice, planPrice float64) (float64, bool) {
+	if orderPrice <= 0 {
+		return orderPrice, false
+	}
+	strategy := strings.ToLower(strings.TrimSpace(action.Strategy.String))
+	if strategy != "twap" && strategy != "vwap" {
+		return orderPrice, false
+	}
+	const (
+		slices       = 5
+		maxSlipPerSlice = 0.0015 // ±15 bps per slice
+	)
+	// Anchor the slice-average drift around 1× orderPrice so the
+	// simulator reflects "fills came in close to the day's VWAP".
+	// Use a deterministic RNG seeded from the action ID + symbol so
+	// repeated executes of the same plan return identical fills (the
+	// audit replay path depends on this).
+	seed := stableSeedFromActionID(action.ID, action.Symbol)
+	rng := newDeterministicRNG(seed)
+	total := 0.0
+	for i := 0; i < slices; i++ {
+		// Each slice's price = orderPrice × (1 + bias) where bias is
+		// in [-maxSlipPerSlice, +maxSlipPerSlice]. Buys average
+		// SLIGHTLY above the day's price (you pay the spread), sells
+		// SLIGHTLY below — matching empirical TWAP slippage profiles.
+		bias := (rng.NextFloat64()*2 - 1) * maxSlipPerSlice
+		if side == "buy" {
+			bias += maxSlipPerSlice * 0.20 // small directional bias
+		} else if side == "sell" {
+			bias -= maxSlipPerSlice * 0.20
+		}
+		total += orderPrice * (1 + bias)
+	}
+	avgPrice := total / float64(slices)
+	// Round to 4 dp so the persisted price doesn't look fake-precise.
+	avgPrice = math.Round(avgPrice*10000) / 10000
+	_ = planPrice
+	return avgPrice, true
+}
+
+// stableSeedFromActionID hashes the action ID + symbol into a
+// 64-bit seed so the TWAP/VWAP simulator is deterministic per action.
+// A fresh execution call on the same approved action returns the
+// same fill price; useful for audit replay and for the "rerun a
+// failed step" recovery path.
+func stableSeedFromActionID(actionID, symbol string) uint64 {
+	var seed uint64 = 14695981039346656037 // FNV-1a 64 offset
+	for _, b := range []byte(actionID) {
+		seed ^= uint64(b)
+		seed *= 1099511628211
+	}
+	for _, b := range []byte(symbol) {
+		seed ^= uint64(b)
+		seed *= 1099511628211
+	}
+	if seed == 0 {
+		seed = 1
+	}
+	return seed
+}
+
+// deterministicRNG is a tiny xorshift64* used only by the strategy
+// simulator. We avoid the standard math/rand global to keep the
+// simulator's results deterministic per action even when many
+// goroutines share the engine.
+type deterministicRNG struct {
+	state uint64
+}
+
+func newDeterministicRNG(seed uint64) *deterministicRNG {
+	if seed == 0 {
+		seed = 1
+	}
+	return &deterministicRNG{state: seed}
+}
+
+func (r *deterministicRNG) next() uint64 {
+	r.state ^= r.state >> 12
+	r.state ^= r.state << 25
+	r.state ^= r.state >> 27
+	return r.state * 2685821657736338717
+}
+
+func (r *deterministicRNG) NextFloat64() float64 {
+	return float64(r.next()>>11) / (1 << 53)
 }
 
 func (e *runtimeTradingEngine) buildHardRiskState(ctx context.Context, fund *repository.Fund, plan *repository.InvestmentPlan) (*hardRiskState, error) {
@@ -17797,9 +19183,31 @@ func (m *runtimeMemorySystem) ConsolidateDaily(ctx context.Context, fundID strin
 		return mapRepositoryError(err)
 	}
 
-	fundLearning := m.buildFundLearning(state, learningCtx)
-	if err := m.writeLearningMemory(ctx, fundID, sql.NullString{}, "daily", tradingDate, 0, fundLearning); err != nil {
-		return mapRepositoryError(err)
+	// Per-trading-day dedupe. The workflow scheduler ticks intraday
+	// funds (e.g. OCS-style 30-min cadence) 7-8 times per session;
+	// StepDailyReview runs at the END of every tick. Without the
+	// guards below we wrote a near-identical "self_learning" row per
+	// tick per agent, polluting the agent learning UI and burning
+	// LLM tokens on the (Step D) lesson generator every half-hour.
+	// We skip the WRITE but still fall through to maybeRunReflection
+	// and runDailyAttribution because those are cheap-or-cached and
+	// happen to be the steps that *want* to re-run as new ticks
+	// arrive (more memories => better long-term reflection input).
+	if m.memoryRepo != nil {
+		exists, err := m.memoryRepo.ExistsByFundAgentLayerDate(ctx, fundID, sql.NullString{}, "daily", tradingDate)
+		if err != nil {
+			slog.Warn("daily review: fund-level dedupe check failed; falling through", "fund_id", fundID, "trading_date", tradingDate.Format("2006-01-02"), "err", err)
+		} else if !exists {
+			fundLearning := m.buildFundLearning(state, learningCtx)
+			if writeErr := m.writeLearningMemory(ctx, fundID, sql.NullString{}, "daily", tradingDate, 0, fundLearning); writeErr != nil {
+				return mapRepositoryError(writeErr)
+			}
+		}
+	} else {
+		fundLearning := m.buildFundLearning(state, learningCtx)
+		if err := m.writeLearningMemory(ctx, fundID, sql.NullString{}, "daily", tradingDate, 0, fundLearning); err != nil {
+			return mapRepositoryError(err)
+		}
 	}
 
 	if m.teamRepo == nil || m.agentRepo == nil {
@@ -17822,7 +19230,40 @@ func (m *runtimeMemorySystem) ConsolidateDaily(ctx context.Context, fundID strin
 		if !learningScopeAllowsFund(learningScopeFromConfig(config), fundID) {
 			continue
 		}
-		learning := m.buildAgentLearning(member, agent, state, learningCtx, maxLessons)
+		// Sprint 3 / M7: skip the whole learning stack for an agent
+		// whose lastLearningDate already equals today AND zero
+		// trades happened today fund-wide. This is a strict no-op:
+		// the fact that learning previously ran today means lessons
+		// are already on disk, and a zero-trade tick adds no new
+		// signal. We check fundDayTradeCount (not the plan-scoped
+		// learningCtx.trades) because intraday cadence funds emit a
+		// "watch only" plan at end-of-day whose plan-scoped trades
+		// list is empty even though earlier plans the same day
+		// produced real fills — those still count as new signal.
+		// The check sits outside the dedupe path because we want to
+		// skip BOTH the LLM call and the DB write — the existence
+		// dedupe below would only skip the write.
+		if existingLearningCoversToday(config, tradingDate) && learningCtx.fundDayTradeCount == 0 {
+			continue
+		}
+		// Per-agent dedupe — see fund-level rationale above. Doing
+		// the existence check BEFORE buildAgentLearning matters
+		// because that call now (Step D) invokes the LLM lesson
+		// generator, which we want to charge for at most once per
+		// agent per trading day. Partial-failure recovery: if the
+		// previous tick's loop crashed after fund row but before
+		// some agent rows, those un-written agents still flow
+		// through this iteration normally.
+		if m.memoryRepo != nil {
+			exists, existsErr := m.memoryRepo.ExistsByFundAgentLayerDate(ctx, fundID, nullUUID(agent.ID), "agent", tradingDate)
+			if existsErr == nil && exists {
+				continue
+			}
+			if existsErr != nil {
+				slog.Warn("daily review: per-agent dedupe check failed; proceeding with write", "fund_id", fundID, "agent_id", agent.ID, "trading_date", tradingDate.Format("2006-01-02"), "err", existsErr)
+			}
+		}
+		learning := m.buildAgentLearning(ctx, member, agent, state, learningCtx, maxLessons)
 		dailyReturn := 0.0
 		if learningCtx.nav != nil {
 			dailyReturn = learningCtx.nav.DailyReturn
@@ -17913,6 +19354,23 @@ func (m *runtimeMemorySystem) buildLearningContext(ctx context.Context, fundID s
 			return nil, err
 		}
 		result.trades = trades
+		// Fund-wide day trade count for the LLM-lesson gate. Skip the
+		// second query when the plan-scoped result already covers the
+		// whole day (i.e. plan==nil branch above) — those are the
+		// same rows.
+		if result.plan != nil {
+			start := tradingDate
+			end := tradingDate.Add(24*time.Hour - time.Nanosecond)
+			dayTrades, listErr := m.tradeRepo.ListByFund(ctx, fundID, start, end, 200)
+			if listErr != nil {
+				slog.Warn("learning context: fund-wide day trade count failed; falling back to plan scope", "fund_id", fundID, "err", listErr)
+				result.fundDayTradeCount = len(trades)
+			} else {
+				result.fundDayTradeCount = len(dayTrades)
+			}
+		} else {
+			result.fundDayTradeCount = len(trades)
+		}
 	}
 	if len(result.positions) == 0 && m.positionRepo != nil {
 		positions, err := m.positionRepo.ListByFund(ctx, fundID)
@@ -18007,7 +19465,7 @@ func (m *runtimeMemorySystem) buildFundLearning(state workflow.WorkflowState, le
 	}
 }
 
-func (m *runtimeMemorySystem) buildAgentLearning(member repository.TeamMember, agent *repository.Agent, state workflow.WorkflowState, learningCtx *learningContext, maxLessons int) learningResult {
+func (m *runtimeMemorySystem) buildAgentLearning(ctx context.Context, member repository.TeamMember, agent *repository.Agent, state workflow.WorkflowState, learningCtx *learningContext, maxLessons int) learningResult {
 	tradeStats := summarizeTrades(learningCtx.actions, learningCtx.trades)
 	dailyReturn := 0.0
 	if learningCtx != nil && learningCtx.nav != nil {
@@ -18020,6 +19478,7 @@ func (m *runtimeMemorySystem) buildAgentLearning(member repository.TeamMember, a
 	adjustments := []string{}
 	role := strings.ToLower(strings.TrimSpace(member.Role))
 	focus := strings.TrimSpace(member.Focus.String)
+	_ = agent // reserved for future per-agent prompt customisation
 
 	switch role {
 	case "pm":
@@ -18109,6 +19568,30 @@ func (m *runtimeMemorySystem) buildAgentLearning(member repository.TeamMember, a
 		adjustments = append(adjustments, "次日优先保留有效做法并剔除重复失误。")
 	}
 
+	// Step D: replace the role-templated lessons/adjustments with an
+	// LLM-generated pair grounded in the actual day. Templates are kept
+	// as the deterministic fallback so model errors never wedge the
+	// daily review; the gate function prevents us from paying for an
+	// LLM call on truly-quiet days (no fills, no rejects, flat NAV)
+	// where the templates and the LLM would say roughly the same
+	// thing anyway.
+	if m.shouldGenerateLLMLessons(learningCtx, tradeStats, dailyReturn) {
+		if llmLessons, llmAdjustments, err := m.generateAgentLessonsLLM(ctx, role, focus, learningCtx, tradeStats, dailyReturn, maxLessons); err == nil {
+			if len(llmLessons) > 0 {
+				lessons = llmLessons
+			}
+			if len(llmAdjustments) > 0 {
+				adjustments = llmAdjustments
+			}
+		} else {
+			fundIDForLog := ""
+			if learningCtx != nil && learningCtx.fund != nil {
+				fundIDForLog = learningCtx.fund.ID
+			}
+			slog.Warn("daily review: llm lesson generation failed; keeping role templates", "fund_id", fundIDForLog, "role", role, "err", err)
+		}
+	}
+
 	if len(learningCtx.actions) == 0 {
 		misses = append(misses, "缺少可执行动作，导致学习样本不足。")
 	}
@@ -18139,6 +19622,510 @@ func (m *runtimeMemorySystem) buildAgentLearning(member repository.TeamMember, a
 		Tags:           tags,
 		Specialization: specialization,
 	}
+}
+
+// shouldGenerateLLMLessons gates whether to spend an LLM call on
+// realistic lessons/adjustments for this agent today. The deterministic
+// templates are good enough when NOTHING happened (no fills, no
+// rejects, flat NAV, no actions) — in that case the LLM would
+// produce another version of "today was uneventful, keep monitoring"
+// and waste tokens.
+//
+// We say "yes, call the LLM" if any of these are true:
+//   - daily return is non-zero (real PnL signal)
+//   - any trade was filled, partial, or rejected (execution signal)
+//   - the plan emitted at least one buy/sell/reduce/add action that
+//     the prompt can dissect (planning signal)
+//
+// nil runtime always short-circuits to false (covers test fixtures
+// that don't wire an LLM).
+func (m *runtimeMemorySystem) shouldGenerateLLMLessons(learningCtx *learningContext, tradeStats tradeSummary, dailyReturn float64) bool {
+	if m == nil || m.llmRuntime == nil || learningCtx == nil {
+		return false
+	}
+	if math.Abs(dailyReturn) > 1e-9 {
+		return true
+	}
+	if tradeStats.filled > 0 || tradeStats.partial > 0 || tradeStats.rejected > 0 {
+		return true
+	}
+	// Fund-wide day trade count covers the intraday-cadence case
+	// where the selected plan is a watch-only late-day tick but
+	// earlier ticks of the SAME day produced fills — the day still
+	// has something worth reflecting on.
+	if learningCtx.fundDayTradeCount > 0 {
+		return true
+	}
+	for _, a := range learningCtx.actions {
+		switch strings.ToLower(strings.TrimSpace(a.Action)) {
+		case "buy", "sell", "add", "reduce":
+			return true
+		}
+	}
+	return false
+}
+
+// generateAgentLessonsLLM asks the standard-tier model to write today's
+// lessons and tomorrow's adjustments for a specific agent role, in
+// Chinese, grounded in concrete numbers from learningCtx. Returns
+// (lessons, adjustments, nil) on success.
+//
+// Cost shape: with the per-trading-day dedupe in ConsolidateDaily this
+// runs at most once per (fund, agent, day), so on the OCS Selection
+// fund (4 agents, 1 trading day) it's 4 standard-tier requests per
+// day — bounded and cheap.
+//
+// We deliberately request a tight JSON schema rather than free text
+// because the caller treats the output as `[]string`; a malformed
+// response (or no JSON at all) returns an error and the caller falls
+// back to the role templates.
+func (m *runtimeMemorySystem) generateAgentLessonsLLM(ctx context.Context, role, focus string, learningCtx *learningContext, tradeStats tradeSummary, dailyReturn float64, maxLessons int) ([]string, []string, error) {
+	if m == nil || m.llmRuntime == nil {
+		return nil, nil, errors.New("memory: llm runtime not configured")
+	}
+	if learningCtx == nil || learningCtx.fund == nil {
+		return nil, nil, errors.New("memory: learning context missing fund")
+	}
+
+	cap := normalizedMaxLessons(maxLessons)
+	if cap < 2 {
+		cap = 2
+	}
+
+	// Pull at most 5 top holdings into the prompt so the model can
+	// cite symbol-level facts ("301308 仓位 6.4%") instead of
+	// abstract role advice. We sort by absolute MarketValue descending.
+	type holdingLine struct {
+		symbol string
+		weight float64
+	}
+	lines := make([]holdingLine, 0, len(learningCtx.positions))
+	for _, p := range learningCtx.positions {
+		weight := 0.0
+		if learningCtx.nav != nil && learningCtx.nav.TotalAssets > 0 {
+			weight = p.MarketValue / learningCtx.nav.TotalAssets
+		}
+		lines = append(lines, holdingLine{symbol: strings.TrimSpace(p.Symbol), weight: weight})
+	}
+	sort.SliceStable(lines, func(i, j int) bool { return math.Abs(lines[i].weight) > math.Abs(lines[j].weight) })
+	if len(lines) > 5 {
+		lines = lines[:5]
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Fund: %s\n", strings.TrimSpace(learningCtx.fund.Name))
+	fmt.Fprintf(&sb, "Trading date: %s\n", learningCtx.tradingDate.Format("2006-01-02"))
+	fmt.Fprintf(&sb, "Agent role: %s\n", role)
+	if focus != "" {
+		fmt.Fprintf(&sb, "Agent focus: %s\n", focus)
+	}
+	fmt.Fprintf(&sb, "Daily return: %.4f%%\n", dailyReturn*100)
+	fmt.Fprintf(&sb, "Trade stats: total=%d filled=%d partial=%d rejected=%d fillRatio=%.2f\n",
+		tradeStats.total, tradeStats.filled, tradeStats.partial, tradeStats.rejected, tradeStats.fillRatio)
+	if learningCtx.plan != nil {
+		fmt.Fprintf(&sb, "Plan status: %s, action count: %d\n", learningCtx.plan.Status, len(learningCtx.actions))
+	} else {
+		sb.WriteString("Plan: not generated today\n")
+	}
+	if len(lines) > 0 {
+		sb.WriteString("Top holdings (symbol, weight of NAV):\n")
+		for _, h := range lines {
+			fmt.Fprintf(&sb, "  - %s %.2f%%\n", h.symbol, h.weight*100)
+		}
+	}
+	if len(learningCtx.actions) > 0 {
+		sb.WriteString("Plan actions:\n")
+		for i, a := range learningCtx.actions {
+			if i >= 5 {
+				fmt.Fprintf(&sb, "  - … and %d more\n", len(learningCtx.actions)-5)
+				break
+			}
+			amount := a.Amount.Float64
+			fmt.Fprintf(&sb, "  - %s %s amount=%.2f exec=%s\n",
+				strings.TrimSpace(a.Symbol), strings.TrimSpace(a.Action), amount, strings.TrimSpace(a.ExecutionStatus))
+		}
+	}
+
+	// Prompt design notes (matters because the first cut of this
+	// prompt confused gemini-3.1-pro into echoing the constraint
+	// phrases as plain text instead of emitting JSON — see runtime
+	// logs around 16:01 SGT). Three rules that made it reliable:
+	//   (1) Put the "ONLY JSON" instruction in BOTH system + user
+	//       so the model can't claim it didn't see it.
+	//   (2) Show an example output so the model copies the shape
+	//       instead of paraphrasing the rule set.
+	//   (3) Keep the constraint list ≤ 4 lines; longer bullet lists
+	//       trigger paraphrasing on smaller models.
+	// Sprint 3 / M6: the example uses <SYM_A>/<SYM_B> placeholders
+	// (not real tickers) so smaller models don't latch onto a
+	// literal symbol that has nothing to do with the actual fund.
+	// We explicitly tell the model to substitute the placeholders
+	// with real symbols pulled from the fund's holdings / plan
+	// data above.
+	systemPrompt := "你是 AI 基金团队的复盘教练。基于给定的当日数据为一位 agent 生成今日复盘和明日调整方向。" +
+		"严格按 JSON 对象输出（不要 markdown 围栏、不要任何说明文字）。每条字符串：简体中文 1 句，引用数据中的具体数字、占比或股票代码，以 。 结尾。" +
+		"不允许的句子：以 \"为了让\"、\"为了实现\"、\"To maximize\"、\"To improve\" 开头的空洞陈述。\n\n" +
+		"重要：示例中的 <SYM_A> / <SYM_B> 是占位符，请用上文 Top holdings / Plan actions 里出现的真实股票代码替换；不要在最终输出中保留这两个尖括号占位符。\n\n" +
+		"输出格式（这是一个示例，必须完全照抄结构）：\n" +
+		"{\"lessons\":[\"<SYM_A> 当日成交 49984 元，仓位扩张到 5%，符合风控预期。\",\"组合当日收益持平但 watch 类标的仍占 60%，明显说明执行力度不足。\"]," +
+		"\"adjustments\":[\"明日开盘前评估 watch 类标的是否具备转 buy 条件。\",\"对 <SYM_B> 设置明确的放弃条件以减少观望成本。\"]}"
+
+	userPrompt := sb.String() +
+		"\n\n请仅输出 JSON 对象，2-3 条 lessons + 2-3 条 adjustments，每条不超过 60 个中文字符。"
+
+	req := llm.ChatRequest{
+		FundID:    learningCtx.fund.ID,
+		ModelTier: llm.TierStandard,
+		Messages: []llm.ChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		// 1200 covers up to 6 short Chinese sentences + JSON keys
+		// with room to spare. The earlier value (400) was guessed
+		// from an English context and routinely truncated CJK
+		// payloads (≈3 bytes/char) mid-string.
+		MaxTokens:   1200,
+		Temperature: 0.4,
+		StepName:    "agent_self_learning",
+	}
+
+	// No local timeout wrapper: the global 5-minute budget enforced
+	// inside llm.Client (llmTotalRequestTimeout) already caps this
+	// call. A tighter local cap was tried in an earlier iteration and
+	// produced false fallbacks against slow reasoning models — leave
+	// the parent ctx alone and let the client be the one source of
+	// truth for "this took too long".
+	resp, err := m.llmRuntime.Chat(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp == nil {
+		return nil, nil, errors.New("memory: empty LLM response")
+	}
+
+	lessons, adjustments, err := parseAgentLessonsResponse(resp.Content, cap)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Sprint 3 / M2 fact-check: drop any string that mentions a
+	// symbol the fund doesn't actually trade or a percentage that
+	// is wildly inconsistent with today's actual numbers. This
+	// neutralises the most common LLM hallucinations (latched on a
+	// stale ticker, or invented a "+12%" gain when daily return was
+	// flat) without us having to ask the model to verify itself.
+	ctxCheck := buildLessonFactCheckContext(learningCtx, dailyReturn)
+	lessons = factCheckLessonStrings(lessons, ctxCheck)
+	adjustments = factCheckLessonStrings(adjustments, ctxCheck)
+	if len(lessons) == 0 || len(adjustments) == 0 {
+		return nil, nil, errors.New("memory: LLM returned empty lessons or adjustments")
+	}
+	return lessons, adjustments, nil
+}
+
+// parseAgentLessonsResponse pulls {"lessons":[…], "adjustments":[…]}
+// out of an LLM message body. Implementations sometimes wrap the JSON
+// in ```json fences or add a preamble sentence; we slice from the
+// first '{' to the last '}' to survive that. Returns trimmed,
+// deduped, capped lists; a string that fails the "ends with 。"
+// shape is dropped (cheap proxy for "got a half-sentence
+// fragment").
+func parseAgentLessonsResponse(raw string, cap int) ([]string, []string, error) {
+	body := strings.TrimSpace(raw)
+	start := strings.Index(body, "{")
+	end := strings.LastIndex(body, "}")
+	if start < 0 || end <= start {
+		return nil, nil, fmt.Errorf("memory: LLM response missing JSON object: %q", truncatePreview(body, 120))
+	}
+	body = body[start : end+1]
+
+	var parsed struct {
+		Lessons     []string `json:"lessons"`
+		Adjustments []string `json:"adjustments"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return nil, nil, fmt.Errorf("memory: parse LLM lessons JSON: %w", err)
+	}
+	clean := func(in []string) []string {
+		out := make([]string, 0, len(in))
+		seen := make(map[string]struct{}, len(in))
+		for _, s := range in {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			// Reject fragments that don't look like full sentences.
+			// LLMs occasionally produce 一句没说完 endings; we'd rather
+			// fall back to templates than serve those.
+			lastRune := []rune(s)
+			if len(lastRune) == 0 {
+				continue
+			}
+			tail := lastRune[len(lastRune)-1]
+			if tail != '。' && tail != '.' && tail != '!' && tail != '?' && tail != '！' && tail != '？' {
+				continue
+			}
+			if _, dup := seen[s]; dup {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+		if cap > 0 && len(out) > cap {
+			out = out[:cap]
+		}
+		return out
+	}
+	return clean(parsed.Lessons), clean(parsed.Adjustments), nil
+}
+
+// truncatePreview is a small helper for logging untrusted strings
+// (LLM output, raw memory content) without flooding the slog with a
+// 4KB blob. Uses runes so multi-byte CJK content gets cleanly
+// truncated.
+func truncatePreview(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+// Sprint 3 / M2: lesson fact-check.
+//
+// Goal: cheaply suppress the most common LLM lesson hallucinations
+// before they get persisted to memory. We only check two dimensions
+// because those are the two we have ground truth for:
+//
+//  1. Symbol citations. Any A-share-style 6-digit code or 1-5 letter
+//     US-style ticker mentioned in the lesson MUST appear in either
+//     the fund's current holdings or today's plan actions / universe
+//     references. Otherwise the model invented it.
+//
+//  2. Percent citations. A percentage in the [-100%, +100%] range
+//     MUST be within a tolerance band of either:
+//       - today's daily return (±5pp), or
+//       - any top-holding weight (±5pp).
+//     Numbers outside both bands are almost always confabulated.
+//     We intentionally allow positive numbers that look like notional
+//     dollar amounts (e.g. "49984 元") through — those are dollar
+//     figures, not percents, and aren't checkable from the inputs we
+//     have here.
+//
+// On a check failure we DROP the offending lesson; the caller still
+// receives the other surviving lessons, and the role-template
+// fallback kicks in when the entire list ends up empty (see callers
+// of generateAgentLessonsLLM).
+
+const (
+	lessonPercentToleranceBp = 5.0 // 5 percentage points; loose enough for paraphrased estimates
+)
+
+var (
+	lessonSymbolARE     = regexp.MustCompile(`(?:^|[^0-9])(\d{6})(?:[^0-9]|$)`)         // A-share style 6-digit
+	lessonSymbolUSRE    = regexp.MustCompile(`(?:^|[^A-Za-z])([A-Z]{1,5})(?:[^A-Za-z]|$)`) // US-style 1-5 cap letters
+	lessonPercentRE     = regexp.MustCompile(`(-?\d+(?:\.\d+)?)\s*%`)
+)
+
+type lessonFactCheckContext struct {
+	knownSymbols   map[string]struct{}
+	dailyReturnPct float64 // already in percent (e.g. 0.5 for +0.5%)
+	weightsPct     []float64
+}
+
+func buildLessonFactCheckContext(learningCtx *learningContext, dailyReturn float64) lessonFactCheckContext {
+	ctx := lessonFactCheckContext{
+		knownSymbols:   make(map[string]struct{}),
+		dailyReturnPct: dailyReturn * 100,
+	}
+	if learningCtx == nil {
+		return ctx
+	}
+	totalAssets := 0.0
+	if learningCtx.nav != nil {
+		totalAssets = learningCtx.nav.TotalAssets
+	}
+	for _, p := range learningCtx.positions {
+		sym := strings.TrimSpace(p.Symbol)
+		if sym != "" {
+			ctx.knownSymbols[strings.ToUpper(sym)] = struct{}{}
+		}
+		if totalAssets > 0 {
+			ctx.weightsPct = append(ctx.weightsPct, (p.MarketValue/totalAssets)*100)
+		}
+	}
+	for _, a := range learningCtx.actions {
+		sym := strings.TrimSpace(a.Symbol)
+		if sym != "" {
+			ctx.knownSymbols[strings.ToUpper(sym)] = struct{}{}
+		}
+	}
+	return ctx
+}
+
+func factCheckLessonStrings(in []string, ctx lessonFactCheckContext) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !lessonSymbolsLookSafe(s, ctx) {
+			slog.Debug("lesson fact-check: dropped (symbol)", "lesson", truncatePreview(s, 120))
+			continue
+		}
+		if !lessonPercentsLookSafe(s, ctx) {
+			slog.Debug("lesson fact-check: dropped (percent)", "lesson", truncatePreview(s, 120))
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func lessonSymbolsLookSafe(s string, ctx lessonFactCheckContext) bool {
+	if len(ctx.knownSymbols) == 0 {
+		// No ground truth available — don't drop on the symbol axis.
+		return true
+	}
+	for _, m := range lessonSymbolARE.FindAllStringSubmatch(s, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		if _, ok := ctx.knownSymbols[strings.ToUpper(m[1])]; !ok {
+			return false
+		}
+	}
+	for _, m := range lessonSymbolUSRE.FindAllStringSubmatch(s, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		sym := strings.ToUpper(m[1])
+		if _, denyAllCaps := commonAllCapsWords[sym]; denyAllCaps {
+			// Words like "PM", "NAV", "OK", "ETF" are not tickers
+			// — let those through without lookup.
+			continue
+		}
+		if _, ok := ctx.knownSymbols[sym]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func lessonPercentsLookSafe(s string, ctx lessonFactCheckContext) bool {
+	for _, m := range lessonPercentRE.FindAllStringSubmatch(s, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		val, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			continue
+		}
+		// Skip absurdly large numbers (e.g. "300%") — they're either
+		// hyperbole or a misformatted ratio; don't reward the
+		// model for them but don't drop the whole lesson either.
+		if math.Abs(val) > 100 {
+			continue
+		}
+		if math.Abs(val-ctx.dailyReturnPct) <= lessonPercentToleranceBp {
+			continue
+		}
+		allowed := false
+		for _, w := range ctx.weightsPct {
+			if math.Abs(val-w) <= lessonPercentToleranceBp {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return true
+}
+
+// decayRecentLessons drops legacy lessons whose recorded timestamp is
+// older than `cutoffDays` days when projected onto an exponential
+// half-life of `cutoffDays` (i.e. weight(age) = 0.5^(age/cutoffDays)).
+// Lessons whose weight would fall below `minWeight` are removed.
+// Lessons without a timestamp (legacy entries) are kept once but
+// stamped with `now` so the next pass can decay them properly.
+//
+// Returns (survivors, survivorTimestamps) — same length, index-aligned.
+func decayRecentLessons(lessons, timestamps []string, now time.Time, cutoffDays int, minWeight float64) ([]string, []string) {
+	if cutoffDays <= 0 {
+		cutoffDays = 60
+	}
+	survivors := make([]string, 0, len(lessons))
+	stamps := make([]string, 0, len(lessons))
+	for i, lesson := range lessons {
+		var stamp string
+		if i < len(timestamps) {
+			stamp = strings.TrimSpace(timestamps[i])
+		}
+		if stamp == "" {
+			survivors = append(survivors, lesson)
+			stamps = append(stamps, now.Format(time.RFC3339))
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, stamp)
+		if err != nil {
+			survivors = append(survivors, lesson)
+			stamps = append(stamps, now.Format(time.RFC3339))
+			continue
+		}
+		ageDays := now.Sub(t).Hours() / 24
+		if ageDays < 0 {
+			ageDays = 0
+		}
+		halfLife := float64(cutoffDays)
+		weight := math.Pow(0.5, ageDays/halfLife)
+		if weight < minWeight {
+			continue
+		}
+		survivors = append(survivors, lesson)
+		stamps = append(stamps, stamp)
+	}
+	return survivors, stamps
+}
+
+// containsStringFold is the case-insensitive variant of slices.Contains
+// for strings. Used to dedupe recentLessons before storage so the merge
+// step doesn't end up with "AAPL ..." and "aapl ..." both surviving.
+func containsStringFold(haystack []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	for _, s := range haystack {
+		if strings.EqualFold(strings.TrimSpace(s), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// existingLearningCoversToday reports whether the agent's evolution
+// config already carries a lastLearningDate matching the supplied
+// trading date. We compare in the agent's reported YYYY-MM-DD format
+// (same shape applyLearningToEvolutionConfig writes) so timezone
+// drift can't mis-trigger a re-run.
+func existingLearningCoversToday(config map[string]any, tradingDate time.Time) bool {
+	last := strings.TrimSpace(stringFromConfig(config, "lastLearningDate"))
+	if last == "" {
+		return false
+	}
+	return last == tradingDate.Format("2006-01-02")
+}
+
+// commonAllCapsWords keeps the US-ticker regex from rejecting common
+// English/Chinese-mixed prose that happens to have all-caps tokens
+// (the alternative — banning the regex altogether — would let real
+// hallucinated tickers slip through).
+var commonAllCapsWords = map[string]struct{}{
+	"PM": {}, "NAV": {}, "OK": {}, "ETF": {}, "API": {}, "ID": {},
+	"AI": {}, "ML": {}, "IPO": {}, "EPS": {}, "ROE": {}, "ROI": {},
+	"OCS": {}, "QDII": {}, "RMB": {}, "USD": {}, "EUR": {}, "CN": {},
+	"US": {}, "HK": {}, "TWD": {}, "JPY": {}, "CNY": {}, "DCF": {},
+	"PE": {}, "PB": {}, "PS": {}, "MA": {}, "RSI": {}, "MACD": {},
+	"VWAP": {}, "TWAP": {}, "P": {}, "T": {}, "B": {}, "A": {},
+	"OK?": {}, "NB": {},
 }
 
 func buildSpecializationLearningSummary(role string, learningCtx *learningContext, lessons, adjustments []string) *specializationLearningSummary {
@@ -18227,7 +20214,7 @@ func (m *runtimeMemorySystem) writeLearningMemory(ctx context.Context, fundID st
 	if err != nil {
 		return err
 	}
-	_, err = m.memoryRepo.Create(ctx, &repository.Memory{
+	memoryID, err := m.memoryRepo.Create(ctx, &repository.Memory{
 		FundID:      fundID,
 		AgentID:     agentID,
 		Layer:       layer,
@@ -18236,7 +20223,16 @@ func (m *runtimeMemorySystem) writeLearningMemory(ctx context.Context, fundID st
 		TradingDate: sql.NullTime{Time: tradingDate, Valid: true},
 		Tags:        uniqueNonEmpty(learning.Tags),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// Sprint 3 / M1: 把每条 lesson 解析成 hypothesis 落到 lineage 表，
+	// 评分 worker 之后会按窗口到期 score。代理级 lesson (layer=agent)
+	// 才落 — fund-level 那条已经聚合过了，重复入会把 hit-rate 算重。
+	if m.db != nil && layer == "agent" && len(learning.Lessons) > 0 {
+		recordLessonLineage(ctx, m.db, memoryID, fundID, agentID, learning.Lessons, tradingDate)
+	}
+	return nil
 }
 
 func extractEvolutionSpecialization(raw json.RawMessage) specializationLearningSummary {
@@ -18399,7 +20395,42 @@ func applyLearningToEvolutionConfig(config map[string]any, learning learningResu
 		config = make(map[string]any)
 	}
 	existingLessons := stringSliceFromConfig(config, "recentLessons")
-	config["recentLessons"] = limitStrings(uniqueNonEmpty(append(learning.Lessons, existingLessons...)), 8)
+	// Sprint 3 / M4: 给 recentLessons 加上指数衰减 — 60+ 天的旧 lesson
+	// 权重 < 0.1 时直接被淘汰出 recentLessons bag。新 lesson 总是带
+	// 最新 lessonsUpdatedAt timestamp，所以下次 decay 才有起算点。
+	// 我们也写入 lessonsTimestamps 数组（与 recentLessons 索引对齐）
+	// 这样下次再 decay 时知道哪条多老。读取端不读 timestamps 也无碍
+	// （legacy config 没这个字段，按 "全部认为今天写入" 处理 — 衰减
+	// 会从下一次开始生效）。
+	now := tradingDate
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	existingTimestamps := stringSliceFromConfig(config, "recentLessonsTimestamps")
+	survivors, survivorTimestamps := decayRecentLessons(existingLessons, existingTimestamps, now, 60, 0.1)
+	merged := append([]string{}, learning.Lessons...)
+	mergedTimestamps := make([]string, 0, len(learning.Lessons))
+	stamp := now.Format(time.RFC3339)
+	for range learning.Lessons {
+		mergedTimestamps = append(mergedTimestamps, stamp)
+	}
+	for i, s := range survivors {
+		if containsStringFold(merged, s) {
+			continue
+		}
+		merged = append(merged, s)
+		if i < len(survivorTimestamps) {
+			mergedTimestamps = append(mergedTimestamps, survivorTimestamps[i])
+		} else {
+			mergedTimestamps = append(mergedTimestamps, stamp)
+		}
+	}
+	merged = limitStrings(uniqueNonEmpty(merged), 8)
+	if len(mergedTimestamps) > len(merged) {
+		mergedTimestamps = mergedTimestamps[:len(merged)]
+	}
+	config["recentLessons"] = merged
+	config["recentLessonsTimestamps"] = mergedTimestamps
 	config["lastLearningSummary"] = learning.Summary
 	config["lastLearningDate"] = tradingDate.Format("2006-01-02")
 	config["lastLearningTags"] = uniqueNonEmpty(learning.Tags)
@@ -18968,6 +20999,13 @@ type fundMarketProfile struct {
 	// defaults (60-day lookback, 0.7 |rho| floor, 10 max pairs).
 	// Same nullable-field convention as ExposurePolicy.
 	CorrelationPolicy *FundCorrelationPolicy `json:"correlationPolicy,omitempty"`
+	// ReflectionCadenceDays overrides the long-term reflection
+	// rate-limit window (defaultReflectionCadenceDays = 7). nil
+	// keeps the default; setting it to e.g. 3 makes a fast-moving
+	// macro fund re-distil twice as often, while a long-horizon
+	// value fund can stretch to 14 to save LLM tokens. Clamped to
+	// [1, 30] by the consumer.
+	ReflectionCadenceDays *int `json:"reflectionCadenceDays,omitempty"`
 }
 
 // FundExposurePolicy is the per-fund override surface for the

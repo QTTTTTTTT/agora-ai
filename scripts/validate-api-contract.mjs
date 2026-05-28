@@ -74,8 +74,15 @@ function extractClientCalls() {
       const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
       for (const [index, line] of lines.entries()) {
         if (!line.includes("/api/")) continue;
-        const context = lines.slice(index, index + 5).join("\n");
-        const method = inferMethod(/\burl\s*:|fetch\s*\(/.test(line) ? context : line);
+        // Method inference is order-sensitive to avoid picking up
+        // a neighbouring helper call: we probe the literal-bearing
+        // line first (`apiGet(\`/api/...\`)`), then the 1-2 lines
+        // immediately above (`apiPost<T>(\n  url, body)`), then
+        // the 4 lines below — but only when the line itself opens
+        // a fetch/request that carries options on subsequent lines.
+        const backward = lines.slice(Math.max(0, index - 2), index).join("\n");
+        const forward = lines.slice(index + 1, index + 5).join("\n");
+        const method = inferMethod({ line, backward, forward });
         const literals = extractStringLiterals(line);
         const hasConcatenation = line.includes("+");
         for (const literal of literals) {
@@ -96,7 +103,14 @@ function extractClientCalls() {
             const joined = relevant
               .map((piece, idx) => (idx === 0 ? piece : `{param}${piece}`))
               .join("");
-            const suffix = /\+\s*[A-Za-z_$][\w$.[\]]*\s*\)?\s*;?$/.test(line.trim()) ? "{param}" : "";
+            // A trailing `+ identifier` extends the path with one
+            // more {param}. We recognise both terminal forms
+            // ('...+x);' and '...+x, body);') so miniapp helpers
+            // that pass an extra payload after a path param still
+            // produce the full route shape.
+            const trimmed = line.trim();
+            const trailingParam = /\+\s*[A-Za-z_$][\w$.[\]]*\s*(?:,[^)]*)?\)?\s*;?\s*$/.test(trimmed);
+            const suffix = trailingParam ? "{param}" : "";
             calls.push({ method, path: normalizePath(joined.slice(joined.indexOf("/api/")) + suffix), file: rel(file), line: index + 1 });
           }
         }
@@ -106,12 +120,45 @@ function extractClientCalls() {
   return dedupeCalls(calls);
 }
 
-function inferMethod(line) {
-  const lower = line.toLowerCase();
-  if (lower.includes("submitauth")) return "POST";
-  if (lower.includes("apipost") || lower.includes("post(") || /method:\s*['"]post['"]/i.test(line)) return "POST";
-  if (lower.includes("apiput") || lower.includes("put(") || /method:\s*['"]put['"]/i.test(line)) return "PUT";
-  if (lower.includes("apidelete") || lower.includes("del(") || /method:\s*['"]delete['"]/i.test(line)) return "DELETE";
+// inferMethod heuristically tags an /api/ literal with a method.
+// It probes three slices in priority order to avoid leaking
+// method hints from neighbouring helper calls:
+//   1. the literal-bearing line (covers `apiGet(\`/api/...\`)`),
+//   2. the 1-2 lines immediately above (covers
+//      `apiPost<T>(\n  \`/api/...\`, body)` where the call site
+//      sits on the previous line),
+//   3. the 1-4 lines immediately below, but only when the line
+//      itself opens a fetch/request that carries options on
+//      subsequent lines (covers `fetch('/api/...', { method:`).
+function inferMethod({ line, backward, forward }) {
+  const probe = (text) => {
+    const lower = text.toLowerCase();
+    if (lower.includes("submitauth")) return "POST";
+    if (lower.includes("apipost") || /\bpost\s*\(/.test(text) || /method\s*:\s*['"]post['"]/i.test(text)) return "POST";
+    if (lower.includes("apiput") || /\bput\s*\(/.test(text) || /method\s*:\s*['"]put['"]/i.test(text)) return "PUT";
+    if (lower.includes("apidelete") || /\bdel\s*\(/.test(text) || /method\s*:\s*['"]delete['"]/i.test(text)) return "DELETE";
+    if (/request\s*\([^,)]*,\s*['"`]POST['"`]/i.test(text)) return "POST";
+    if (/request\s*\([^,)]*,\s*['"`]PUT['"`]/i.test(text)) return "PUT";
+    if (/request\s*\([^,)]*,\s*['"`]DELETE['"`]/i.test(text)) return "DELETE";
+    // Explicit GET hint stops the inference here so a literal
+    // sitting next to a sibling POST helper isn't mis-tagged.
+    // `\bget\s*\(` matches `get(` but NOT `getSomething(`.
+    if (lower.includes("apiget") || /\bget\s*\(/.test(text) || /method\s*:\s*['"]get['"]/i.test(text)) return "GET";
+    return null;
+  };
+  const fromLine = probe(line);
+  if (fromLine) return fromLine;
+  const fromBackward = probe(backward);
+  if (fromBackward) return fromBackward;
+  // Forward look only when the line plausibly opens a multi-line
+  // fetch / jsonRequest / apiRequest / request invocation whose
+  // options object carries the verb. The `(?:<[^>]+>)?` slot lets
+  // us match generic helpers like `jsonRequest<Resp>(url, {`
+  // without overreaching to unrelated calls.
+  if (/\b(?:fetch|request|jsonRequest|apiRequest)(?:<[^>]+>)?\s*\(|\burl\s*:/.test(line)) {
+    const fromForward = probe(forward);
+    if (fromForward) return fromForward;
+  }
   return "GET";
 }
 

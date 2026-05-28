@@ -187,6 +187,7 @@ const FundLayout: React.FC = () => {
             unitNav: "NAV",
             totalAssets: "Total assets",
             currentUser: "Current user",
+            accountSecurity: "Account & security",
             logout: "Log out",
             loadingFundInfo: "Loading fund information...",
             retry: "Retry",
@@ -251,6 +252,7 @@ const FundLayout: React.FC = () => {
             unitNav: "单位净值",
             totalAssets: "总资产",
             currentUser: "当前用户",
+            accountSecurity: "账号与安全",
             logout: "退出登录",
             loadingFundInfo: "正在加载基金信息...",
             retry: "重试",
@@ -534,9 +536,14 @@ const FundLayout: React.FC = () => {
                 <p className="text-[11px] uppercase tracking-wide text-gray-400">{copy.currentUser}</p>
                 <p className="max-w-[180px] truncate text-xs font-medium text-gray-700">{currentUserLabel}</p>
               </div>
-              <button className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-600 transition-all hover:ring-2 hover:ring-indigo-300">
+              <Link
+                to="/account/security"
+                title={copy.accountSecurity}
+                aria-label={copy.accountSecurity}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-600 transition-all hover:ring-2 hover:ring-indigo-300"
+              >
                 {currentUserInitial}
-              </button>
+              </Link>
               <button
                 onClick={() => void handleLogout()}
                 className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-600 transition hover:bg-gray-50 hover:text-gray-900"

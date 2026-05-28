@@ -197,7 +197,9 @@ func TestReflect_GroupsByTagAndCallsDistiller(t *testing.T) {
 	calls := map[string]int{}
 	dist := DistillerFunc(func(_ context.Context, theme string, items []Item) (string, error) {
 		calls[theme] = len(items)
-		return "lesson about " + theme, nil
+		// Substantive Chinese lesson to pass the reflexion
+		// quality gate (>=25 runes, no platitude prefix).
+		return "对 " + theme + " 类标的的复盘指出，今日收盘前 30 分钟的被动追价显著拉低成交均价。", nil
 	})
 	now := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
 	items := []Item{
@@ -248,7 +250,9 @@ func TestReflect_SkipsSmallGroups(t *testing.T) {
 
 func TestReflect_MaxGroupsCap(t *testing.T) {
 	dist := DistillerFunc(func(_ context.Context, theme string, _ []Item) (string, error) {
-		return "lesson " + theme, nil
+		// Substantive output so the reflexion quality gate doesn't
+		// drop it; the test only cares about MaxGroups capping.
+		return "对 " + theme + " 主题的复盘提示日内换手与持仓集中度需要联动校验。", nil
 	})
 	now := time.Now()
 	items := []Item{}
@@ -299,7 +303,9 @@ func TestReflect_LimitsDistillerInput(t *testing.T) {
 	var received []Item
 	dist := DistillerFunc(func(_ context.Context, _ string, items []Item) (string, error) {
 		received = append([]Item(nil), items...)
-		return "limited lesson", nil
+		// Substantive lesson to survive the quality gate; this test
+		// only cares about the input limiting, not the output.
+		return "对 earnings 主题的复盘指出今日盘前研究覆盖度不足，需要补完关键个股的事件日历。", nil
 	})
 	items := []Item{
 		{Tags: []string{"earnings"}, Importance: 0.7, Content: "abcdefghijklmnopqrstuvwxyz"},
@@ -329,7 +335,11 @@ func TestReflect_ContinuesOnDistillerError(t *testing.T) {
 		if theme == "earnings" {
 			return "", errors.New("boom")
 		}
-		return "ok " + theme, nil
+		// Return a substantive Chinese lesson so the new quality
+		// gate (>= 25 runes, no platitude prefix) accepts it; the
+		// test's intent is "errors in one group don't kill others",
+		// not "tiny strings still get through".
+		return "对 " + theme + " 主题的复盘显示日内换手与持仓集中度需要联动监控。", nil
 	})
 	now := time.Now()
 	items := []Item{
@@ -349,6 +359,61 @@ func TestReflect_ContinuesOnDistillerError(t *testing.T) {
 	}
 	if len(got) != 1 || !contains(got[0].Title, "macro") {
 		t.Errorf("expected the surviving macro reflection, got %#v", got)
+	}
+}
+
+// TestReflect_DropsLowQualityLessons covers the quality gate added to
+// stop the OCS Selection regression where the distiller emitted
+// "To maximize the utility of research" — a sub-40-rune motivational
+// fragment with no operational content — and that single useless
+// lesson then propagated into every agent's skill_config as a
+// "needs approval" entry. The gate has two arms (length floor +
+// platitude prefix); test both, plus a substantive lesson that must
+// still pass.
+func TestReflect_DropsLowQualityLessons(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		out     string
+		wantOut bool
+	}{
+		{"short fragment", "Avoid it.", false},
+		{"platitude english", "To maximize the utility of research, the team should iterate.", false},
+		{"platitude chinese", "为了让研究价值最大化，团队应当持续优化输入质量。", false},
+		{"meaty english", "Avoid chasing the third consecutive green chip bar in pre-market trading on momentum spikes.", true},
+		{"meaty chinese", "688205 在融资客大幅净买入后两个交易日出现回吐，未来需结合资金流确认而非单一新闻。", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dist := DistillerFunc(func(_ context.Context, _ string, _ []Item) (string, error) {
+				return tc.out, nil
+			})
+			items := []Item{
+				{Tags: []string{"chip"}, Importance: 0.7, CreatedAt: time.Now()},
+				{Tags: []string{"chip"}, Importance: 0.7, CreatedAt: time.Now()},
+				{Tags: []string{"chip"}, Importance: 0.7, CreatedAt: time.Now()},
+			}
+			got, err := Reflect(context.Background(), items, dist, ReflectParams{MinGroupSize: 3})
+			if tc.wantOut {
+				if err != nil {
+					t.Fatalf("reflect: %v", err)
+				}
+				if len(got) != 1 {
+					t.Fatalf("expected 1 reflection, got %d", len(got))
+				}
+				return
+			}
+			// Low-quality outputs collapse to ErrNothingToReflect
+			// because that was the only group.
+			if !errors.Is(err, ErrNothingToReflect) {
+				t.Fatalf("expected ErrNothingToReflect for %q, got %v (out=%v)", tc.out, err, got)
+			}
+			if len(got) != 0 {
+				t.Errorf("expected no reflections to be persisted, got %d", len(got))
+			}
+		})
 	}
 }
 

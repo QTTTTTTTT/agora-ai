@@ -3,7 +3,14 @@ import { useParams } from "react-router-dom";
 import { apiGet, formatApiError } from "../lib/api";
 import { formatDateForLanguage, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
 
-type MemoryLayer = "long_term" | "daily" | "dreams" | "agent" | "analysis";
+import type { MemoryLayer as SharedMemoryLayer } from "@fundai/api-client";
+
+// MemoryCenter UI exposes a 5-tab subset of the canonical
+// server-side layer union (see @fundai/api-client). "attribution"
+// is excluded because it's a system-managed write-only layer that
+// doesn't get its own user-facing tab — those entries surface via
+// the Skill Inbox / lesson lineage views instead.
+type MemoryLayer = Exclude<SharedMemoryLayer, "attribution">;
 type ViewMode = "content" | "search" | "timeline" | "stats";
 type MemoryFocus = "all" | "market";
 

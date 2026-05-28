@@ -116,14 +116,20 @@ func TestProviderDispatchClassifiers(t *testing.T) {
 }
 
 func TestLLMTimeoutConstants(t *testing.T) {
-	if llmAttemptTimeout != 240*time.Second {
-		t.Fatalf("expected attempt timeout 240s, got %s", llmAttemptTimeout)
+	// All LLM-side timeouts are unified to 5 minutes — see
+	// llm/client.go for the rationale. The test pins the value
+	// so a future "just bump it 10%" change doesn't silently drift
+	// the budget that downstream callers (daily review, reflection,
+	// roundtable) plan their wall-clock against.
+	want := 5 * time.Minute
+	if llmAttemptTimeout != want {
+		t.Fatalf("expected attempt timeout %s, got %s", want, llmAttemptTimeout)
 	}
-	if llmHTTPClientTimeout != 250*time.Second {
-		t.Fatalf("expected http client timeout 250s, got %s", llmHTTPClientTimeout)
+	if llmHTTPClientTimeout != want {
+		t.Fatalf("expected http client timeout %s, got %s", want, llmHTTPClientTimeout)
 	}
-	if llmTotalRequestTimeout != 250*time.Second {
-		t.Fatalf("expected total request timeout 250s, got %s", llmTotalRequestTimeout)
+	if llmTotalRequestTimeout != want {
+		t.Fatalf("expected total request timeout %s, got %s", want, llmTotalRequestTimeout)
 	}
 }
 

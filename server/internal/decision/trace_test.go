@@ -200,9 +200,11 @@ func TestCorrelationsPresenceRespectsHasSignal(t *testing.T) {
 	}
 }
 
-// PresentBlocks string must always be a strict subset of the 18
+// PresentBlocks string must always be a strict subset of the 24
 // supported signal names — guards against accidental free-text
-// drift in callers that grep this list.
+// drift in callers that grep this list. Updated each time a new
+// signal block is added (Sprint F: valueScores, lowBetaScores,
+// pead).
 func TestPresentBlocksKnownVocabulary(t *testing.T) {
 	known := map[string]struct{}{
 		"roundtableStance":   {},
@@ -223,9 +225,16 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		"newsCatalysts":      {},
 		"earningsCalendar":   {},
 		"qualityScores":      {},
-		"exposure":           {},
-		"correlations":       {},
-		"pairSpreads":        {},
+		"valueScores":        {},
+		"lowBetaScores":      {},
+		"pead":                {},
+		"exposure":            {},
+		"correlations":        {},
+		"pairSpreads":         {},
+		"agentSkills":         {},
+		"recentLessons":       {},
+		"longTermReflections": {},
+		"macroBriefing":       {},
 	}
 	// Construct an input that flips every signal so PresentBlocks
 	// emits every supported entry exactly once.
@@ -241,6 +250,13 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		ZThreshold:   2.0,
 		PairsByAbsZ:  []PairSpreadRow{{Left: "A", Right: "B", Rho: 0.9, SpreadZ: 3.0}},
 	}
+	peadSnap := PEADSnapshot{
+		LookbackDays:   60,
+		MinSurprisePct: 0.03,
+		Signals: []PEADSignal{
+			{Symbol: "A", SurprisePercent: 0.07, DriftPercent: 0.03, State: "continuing", DaysSinceEvent: 10},
+		},
+	}
 	in := DecisionInput{
 		Universe:           []string{"A"},
 		InstrumentHints:    map[string]InstrumentHint{"A": {}},
@@ -254,9 +270,13 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		NewsSentiment:      "x",
 		SleeveScorecard:    "x",
 		LessonReplay:       "x",
+		MacroBriefing:      "x",
 		QuantSnapshots:     []SymbolQuantSnapshot{{}},
 		UniverseRanking:    []SymbolRanking{{}},
 		QualityScores:      []SymbolQualityScore{{Symbol: "A"}},
+		ValueScores:        []SymbolValueScore{{Symbol: "A"}},
+		LowBetaScores:      []SymbolLowBetaScore{{Symbol: "A"}},
+		PEAD:               &peadSnap,
 		Cooldowns:          []SymbolCooldown{{}},
 		RiskBudget:         &rb,
 		NewsCatalysts:      []SymbolNewsCatalysts{{}},
@@ -264,6 +284,9 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 		Exposure:           ExposureSnapshot{TotalAssets: 100, PositionCount: 1},
 		Correlations:       &corr,
 		PairSpreads:        &pairs,
+		AgentSkills:         []AgentSkillContext{{Name: "x"}},
+		RecentLessons:       []RecentLessonContext{{Content: "x"}},
+		LongTermReflections: []LongTermReflectionContext{{Content: "x"}},
 	}
 	got := Fingerprint(in).PresentBlocks()
 	if len(got) != len(known) {
@@ -281,14 +304,20 @@ func TestPresentBlocksKnownVocabulary(t *testing.T) {
 // list should be empty.
 func TestAbsentBlocksEmptyInputReportsAllAbsent(t *testing.T) {
 	got := Fingerprint(DecisionInput{}).AbsentBlocks()
-	// 21 canonical signal blocks (matches PresentBlocksKnownVocabulary).
-	if len(got) != 21 {
-		t.Errorf("empty input AbsentBlocks = %d entries, want 21 (%v)", len(got), got)
+	// 28 canonical signal blocks (matches PresentBlocksKnownVocabulary).
+	// Sprint F #1 added valueScores; Sprint F #2 added lowBetaScores;
+	// Sprint F #3 added pead; Sprint 1 / S1 added agentSkills /
+	// recentLessons / longTermReflections + Sprint 1 / S2 added
+	// macroBriefing (was tracked but never fingerprinted).
+	if len(got) != 28 {
+		t.Errorf("empty input AbsentBlocks = %d entries, want 28 (%v)", len(got), got)
 	}
 }
 
 // PresentBlocks + AbsentBlocks must partition the canonical
-// signal vocabulary: no overlap, total = 21.
+// signal vocabulary: no overlap, total = 24 (Sprint F #1
+// added valueScores; Sprint F #2 added lowBetaScores;
+// Sprint F #3 added pead).
 func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 	rb := RiskBudgetSnapshot{}
 	corr := CorrelationSnapshot{SampleSize: 2, HighCorrPairs: []HighCorrPair{{Left: "A", Right: "B", Rho: 0.9}}}
@@ -301,6 +330,13 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 		LookbackBars: 60,
 		ZThreshold:   2.0,
 		PairsByAbsZ:  []PairSpreadRow{{Left: "A", Right: "B", Rho: 0.9, SpreadZ: 3.0}},
+	}
+	peadSnap := PEADSnapshot{
+		LookbackDays:   60,
+		MinSurprisePct: 0.03,
+		Signals: []PEADSignal{
+			{Symbol: "A", SurprisePercent: 0.07, DriftPercent: 0.03, State: "continuing", DaysSinceEvent: 10},
+		},
 	}
 	for _, tc := range []struct {
 		name string
@@ -320,9 +356,13 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			NewsSentiment:      "x",
 			SleeveScorecard:    "x",
 			LessonReplay:       "x",
+			MacroBriefing:      "x",
 			QuantSnapshots:     []SymbolQuantSnapshot{{}},
 			UniverseRanking:    []SymbolRanking{{}},
 			QualityScores:      []SymbolQualityScore{{Symbol: "A"}},
+			ValueScores:        []SymbolValueScore{{Symbol: "A"}},
+			LowBetaScores:      []SymbolLowBetaScore{{Symbol: "A"}},
+			PEAD:               &peadSnap,
 			Cooldowns:          []SymbolCooldown{{}},
 			RiskBudget:         &rb,
 			NewsCatalysts:      []SymbolNewsCatalysts{{}},
@@ -330,6 +370,9 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			Exposure:           ExposureSnapshot{TotalAssets: 100, PositionCount: 1},
 			Correlations:       &corr,
 			PairSpreads:        &pairs,
+			AgentSkills:        []AgentSkillContext{{Name: "x"}},
+			RecentLessons:      []RecentLessonContext{{Content: "x"}},
+			LongTermReflections: []LongTermReflectionContext{{Content: "x"}},
 		}},
 		{"partial", DecisionInput{
 			BullCase:       "x",
@@ -341,8 +384,8 @@ func TestPresentPlusAbsentBlocksPartitionVocabulary(t *testing.T) {
 			tr := Fingerprint(tc.in)
 			present := tr.PresentBlocks()
 			absent := tr.AbsentBlocks()
-			if len(present)+len(absent) != 21 {
-				t.Errorf("present(%d) + absent(%d) = %d, want 21 (present=%v absent=%v)",
+			if len(present)+len(absent) != 28 {
+				t.Errorf("present(%d) + absent(%d) = %d, want 28 (present=%v absent=%v)",
 					len(present), len(absent), len(present)+len(absent), present, absent)
 			}
 			seen := map[string]bool{}
@@ -482,6 +525,115 @@ func TestFingerprintQualityScores(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'qualityScores' in PresentBlocks, got %v", tr.PresentBlocks())
+	}
+}
+
+// Sprint F #1: ValueScores presence + count must flow into the
+// trace fingerprint so dashboards can grep p_value_scores /
+// count_value_scores — the AQR HML overlay equivalent of the
+// Sprint E #3 QMJ block.
+func TestFingerprintValueScores(t *testing.T) {
+	tr := Fingerprint(DecisionInput{
+		ValueScores: []SymbolValueScore{
+			{Symbol: "AAPL", CompositeZ: 0.8, Quartile: 1, ComponentsAvailable: 3},
+			{Symbol: "MSFT", CompositeZ: -0.4, Quartile: 3, ComponentsAvailable: 2},
+		},
+	})
+	if !tr.Signals.ValueScores {
+		t.Error("expected p_value_scores = true")
+	}
+	if tr.Counts.ValueScores != 2 {
+		t.Errorf("expected count_value_scores = 2, got %d", tr.Counts.ValueScores)
+	}
+	found := false
+	for _, b := range tr.PresentBlocks() {
+		if b == "valueScores" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'valueScores' in PresentBlocks, got %v", tr.PresentBlocks())
+	}
+}
+
+// Sprint F #2: LowBetaScores presence + count must flow into the
+// trace fingerprint so dashboards can grep p_low_beta_scores /
+// count_low_beta_scores.
+func TestFingerprintLowBetaScores(t *testing.T) {
+	tr := Fingerprint(DecisionInput{
+		LowBetaScores: []SymbolLowBetaScore{
+			{Symbol: "KO", Beta: 0.6, CompositeZ: 1.1, Quartile: 1, ComponentsAvailable: 2},
+			{Symbol: "TSLA", Beta: 2.2, CompositeZ: -1.0, Quartile: 4, ComponentsAvailable: 2},
+		},
+	})
+	if !tr.Signals.LowBetaScores {
+		t.Error("expected p_low_beta_scores = true")
+	}
+	if tr.Counts.LowBetaScores != 2 {
+		t.Errorf("expected count_low_beta_scores = 2, got %d", tr.Counts.LowBetaScores)
+	}
+	found := false
+	for _, b := range tr.PresentBlocks() {
+		if b == "lowBetaScores" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'lowBetaScores' in PresentBlocks, got %v", tr.PresentBlocks())
+	}
+}
+
+// Sprint F #3: PEAD snapshot presence + signal count must flow
+// into the trace fingerprint so dashboards can grep p_pead /
+// count_pead_signals.
+func TestFingerprintPEAD(t *testing.T) {
+	snap := &PEADSnapshot{
+		LookbackDays:   60,
+		MinSurprisePct: 0.03,
+		Signals: []PEADSignal{
+			{Symbol: "AAPL", SurprisePercent: 0.07, DriftPercent: 0.03, State: "continuing"},
+			{Symbol: "MSFT", SurprisePercent: -0.05, DriftPercent: -0.02, State: "continuing"},
+		},
+	}
+	tr := Fingerprint(DecisionInput{PEAD: snap})
+	if !tr.Signals.PEAD {
+		t.Error("expected p_pead = true")
+	}
+	if tr.Counts.PEADSignals != 2 {
+		t.Errorf("expected count_pead_signals = 2, got %d", tr.Counts.PEADSignals)
+	}
+	found := false
+	for _, b := range tr.PresentBlocks() {
+		if b == "pead" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'pead' in PresentBlocks, got %v", tr.PresentBlocks())
+	}
+}
+
+// PEAD snapshot with only neutral rows must report p_pead=false
+// (the block has no actionable signal so the prompt should omit
+// it) but the count still reflects the row total for audit.
+func TestFingerprintPEADAllNeutralReportsAbsent(t *testing.T) {
+	snap := &PEADSnapshot{
+		LookbackDays:   60,
+		MinSurprisePct: 0.03,
+		Signals: []PEADSignal{
+			{Symbol: "TINY1", SurprisePercent: 0.01, State: "neutral"},
+			{Symbol: "TINY2", SurprisePercent: 0.005, State: "neutral"},
+		},
+	}
+	tr := Fingerprint(DecisionInput{PEAD: snap})
+	if tr.Signals.PEAD {
+		t.Error("expected p_pead = false when every row is neutral")
+	}
+	if tr.Counts.PEADSignals != 2 {
+		t.Errorf("count = %d, want 2 (audit row count still flows)", tr.Counts.PEADSignals)
 	}
 }
 

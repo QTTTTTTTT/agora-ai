@@ -175,13 +175,17 @@ services:
   # MCP Servers — optional market-data profile
   # ---------------------------------------------------------------------------
 
-  # China A-stock market data via MCP
+  # China A-stock market data via MCP.
+  # Sprint 1 / S4: removed the `profiles: market-data` gate so this
+  # service starts by default. A-share funds were silently losing
+  # their value / quality / lowbeta / pead blocks because the MCP
+  # endpoint wasn't reachable unless the operator explicitly opted
+  # in. Operators who don't need it can still scale to 0 or omit
+  # the env wiring (MCP_CHINA_STOCK_URL stays empty).
   china-stock-mcp:
     image: ghcr.io/fundai/china-stock-mcp:latest
     container_name: fundai-china-stock-mcp
     restart: unless-stopped
-    profiles:
-      - market-data
     environment:
       MCP_PORT: "3001"
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
@@ -201,13 +205,12 @@ services:
         reservations:
           memory: 128M
 
-  # AKShare financial data via MCP
+  # AKShare financial data via MCP.
+  # Sprint 1 / S4: see china-stock-mcp note above — default-on.
   akshare-mcp:
     image: ghcr.io/fundai/akshare-mcp:latest
     container_name: fundai-akshare-mcp
     restart: unless-stopped
-    profiles:
-      - market-data
     environment:
       MCP_PORT: "3002"
       LOG_LEVEL: ${LOG_LEVEL:-info}

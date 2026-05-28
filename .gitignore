@@ -11,16 +11,29 @@
 Thumbs.db
 
 # Dependencies
+node_modules/
 web/node_modules/
 miniapp/node_modules/
+android/node_modules/
+shared/api-client/node_modules/
 
 # Build outputs
 web/dist/
+shared/api-client/dist/
 server/server
 server/marketdata-probe
+server/factorlab
+server/contradiction-runner
 server/test-results/
 web/test-results/
 web/playwright-report/
+android/dist/
+android/.gradle/
+
+# Lock files for nested workspaces (root npm install creates one canonical lock)
+shared/api-client/package-lock.json
+web/package-lock.json
+android/package-lock.json
 
 # Coverage and temporary files
 coverage/

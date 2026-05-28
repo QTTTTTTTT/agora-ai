@@ -871,6 +871,7 @@ const Companies: React.FC = () => {
             kycLevel: "Level",
             marketplace: "Agent marketplace",
             admin: "Admin",
+            accountSecurity: "Account & security",
             createCompany: "Create company",
             logout: "Log out",
             loading: "Loading companies and funds...",
@@ -911,6 +912,7 @@ const Companies: React.FC = () => {
             kycLevel: "等级",
             marketplace: "成员交易市场",
             admin: "管理员后台",
+            accountSecurity: "账号与安全",
             createCompany: "创建公司",
             logout: "退出登录",
             loading: "正在加载公司与基金信息...",
@@ -1189,6 +1191,12 @@ const Companies: React.FC = () => {
                   {copy.admin}
                 </Link>
               ) : null}
+              <Link
+                to="/account/security"
+                className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
+              >
+                {copy.accountSecurity}
+              </Link>
               <button
                 onClick={openCreateCompanyModal}
                 className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700"

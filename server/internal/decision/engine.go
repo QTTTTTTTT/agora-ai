@@ -31,12 +31,15 @@ import (
 	"github.com/fundai/server/internal/correlation"
 	"github.com/fundai/server/internal/earnings"
 	"github.com/fundai/server/internal/exposure"
+	"github.com/fundai/server/internal/lowbeta"
 	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/pairspread"
+	"github.com/fundai/server/internal/pead"
 	"github.com/fundai/server/internal/quality"
 	"github.com/fundai/server/internal/quantsnapshot"
 	"github.com/fundai/server/internal/ranking"
 	"github.com/fundai/server/internal/riskbudget"
+	"github.com/fundai/server/internal/value"
 )
 
 // SymbolQuantSnapshot is the prompt-facing shape for the per-symbol
@@ -104,6 +107,50 @@ type EarningsEvent = earnings.Event
 // Profitability / Growth / Safety z-scores plus the composite
 // the PM sorts by.
 type SymbolQualityScore = quality.Score
+
+// SymbolValueScore is the prompt-facing shape for the Sprint
+// F #1 cross-sectional value factor block. Alias for
+// value.Score; carries B/P + E/P + D/P z-scores plus the
+// CompositeZ and 1..4 quartile bucket the PM should use as
+// the "cheap vs expensive" tilt orthogonal to QualityScores.
+//
+// The quality / value pair is the classical AQR QMJ + HML
+// double-overlay: a top-quartile QualityScores AND a
+// top-quartile ValueScores name is the canonical "Quality at a
+// Reasonable Price" setup that drives the Buffet / GMO
+// long-horizon book. The system prompt teaches the PM to
+// recognise and prefer that intersection.
+type SymbolValueScore = value.Score
+
+// SymbolLowBetaScore is the prompt-facing shape for the Sprint
+// F #2 Betting-Against-Beta defensive overlay. Alias for
+// lowbeta.Score; carries the raw realized beta + volatility
+// alongside their NEGATED z-scores (HIGH = defensive) and the
+// 1..4 quartile bucket the PM uses to tilt toward / away from
+// defensive names.
+//
+// The block exists because Frazzini-Pedersen 2014 showed that
+// constrained investors persistently overpay for high-beta
+// names — a long-only fund can capture the "low-beta anomaly"
+// by tilting toward Q1 LowBetaScores when realized vol or
+// drawdown is elevated. The system prompt teaches the PM the
+// regime-conditional tilt rules.
+type SymbolLowBetaScore = lowbeta.Score
+
+// PEADSnapshot is the prompt-facing shape for the Sprint F #3
+// Post-Earnings Announcement Drift block. Alias for
+// pead.Snapshot; carries per-symbol earnings surprise + drift
+// state (continuing / complete / faded / neutral). The system
+// prompt teaches the PM to treat continuing-drift names as
+// tilt longs and faded-positive-surprise names as deep-value
+// adds.
+type PEADSnapshot = pead.Snapshot
+
+// PEADSignal is the single-row alias paired with the snapshot
+// so callers (the wiring layer + tests) can construct
+// DecisionInput.PEAD without importing the pead package
+// directly.
+type PEADSignal = pead.Signal
 
 // PairSpreadSnapshot is the prompt-facing shape for the Sprint
 // E #4 pairs-spread monitor. Alias for pairspread.Snapshot so
@@ -285,6 +332,54 @@ type DecisionInput struct {
 	// simply omits the block.
 	QualityScores []SymbolQualityScore
 
+	// Sprint F #1 (cross-sectional value factor). One row per
+	// universe symbol with sub-factor z-scores B/P + E/P + D/P
+	// plus the composite CompositeZ and 1..4 quartile bucket.
+	// Built from the same fundamental.Metrics the upstream
+	// FundamentalSummary string is rendered from — turning the
+	// prose into a structured "cheap vs expensive" channel
+	// orthogonal to BOTH momentum (UniverseRanking) and quality
+	// (QualityScores). The canonical "Quality at a Reasonable
+	// Price" trade — long-horizon Buffet / GMO playbook — is
+	// Q1 ValueScores AND Q1 QualityScores; the value sleeve
+	// alone (Q1 ValueScores but Q4 QualityScores) is the
+	// classic value trap. The system prompt teaches the PM to
+	// distinguish them. Empty / nil = no scores (insufficient
+	// universe coverage or fundamentals unwired); the prompt
+	// simply omits the block.
+	ValueScores []SymbolValueScore
+
+	// Sprint F #2 (Frazzini-Pedersen Betting-Against-Beta
+	// defensive overlay). One row per universe symbol with the
+	// raw realized Beta + Volatility (computed over a 60-bar
+	// daily lookback, default), their NEGATED z-scores so
+	// HIGH = defensive, the weighted CompositeZ, and a 1..4
+	// quartile bucket. Surfaced as a TILT signal the PM can
+	// use to reweight the universe in defensive vs aggressive
+	// regimes — Q1 names get a long-only equivalent of the
+	// classical BAB long leg; Q4 names get the "be careful"
+	// tag in trend_down or drawdown_throttle conditions. The
+	// system prompt teaches the regime-conditional rules.
+	// Empty / nil = no scores (OHLC unwired or insufficient
+	// bars); the prompt simply omits the block.
+	LowBetaScores []SymbolLowBetaScore
+
+	// Sprint F #3 (Post-Earnings Announcement Drift). Per-symbol
+	// surprise + drift state for the most recent earnings print
+	// inside the trailing PEAD window (60 days default). The
+	// snapshot is the Bernard-Thomas 1989 / Sadka 2006 continuation
+	// signal: stocks drift in the direction of their earnings
+	// surprise for ~60 days after the print, one of the most
+	// replicated post-event anomalies in academic finance. The
+	// system prompt teaches the PM to:
+	//   - tilt long on continuing-drift positive-surprise names
+	//   - reduce on continuing-drift negative-surprise names
+	//   - treat "faded positive surprise" (good print, bad reaction)
+	//     as a deep-value entry
+	//   - ignore complete-drift rows (alpha already priced in)
+	// nil OR HasSignal()=false = block omitted entirely.
+	PEAD *PEADSnapshot
+
 	// Sprint B #1 (event-driven cooldown). Per-symbol re-entry locks
 	// computed from the fund's own trade_executions: any symbol with
 	// a fill inside the rolling window (default 24h) shows up here
@@ -399,6 +494,51 @@ type DecisionInput struct {
 	// lookback filter.
 	LessonReplay string
 
+	// Sprint 1 / S1 — direct learning-loop closure. Where
+	// SleeveScorecard and LessonReplay distil *attribution*
+	// outputs into the prompt, these three fields surface the
+	// agent learning system's own state directly to the PM so a
+	// decision can cite the lessons that produced it instead of
+	// merely the post-mortem ones:
+	//
+	//   - AgentSkills: every approved + enabled skill on this
+	//     fund's agents (PM, risk, researchers, trader). The PM
+	//     can read its own approved playbook ("BAB defensive
+	//     tilt on drawdown_throttle") and the lessons-derived
+	//     skill cards proposed by past reflections.
+	//   - RecentLessons: condensed daily learnings from the last
+	//     ~14 days. Each entry carries the date, the agent role,
+	//     and the lesson text the daily review distilled out of
+	//     that day's pnl + trades + signal blocks.
+	//   - LongTermReflections: the longer-horizon reflection
+	//     memories (layer=long_term) from the last ~30 days — at
+	//     most 5 to keep the prompt bounded.
+	//
+	// All three are populated by the wiring layer and consumed
+	// by the LLMDecisionEngine via prompt slots. The fallback
+	// engine ignores them.
+	AgentSkills         []AgentSkillContext
+	RecentLessons       []RecentLessonContext
+	LongTermReflections []LongTermReflectionContext
+
+	// IntradaySnapshots is the Sprint 3 / L1 soft signal block — one
+	// row per symbol in the candidate universe. Trend direction +
+	// vol-z + vol-ratio per symbol; the PM reasons about timing while
+	// daily blocks reason about thesis. Empty when intraday provider
+	// has no coverage (e.g. weekend / akshare off-session).
+	IntradaySnapshots []IntradayContext
+
+	// SemanticRecall is Sprint 3 / L3 — top-k pgvector-similar past
+	// memories surfaced from `memories.embedding`. Distinct from
+	// RecentLessons (which is the agent_config's curated list,
+	// recency-driven) and LongTermReflections (which is the
+	// reflection cadence's distilled long-horizon notes): this block
+	// is semantic ("what we said the last time we faced THIS
+	// market"), so the LLM can pattern-match against analogues
+	// rather than just calendar-recency. Empty when embedding column
+	// is unpopulated or pgvector isn't installed — silent degrade.
+	SemanticRecall []SemanticRecallContext
+
 	// Operational constraints.
 	BuyBudget float64  // max absolute buy notional this plan can propose; 0 = no cap
 	RiskNotes []string // contextual notes (e.g., "A-share T+1 active") that the engine must respect
@@ -461,6 +601,89 @@ type RoundtableSymbolVerdict struct {
 	BearCase     string
 	QuantCase    string
 	DissentVotes int
+}
+
+// AgentSkillContext mirrors one approved+enabled skill on this fund's
+// agents (PM, risk, researcher, trader). Sprint 1 / S1 surfaces these
+// directly to the PM prompt so a decision can read its own playbook
+// before — not after — it produces actions. The wiring layer filters
+// out proposed / disabled skills; the engine therefore can treat every
+// row here as "the operator has signed off on this".
+type AgentSkillContext struct {
+	AgentRole   string `json:"agentRole"`             // pm / risk / researcher / trader
+	AgentName   string `json:"agentName,omitempty"`   // human-readable agent label
+	Name        string `json:"name"`                  // skill display name
+	Description string `json:"description,omitempty"` // 1-2 line description (truncated)
+	Source      string `json:"source,omitempty"`      // manual / reflection / ab_test
+}
+
+// RecentLessonContext is one distilled lesson the agent learning
+// system stored under layer=agent (per-agent personalised lesson) or
+// layer=daily (fund-wide daily summary). Each entry is one row from
+// the memories table the AgentLearning UI surfaces. Sprint 1 / S1
+// brings these into the decision prompt so the PM can avoid repeating
+// yesterday's mistakes inside today's plan — the textual counterpart
+// to LessonReplay (which is rendered prose) and SleeveScorecard (which
+// is structured numbers).
+// IntradayContext is one symbol's intraday snapshot fed into the PM
+// prompt as a SOFT signal. Direction is heuristic (up / down / range)
+// and the prompt is told to weight intraday over daily only when the
+// vol-z spike is meaningful AND the trend agrees with daily regime.
+//
+// Sprint 3 / L1 (intraday OHLC). Optional — when the upstream fetcher
+// has no 5m/15m bars (akshare in off-session, Yahoo on weekends), the
+// list is just empty and the prompt omits the block.
+type IntradayContext struct {
+	Symbol         string  `json:"symbol"`
+	Interval       string  `json:"interval"`
+	TrendDirection string  `json:"trendDirection"`
+	LastClose      float64 `json:"lastClose"`
+	OpenClose      float64 `json:"openClose,omitempty"`
+	VolZScore      float64 `json:"volZScore,omitempty"`
+	VolRatio       float64 `json:"volRatio,omitempty"`
+}
+
+type RecentLessonContext struct {
+	TradingDate string   `json:"tradingDate"`        // YYYY-MM-DD
+	Layer       string   `json:"layer"`              // agent / daily
+	AgentRole   string   `json:"agentRole,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Content     string   `json:"content"`            // already-truncated lesson body
+	Tags        []string `json:"tags,omitempty"`
+	// Sprint 3 / M1 lineage feedback. HitRate is the share of
+	// past invocations of THIS lesson whose window closed in the
+	// expected direction. SamplesObserved is how many lineage rows
+	// the rate is based on. Both omitempty because not every lesson
+	// has a recorded lineage yet (older lessons pre-M1, or
+	// hypothesis windows that haven't closed).
+	HitRate         float64 `json:"hitRate,omitempty"`
+	SamplesObserved int     `json:"samplesObserved,omitempty"`
+}
+
+// LongTermReflectionContext is one row from the long-term reflection
+// memories (layer=long_term) the reflexion / distiller cron produces
+// from the per-agent lessons. These are the most-distilled,
+// strategy-level observations the system has formed; the PM prompt
+// gets at most 5 of the newest so the input stays bounded.
+type LongTermReflectionContext struct {
+	CreatedAt string   `json:"createdAt"`         // RFC-3339 date the reflection landed
+	Title     string   `json:"title,omitempty"`
+	Content   string   `json:"content"`           // already-truncated reflection body
+	Tags      []string `json:"tags,omitempty"`
+}
+
+// SemanticRecallContext is one row from the L3 pgvector-similar
+// memory recall. Similarity is cosine similarity (1.0 = identical,
+// 0 = orthogonal); the LLM treats higher rows as more analogous to
+// the current daily query. We carry the title / snippet / tags so
+// the PM can cite the precedent the same way it cites RecentLessons.
+type SemanticRecallContext struct {
+	CreatedAt  string   `json:"createdAt"`             // RFC-3339 date the original memory landed
+	Layer      string   `json:"layer"`                 // agent / daily / long_term
+	Title      string   `json:"title,omitempty"`
+	Snippet    string   `json:"snippet"`               // already-truncated body
+	Tags       []string `json:"tags,omitempty"`
+	Similarity float64  `json:"similarity,omitempty"`
 }
 
 // DecisionAction is the engine's recommendation for a single

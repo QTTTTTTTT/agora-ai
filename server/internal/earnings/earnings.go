@@ -13,12 +13,25 @@
 // Architecture mirrors newsrecall + correlation: a `Fetcher`
 // interface produces raw events, `Service` orchestrates the
 // per-fund call, and the wiring layer routes the result into
-// `decision.DecisionInput.EarningsCalendar`. Default deployment
-// ships with `NoopFetcher` (zero events) so the feature is a
-// no-op until an operator wires a real provider (Finnhub /
-// Akshare / Polygon / hand-seeded YAML) — exactly the same
-// graceful-degradation pattern the rest of the signal pipeline
-// uses.
+// `decision.DecisionInput.EarningsCalendar`.
+//
+// Built-in providers:
+//
+//   - NoopFetcher    — returns no events; used when the env knob
+//                      EARNINGS_DISABLED=1 or YAHOO_EARNINGS_DISABLED=1
+//                      degrades the feature off.
+//   - YahooProvider  — hits Yahoo Finance's keyless
+//                      v10/quoteSummary endpoint. Default in the
+//                      runtime wiring; works out-of-the-box for
+//                      US tickers with zero configuration.
+//   - StaticFetcher  — operator-seeded slice; useful for tests
+//                      and for A-share / HK funds where Yahoo
+//                      coverage is poor and an operator
+//                      hand-maintains the calendar.
+//
+// The wiring layer chooses providers via the env-driven
+// buildEarningsFetcherFromEnv() builder in cmd/server, mirroring
+// the OHLC / fundamental / sectorflow patterns.
 package earnings
 
 import (

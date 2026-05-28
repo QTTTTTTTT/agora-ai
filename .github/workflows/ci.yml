@@ -87,6 +87,93 @@ jobs:
       - name: Run lint
         run: npm run lint
 
+  android:
+    name: Android RN typecheck, lint, jest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build shared API client
+        run: npm --workspace shared/api-client run build
+
+      - name: TypeScript check (android)
+        run: npm --workspace android run typecheck
+
+      - name: Jest (android)
+        run: npm --workspace android test --if-present -- --ci --passWithNoTests
+        env:
+          CI: "true"
+
+  android-release:
+    name: Android release APK (signed, Play Internal)
+    runs-on: ubuntu-latest
+    needs: [android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build shared API client
+        run: npm --workspace shared/api-client run build
+
+      - name: Decode keystore (skip if no secret)
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p android/app
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+
+      - name: Assemble release APK (only if native shell present)
+        run: |
+          if [ -d android/android ]; then
+            cd android/android
+            ./gradlew assembleRelease \
+              -Pandroid.signingConfig.storeFile=release.keystore \
+              -Pandroid.signingConfig.storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+              -Pandroid.signingConfig.keyAlias=${{ secrets.ANDROID_KEY_ALIAS }} \
+              -Pandroid.signingConfig.keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          else
+            echo "Native android/ shell not present (skeleton repo); see docs/ANDROID_BOOTSTRAP.md."
+            exit 0
+          fi
+
+      - name: Upload to Play Internal Track
+        if: env.PLAY_SERVICE_ACCOUNT_JSON != ''
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "Play upload stub — wire fastlane/supply or r0adkll/upload-google-play once package id is reserved."
+
   miniapp:
     name: Miniapp static validation
     runs-on: ubuntu-latest

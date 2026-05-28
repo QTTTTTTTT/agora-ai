@@ -27,24 +27,47 @@ function getBaseUrl() {
   return BASE_URL;
 }
 
+// Sprint 2B — wrap every request so a 401 mid-session triggers a
+// transparent wx.login() handshake before retrying. The retry happens
+// at most once per call; if it still fails we surface the 401 so the UI
+// can prompt the user to leave and re-enter the miniapp.
+function tryAutoRelogin() {
+  try {
+    var app = getApp();
+    if (app && typeof app.loginWithWechat === 'function') {
+      return app.loginWithWechat({ silent: true });
+    }
+  } catch (e) {
+    // getApp() is not available — fall through.
+  }
+  return Promise.reject({ code: -1, message: 'no app context for relogin' });
+}
+
 /**
  * 基础请求方法
  * @param {string} url - 请求路径
  * @param {string} method - HTTP 方法
  * @param {object} data - 请求数据
  * @param {object} options - 额外选项
+ *   - suppressAutoLogin: skip the 401 re-login dance (used by the login
+ *     endpoints themselves to avoid recursion).
+ *   - _retryAfterLogin: internal flag set when we've already retried once.
  * @returns {Promise}
  */
 function request(url, method, data, options) {
-  return new Promise((resolve, reject) => {
-    const baseUrl = getBaseUrl();
-    const header = {
+  var opts = options || {};
+  return new Promise(function (resolve, reject) {
+    var baseUrl = getBaseUrl();
+    var header = {
       'Content-Type': 'application/json',
-      ...(options && options.header ? options.header : {}),
     };
+    if (opts.header) {
+      Object.keys(opts.header).forEach(function (k) {
+        header[k] = opts.header[k];
+      });
+    }
 
-    // 从本地存储读取 token
-    const token = wx.getStorageSync('token');
+    var token = wx.getStorageSync('token');
     if (token) {
       header['Authorization'] = 'Bearer ' + token;
     }
@@ -54,23 +77,38 @@ function request(url, method, data, options) {
       method: method || 'GET',
       data: data || {},
       header: header,
-      timeout: (options && options.timeout) || 30000,
+      timeout: opts.timeout || 30000,
       success: function (res) {
         if (res.statusCode >= 200 && res.statusCode < 300) {
           resolve(res.data);
-        } else if (res.statusCode === 401) {
-          // 未授权，可以在此处理登录过期逻辑
+          return;
+        }
+        if (res.statusCode === 401) {
+          if (!opts.suppressAutoLogin && !opts._retryAfterLogin) {
+            tryAutoRelogin()
+              .then(function () {
+                var nextOpts = Object.assign({}, opts, { _retryAfterLogin: true });
+                request(url, method, data, nextOpts).then(resolve, reject);
+              })
+              .catch(function (err) {
+                wx.showToast({ title: '登录已过期', icon: 'none' });
+                reject({ code: 401, message: '未授权', data: res.data, detail: err });
+              });
+            return;
+          }
           wx.showToast({ title: '登录已过期', icon: 'none' });
           reject({ code: 401, message: '未授权', data: res.data });
-        } else if (res.statusCode === 404) {
-          reject({ code: 404, message: '资源不存在', data: res.data });
-        } else {
-          reject({
-            code: res.statusCode,
-            message: (res.data && res.data.message) || '请求失败',
-            data: res.data,
-          });
+          return;
         }
+        if (res.statusCode === 404) {
+          reject({ code: 404, message: '资源不存在', data: res.data });
+          return;
+        }
+        reject({
+          code: res.statusCode,
+          message: (res.data && res.data.message) || '请求失败',
+          data: res.data,
+        });
       },
       fail: function (err) {
         console.error('[api] 请求失败:', url, err);
@@ -305,6 +343,14 @@ const api = {
   // ---- 健康检查 ----
   health: function () {
     return get('/api/health');
+  },
+
+  // ---- 微信登录 ----
+  // suppressAutoLogin avoids recursion: the wechat-login call itself
+  // can return 401 from the upstream WeChat session exchange and we
+  // don't want to spawn a retry loop inside the helper.
+  wechatLogin: function (code) {
+    return request('/api/auth/wechat-login', 'POST', { code: code }, { suppressAutoLogin: true });
   },
 };
 

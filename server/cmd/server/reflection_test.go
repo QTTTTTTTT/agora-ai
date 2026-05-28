@@ -122,7 +122,10 @@ func TestRunReflectionCyclePersistsToCorrectFundOnly(t *testing.T) {
 		store.preload("control", "daily", makeDailySource("control", "researcher-2", theme, 2))
 	}
 
-	distiller := &constantDistiller{content: "synthesized lesson"}
+	// Substantive content survives the reflexion quality gate
+	// (>=25 runes, no platitude prefix) — the test asserts fund
+	// isolation, not the gate behaviour.
+	distiller := &constantDistiller{content: "对存储芯片主题的多日复盘指出 NAND 价格反弹趋势已被市场过度透支，需要重新评估假设。"}
 
 	now := time.Now().UTC()
 	n := runReflectionCycle(context.Background(), store, distiller, noopSkillProposer{}, "treatment", now)
@@ -193,7 +196,9 @@ func TestRunReflectionCycleDedupesByTitle(t *testing.T) {
 	for _, theme := range []string{"chip", "chip", "chip"} {
 		store.preload("treatment", "daily", makeDailySource("treatment", "r1", theme, 1))
 	}
-	distiller := &constantDistiller{content: "synthesized lesson"}
+	// Substantive lesson so the reflexion quality gate keeps it;
+	// the test asserts the dedupe behaviour, not the gate.
+	distiller := &constantDistiller{content: "对存储芯片主题的复盘提示日内换手与持仓集中度需要联动校验。"}
 
 	// First cycle persists; second cycle (skipping cadence by clearing it)
 	// must produce zero net writes because the title is content-addressed.
@@ -285,7 +290,9 @@ func TestRunReflectionCycleInvokesProposerWithFundContext(t *testing.T) {
 	for _, theme := range []string{"chip", "chip", "chip"} {
 		store.preload("treatment", "daily", makeDailySource("treatment", "r1", theme, 1))
 	}
-	distiller := &constantDistiller{content: "synthesized chip lesson"}
+	// Substantive lesson so the reflexion quality gate doesn't drop
+	// it before the proposer ever sees it.
+	distiller := &constantDistiller{content: "对存储芯片主题的复盘指出今日盘前研究覆盖度不足，需要补完关键个股的事件日历。"}
 	proposer := &fakeSkillProposer{}
 
 	n := runReflectionCycle(context.Background(), store, distiller, proposer, "treatment", time.Now().UTC())

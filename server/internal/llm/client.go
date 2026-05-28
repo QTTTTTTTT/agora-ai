@@ -21,9 +21,18 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	llmTotalRequestTimeout = 250 * time.Second
-	llmHTTPClientTimeout   = 250 * time.Second
-	llmAttemptTimeout      = 240 * time.Second
+	// All LLM-side timeouts are unified to 5 minutes. The previous
+	// 240/250s split was an artefact of accommodating a single
+	// slow provider; reasoning models (gemini-3.1-pro-preview,
+	// o1-style chains) regularly need 2-3 minutes for a single
+	// complex response, and a tight cap surfaced as false
+	// "context deadline exceeded" errors in the daily review
+	// (agent_self_learning), reflection, and roundtable steps.
+	// 5 min is wide enough to absorb genuinely slow long-form
+	// completions while still bounding the per-call cost.
+	llmTotalRequestTimeout = 5 * time.Minute
+	llmHTTPClientTimeout   = 5 * time.Minute
+	llmAttemptTimeout      = 5 * time.Minute
 )
 
 // DollarBudgetGate is the F14 pre-call check that enforces a configurable

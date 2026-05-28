@@ -25,6 +25,58 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { apiPut, formatApiError } from "../lib/api";
+import { useAppPreferences } from "../lib/preferences";
+
+/**
+ * Locale-aware copy for the surfaces a non-Chinese-speaking operator
+ * actually sees on the Companies page and FundLayout header: the
+ * badge label ("自动决策：开/关"), inline quick-toggle label, save
+ * errors, and the modal title + primary action buttons. Deep-form
+ * hint text inside the modal stays Chinese for now — it's dense
+ * regulatory copy that needs a careful translation pass and we don't
+ * want to ship half-translated paragraphs. The keys here are the
+ * minimum so an EN-language user is no longer confronted with mixed
+ * scripts in the always-visible chrome.
+ */
+function useAutoExecCopy() {
+  const { language } = useAppPreferences();
+  return useMemo(() => {
+    if (language === "en-US") {
+      return {
+        badgeLabel: "Auto-execute",
+        badgeOn: "On",
+        badgeOff: "Off",
+        quickLabel: "Auto-execute",
+        gearTitle: "Auto-execute settings",
+        toggleError: "Failed to toggle auto-execute",
+        modalTitleSuffix: "Auto-execute settings",
+        modalHint:
+          "When enabled, plans from the team execute without manual approval as long as they pass the guardrails below; anything that fails a check bounces back to human review.",
+        enableSwitch: "Enable auto-execute",
+        save: "Save settings",
+        saving: "Saving…",
+        cancel: "Cancel",
+        saveError: "Failed to save auto-execute settings",
+      } as const;
+    }
+    return {
+      badgeLabel: "自动决策",
+      badgeOn: "开",
+      badgeOff: "关",
+      quickLabel: "自动决策",
+      gearTitle: "自动决策设置",
+      toggleError: "切换自动决策失败",
+      modalTitleSuffix: "自动决策设置",
+      modalHint:
+        "打开后，团队产出的方案在通过下列护栏时无需人工审批直接执行；任一条不满足都会自动回到人工审批。",
+      enableSwitch: "启用自动决策执行",
+      save: "保存设置",
+      saving: "保存中…",
+      cancel: "取消",
+      saveError: "保存自动决策设置失败",
+    } as const;
+  }, [language]);
+}
 
 export interface AutoExecuteConfig {
   enabled: boolean;
@@ -294,6 +346,7 @@ interface SettingsModalProps {
 }
 
 export function AutoExecuteSettingsModal({ open, fund, onClose, onSaved }: SettingsModalProps): JSX.Element | null {
+  const copy = useAutoExecCopy();
   const [form, setForm] = useState<FormState>(mergeFormDefaults(fund.autoExecute));
   const [researchTier, setResearchTier] = useState<ResearchTier>(
     fund.researchTier === "advanced" ? "advanced" : "standard",
@@ -336,7 +389,7 @@ export function AutoExecuteSettingsModal({ open, fund, onClose, onSaved }: Setti
       onSaved(updated);
       onClose();
     } catch (err) {
-      setError(formatApiError(err, "保存自动决策设置失败"));
+      setError(formatApiError(err, copy.saveError));
     } finally {
       setSaving(false);
     }
@@ -361,20 +414,20 @@ export function AutoExecuteSettingsModal({ open, fund, onClose, onSaved }: Setti
        */}
       <div className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
         <div className="shrink-0 border-b border-gray-100 px-6 py-4">
-          <h3 className="text-base font-semibold text-gray-900">自动决策设置 · {fund.name}</h3>
-          <p className="mt-1 text-xs text-gray-500">
-            打开后，团队产出的方案在通过下列护栏时无需人工审批直接执行；任一条不满足都会自动回到人工审批。
-          </p>
+          <h3 className="text-base font-semibold text-gray-900">
+            {copy.modalTitleSuffix} · {fund.name}
+          </h3>
+          <p className="mt-1 text-xs text-gray-500">{copy.modalHint}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col text-sm">
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
           <label className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
-            <span className="font-medium text-gray-800">启用自动决策执行</span>
+            <span className="font-medium text-gray-800">{copy.enableSwitch}</span>
             <SwitchToggle
               enabled={form.enabled}
               onToggle={(next) => setForm((prev) => ({ ...prev, enabled: next }))}
-              label="启用自动决策"
+              label={copy.enableSwitch}
             />
           </label>
 
@@ -594,14 +647,14 @@ export function AutoExecuteSettingsModal({ open, fund, onClose, onSaved }: Setti
               disabled={saving}
               className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50"
             >
-              取消
+              {copy.cancel}
             </button>
             <button
               type="submit"
               disabled={saving}
               className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
             >
-              {saving ? "保存中…" : "保存设置"}
+              {saving ? copy.saving : copy.save}
             </button>
           </div>
         </form>
@@ -634,6 +687,7 @@ interface InlineToggleProps {
 
 // Inline switch + gear icon block used on the Companies page.
 export function AutoExecuteInlineToggle({ fund, onUpdated, size = "sm", showLabel = true }: InlineToggleProps): JSX.Element {
+  const copy = useAutoExecCopy();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -665,7 +719,7 @@ export function AutoExecuteInlineToggle({ fund, onUpdated, size = "sm", showLabe
       });
       onUpdated(updated);
     } catch (err) {
-      setError(formatApiError(err, "切换自动决策失败"));
+      setError(formatApiError(err, copy.toggleError));
     } finally {
       setSaving(false);
     }
@@ -674,8 +728,8 @@ export function AutoExecuteInlineToggle({ fund, onUpdated, size = "sm", showLabe
   return (
     <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
       {showLabel ? (
-        <span className="text-[11px] text-gray-500" title="自动决策">
-          自动决策
+        <span className="text-[11px] text-gray-500" title={copy.quickLabel}>
+          {copy.quickLabel}
         </span>
       ) : null}
       <SwitchToggle
@@ -683,7 +737,7 @@ export function AutoExecuteInlineToggle({ fund, onUpdated, size = "sm", showLabe
         onToggle={(next) => void handleQuickToggle(next)}
         disabled={saving}
         size={size}
-        label="切换自动决策"
+        label={copy.quickLabel}
       />
       <button
         type="button"
@@ -693,8 +747,8 @@ export function AutoExecuteInlineToggle({ fund, onUpdated, size = "sm", showLabe
           setOpen(true);
         }}
         className="rounded-md p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-700"
-        title="自动决策设置"
-        aria-label="自动决策设置"
+        title={copy.gearTitle}
+        aria-label={copy.gearTitle}
       >
         <GearIcon />
       </button>
@@ -711,6 +765,7 @@ interface BadgeProps {
 
 // Persistent badge for the FundLayout header. Always visible, clickable.
 export function AutoExecuteHeaderBadge({ fund, onUpdated }: BadgeProps): JSX.Element {
+  const copy = useAutoExecCopy();
   const [open, setOpen] = useState(false);
   const cfg = mergeFormDefaults(fund.autoExecute);
   const enabledTone = cfg.enabled
@@ -722,10 +777,10 @@ export function AutoExecuteHeaderBadge({ fund, onUpdated }: BadgeProps): JSX.Ele
         type="button"
         onClick={() => setOpen(true)}
         className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 transition hover:brightness-95 ${enabledTone}`}
-        title="自动决策设置"
+        title={copy.gearTitle}
       >
         <span className={`h-1.5 w-1.5 rounded-full ${cfg.enabled ? "bg-emerald-500" : "bg-gray-400"}`} />
-        自动决策：{cfg.enabled ? "开" : "关"}
+        {copy.badgeLabel}: {cfg.enabled ? copy.badgeOn : copy.badgeOff}
         <GearIcon className="h-3 w-3" />
       </button>
       <AutoExecuteSettingsModal open={open} fund={fund} onClose={() => setOpen(false)} onSaved={onUpdated} />

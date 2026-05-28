@@ -19,10 +19,58 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+// minReflectionContentRunes is the lower bound on a distilled lesson's
+// character count (Unicode runes, so a Chinese reflection of ~10 chars
+// still passes). Anything shorter is almost certainly the LLM giving
+// up — empty, "n/a", or a single fragment that lost its tail to the
+// firstSentence truncation downstream. The threshold is intentionally
+// permissive in the Chinese direction because a meaningful 中文 lesson
+// can be ~20 runes ("减少在收盘前 30 分钟的被动追价") while a 30-rune
+// English platitude ("To improve over time") is still useless.
+const minReflectionContentRunes = 25
+
+// reflectionPlatitudePattern matches the leading words of the generic
+// motivational sentences we've observed the distiller emit when its
+// input is itself templated (the OCS Selection 2026-05-25 batch all
+// reduced to "To maximize the utility of research" — see commit notes).
+// The regex is anchored at the start so a substring inside an
+// otherwise-substantive lesson doesn't cause a false reject.
+var reflectionPlatitudePattern = regexp.MustCompile(
+	`(?i)^\s*(to\s+maximize\b|to\s+improve\b|to\s+ensure\b|ensure\s+that\b|always\s+focus\b|always\s+remember\b|it\s+is\s+important\b|the\s+key\s+is\b|in\s+order\s+to\b|为了\s*(让|实现|最大|提升|提高|确保)|要确保|要保证|要持续|应当持续|应当确保)`,
+)
+
+// isLowQualityReflection reports whether a distilled lesson is too
+// short or too generic to be worth persisting. Called in Reflect's
+// per-group loop right after empty-trim, so an unhelpful LLM response
+// never gets stored as a "long_term" memory and never gets broadcast
+// to every agent as a "needs approval" proposed skill.
+//
+// Two-stage filter:
+//  1. Length floor — catches the "got truncated to nothing" case where
+//     downstream firstSentence(160) cut at the first period and left a
+//     stub.
+//  2. Anchored regex on known-bad opening phrases (English + Chinese)
+//     — catches the "padded platitude" case where the model produced
+//     enough characters to clear the length gate but said nothing.
+func isLowQualityReflection(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return true
+	}
+	if len([]rune(trimmed)) < minReflectionContentRunes {
+		return true
+	}
+	if reflectionPlatitudePattern.MatchString(trimmed) {
+		return true
+	}
+	return false
+}
 
 // Distiller generates a narrative lesson from a group of related memories.
 // Implementations are usually thin wrappers around an LLM completion;
@@ -119,6 +167,12 @@ func Reflect(ctx context.Context, items []Item, distiller Distiller, p ReflectPa
 		}
 		content = strings.TrimSpace(content)
 		if content == "" {
+			continue
+		}
+		// Drop low-quality LLM output so it never pollutes the
+		// long_term layer (which the agent skill proposer reads
+		// from) — see isLowQualityReflection rationale.
+		if isLowQualityReflection(content) {
 			continue
 		}
 

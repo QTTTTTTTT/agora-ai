@@ -160,7 +160,14 @@ func (m *runtimeMemorySystem) maybeRunReflection(ctx context.Context, fundID str
 	if m.teamRepo != nil && m.agentRepo != nil {
 		proposer = &runtimeSkillProposer{teamRepo: m.teamRepo, agentRepo: m.agentRepo}
 	}
-	runReflectionCycle(ctx, m.memoryRepo, newLLMReflectionDistiller(m.llmRuntime, fund, llm.TierStandard), proposer, fundID, tradingDate)
+	cadence := defaultReflectionCadenceDays
+	if fund != nil && len(fund.Config) > 0 {
+		profile := decodeFundMarketProfile(fund.Config)
+		if profile.ReflectionCadenceDays != nil && *profile.ReflectionCadenceDays > 0 {
+			cadence = *profile.ReflectionCadenceDays
+		}
+	}
+	runReflectionCycleWithCadence(ctx, m.memoryRepo, newLLMReflectionDistiller(m.llmRuntime, fund, llm.TierStandard), proposer, fundID, tradingDate, cadence)
 }
 
 // runReflectionCycle is the testable core of maybeRunReflection. It is
@@ -179,14 +186,28 @@ func (m *runtimeMemorySystem) maybeRunReflection(ctx context.Context, fundID str
 // reflection. A nil proposer means "don't propagate" — useful for tests
 // that just want to exercise the persistence path.
 func runReflectionCycle(ctx context.Context, store reflectionMemoryStore, distiller memory.Distiller, proposer skillProposer, fundID string, tradingDate time.Time) int {
+	return runReflectionCycleWithCadence(ctx, store, distiller, proposer, fundID, tradingDate, defaultReflectionCadenceDays)
+}
+
+// runReflectionCycleWithCadence is the same as runReflectionCycle but
+// accepts a per-fund cadence override (Tier-M M3). Clamps to [1, 30] so a
+// pathological config can't stop reflections entirely or spam them every
+// few hours.
+func runReflectionCycleWithCadence(ctx context.Context, store reflectionMemoryStore, distiller memory.Distiller, proposer skillProposer, fundID string, tradingDate time.Time, cadenceDays int) int {
 	if store == nil || distiller == nil {
 		return 0
+	}
+	if cadenceDays < 1 {
+		cadenceDays = defaultReflectionCadenceDays
+	}
+	if cadenceDays > 30 {
+		cadenceDays = 30
 	}
 	now := tradingDate
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	cadence := time.Duration(defaultReflectionCadenceDays) * 24 * time.Hour
+	cadence := time.Duration(cadenceDays) * 24 * time.Hour
 	if recent, err := store.ListByFund(ctx, fundID, reflectionMemoryLayer, 1); err == nil && len(recent) > 0 {
 		if now.Sub(recent[0].CreatedAt) < cadence {
 			return 0

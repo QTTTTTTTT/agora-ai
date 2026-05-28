@@ -82,6 +82,33 @@ Adhere to these rules without exception:
        - componentsAvailable=1 means the score is built on a single sub-factor — discount the signal accordingly. A "Q1 quality" verdict built only on safetyZ is materially weaker than one built on all three.
        - QualityScores are slow-moving (fundamentals change quarterly). Don't expect day-over-day shifts in this block; if you see one, you're looking at a coverage change (a new symbol joined the universe with strong / weak data) rather than a real fundamental move.
        - When the block is absent treat it as "no fundamental coverage today, lean on the FundamentalSummary text and universeRanking alone". Do NOT infer "low quality" from absence.
+   - When input.valueScores is present (Sprint F #1 cross-sectional value factor — Fama-French HML lineage): every row carries bookToPriceZ / earningsToPriceZ / dividendYieldZ + a single compositeZ + a quartile bucket (1 = cheapest, 4 = most expensive) + componentsAvailable (1..3). HIGH compositeZ = CHEAP. Use this block as the "cheap vs expensive" overlay orthogonal to BOTH momentum (universeRanking) and quality (qualityScores):
+       - The single highest-conviction long setup is the AQR "Quality at a Reasonable Price" intersection: Q1 valueScores AND Q1 qualityScores. Size at the per-symbol ceiling and cite both blocks by name in your reasoning. This is Buffet's structural alpha and the most replicated long-only result in academic finance.
+       - The "value trap" warning: Q1 valueScores BUT Q4 qualityScores means the market is correctly pricing a junk company cheap. Default action is "watch", NOT "buy", unless the bullCase explicitly carries a turnaround / activist / takeover catalyst the qualityScores hasn't refreshed yet. Cap qtyPct at half the per-symbol ceiling even with the override.
+       - The "growth at any price" warning: Q4 valueScores AND Q1 universeRanking means the rally is happening on names that are already expensive. Late-cycle behaviour; cap adds at half the ceiling and lean toward "reduce" on names already held. Cite both blocks by name when applying the cap.
+       - Use the sub-factor decomposition to color the verdict: a high compositeZ driven purely by dividendYieldZ (e.g. a cigar-butt utility) is NOT the same as one driven by bookToPriceZ (a discount to book). When citing the value block in your reasoning, name which sub-factor is dominant.
+       - earningsToPriceZ=0 when the symbol is loss-making (we exclude negative E/P from the comparison group). A composite built from B/P + D/P alone, with earningsToPriceZ=0, signals "asset-cheap but no current profits" — handle the same way as a turnaround story above. componentsAvailable < 3 is the explicit marker for this case.
+       - When you propose REDUCING a Q1 valueScores name (the universe says it's cheap), you owe an explicit one-line justification in reasoning: the cross-section is paying you to hold it. Default reduces on Q1 valueScores require either a position-level stop hit or a concrete deterioration thesis in the bearCase.
+       - ValueScores are slow-moving (fundamentals refresh quarterly). Same coverage-shift caveat as qualityScores applies.
+       - When the block is absent treat it as "no cross-sectional value coverage today, lean on the FundamentalSummary text alone". Do NOT infer "everything is expensive" from absence.
+   - When input.lowBetaScores is present (Sprint F #2 Betting-Against-Beta defensive overlay — Frazzini-Pedersen 2014 lineage): every row carries the raw beta + volatility plus their NEGATED z-scores (betaZ / volatilityZ — HIGH = defensive) and a 1..4 quartile bucket (1 = most defensive, 4 = most aggressive). Use this block to apply a regime-conditional defensive tilt orthogonal to BOTH momentum (universeRanking) and the fundamental sleeves (qualityScores / valueScores):
+       - When riskBudget reports drawdown_throttle (Sprint B #2 throttle is engaged) OR the regime block puts MORE THAN HALF of universe symbols in trend_down: tilt toward Q1 lowBetaScores. Concretely, when picking between two otherwise-equivalent buy candidates, prefer the lower beta one and downgrade adds on Q4 lowBetaScores names to "watch". Cite the riskBudget / regime trigger in your reasoning ("drawdown_throttle is active so demoting MSTR buy to watch and shifting to KO from the Q1 lowBetaScores list").
+       - When MAJORITY of universe is in regime=trend_up AND drawdown is not throttled: the aggressive tilt is rational — Q4 lowBetaScores names will outrun the universe on the way up. Do NOT impose a defensive cap here. The block's signal is informational; don't fight it.
+       - The Q1 lowBetaScores ∩ Q1 qualityScores intersection is the canonical "quality + low-risk" trade (Asness 2019 "Quality Investing" + Frazzini-Pedersen 2014). When both blocks have a name in their Q1, you may treat that name as eligible for a defensive overweight (up to 1.25× the per-symbol ceiling) when the fund is in drawdown_throttle. This is the single highest-leverage Sprint F intersection — cite both blocks by name when invoking it.
+       - The Q1 lowBetaScores ∩ Q4 universeRanking intersection is the "value trap of the defensive sleeve": the name is low-beta + low-vol but the market is shunning it. Treat as "watch" unless the bullCase carries a specific catalyst.
+       - When componentsAvailable=1 the score was built on volatility alone (market-index OHLC failed to resolve for that name's market). Discount the signal: a Q1 lowBetaScores built only on vol is materially weaker than one built on beta + vol.
+       - Cite the lowBetaScores row in your reasoning whenever you apply the defensive tilt above. The downstream attribution layer can only credit the signal when it's named explicitly.
+       - When the block is absent treat it as "no defensive overlay today, lean on quantSnapshots regime + riskBudget alone". Do NOT infer "every name is defensive" from absence.
+   - When input.pead is present (Sprint F #3 Post-Earnings Announcement Drift — Bernard-Thomas 1989 / Sadka 2006 lineage): the block carries lookbackDays / minSurprisePct metadata plus a sorted (by |surprisePercent| desc) array of signals each with eventDate, daysSinceEvent, surprisePercent (decimal — 0.05 = 5% beat), driftPercent (price move since eventDate), entryClose / currentClose, and a state in {continuing, complete, faded, neutral}. PEAD is a slow-decay (~60 day) momentum signal anchored to a real corporate event, complementary to quantSnapshots regime and universeRanking. Apply per state:
+       - state=continuing AND surprisePercent > 0: the canonical PEAD long tilt. The market is still digesting a real beat. When the symbol is in the universe and not already at the per-symbol ceiling, you may BUY or ADD at the per-symbol ceiling; cite the pead row by symbol + surprisePercent + driftPercent + daysSinceEvent in your reasoning. The closer daysSinceEvent is to 1 (fresh), the higher the conviction; past day 30 the remaining drift is small enough that you should size at half the ceiling.
+       - state=continuing AND surprisePercent < 0: the bearish equivalent. For HELD positions, default to REDUCE at qtyPct = 0.3 unless the bullCase contains a concrete catalyst overriding the miss. For non-held names, default WATCH; never BUY into an active negative drift.
+       - state=faded AND surprisePercent > 0: the "good print, bad reaction" deep-value setup. The market temporarily overreacted to something other than fundamentals (sector rotation, macro shock). For non-held names this is the strongest "value entry" the block produces — you may BUY at the per-symbol ceiling if QualityScores is Q1 OR Q2 (good company, currently mispriced). For Q3 / Q4 quality, the fade may be justified (something hidden in the print); default to WATCH and require an explicit bullCase corroboration before buying.
+       - state=faded AND surprisePercent < 0: dead-cat bounce. The stock missed AND drifted UP — typically a short-cover squeeze, sector rotation, or a one-off catalyst (M&A rumour, activist letter). Treat as low-conviction; for held names, this is a window to TRIM into strength. For non-held names, default WATCH and require the bullCase to explicitly name the catalyst driving the bounce.
+       - state=complete: the drift is fully realised; the signal is neutral going forward. Cite the row if it disambiguates a same-direction quantSnapshots / ranking call ("complete-drift PEAD confirms the momentum is mature; sizing the add at half ceiling") but do not use it as the primary driver.
+       - state=neutral (surprise below the 3% floor OR drift undefined): treat as no signal. The row exists for auditability only.
+       - When a symbol appears in BOTH pead (continuing positive) AND lowBetaScores Q1, the Q1 defensive overlay is the gating condition — the combined signal is "high-conviction defensive add", appropriate for any regime including drawdown_throttle. Cite both blocks by name.
+       - When a symbol appears in pead (continuing negative) AND quantSnapshots regime=trend_down, the convergence is the strongest "reduce" signal the block produces — TRIM aggressively (qtyPct up to 0.5) and explicitly cite both blocks.
+       - When the block is absent treat it as "no recent earnings catalysts to drift off", lean on quantSnapshots regime + universeRanking alone. Do NOT infer "all priced in" from absence.
    - When input.quantSnapshots is present (Sprint A regime + volatility prior): each entry carries that symbol's regime (trend_up/trend_down/range/chop), the 14-bar ATR in price units (atr14), the same ATR as a percentage of close (atrPct), and an explicit positionSizeCeilingPct. Apply these as a per-symbol filter on top of every other signal:
        - positionSizeCeilingPct is the UPPER BOUND on any qtyPct you assign to a buy or add for that symbol. If you want to size larger you must drop to the ceiling. The number is derived from a 50-bps-per-trade risk budget at a 2× ATR stop, clamped into [0.005, 0.10]; it already respects rule 3's 10% single-order cap so you do NOT need to add your own buffer on top.
        - If regime is "chop", treat any buy/add as exceptional: only propose it when the debate verdict on that symbol is bull AND the news / fundamental block carries a concrete near-term catalyst. Otherwise downgrade to "watch". Chop kills both trend and mean-reversion sleeves; the historical attribution scorecard usually shows red here.
@@ -143,6 +170,33 @@ Adhere to these rules without exception:
        - When pairSpreads is absent treat it as "no extended pairs in the watched correlation universe today" — silence is not a buy or sell signal.
        - Cite the row when it changes an action ("pairSpreads NVDA/AMD spreadZ=-2.3, rho=0.85 → adding the cheap AMD leg at full ceiling and trimming NVDA from full size to half ceiling on next rebalance").
 
+   - When input.agentSkills is present (Sprint 1 / S1 learning-loop closure): every row is one APPROVED + ENABLED skill on this fund's agents (PM, risk, researcher, trader). The wiring layer has already filtered out "proposed" and "disabled" entries; everything you see here is part of the operator-signed-off playbook for this fund. Apply as a first-class behavioural constraint:
+       - When a skill names a concrete entry/exit rule (e.g. "BAB defensive tilt when drawdown_throttle is engaged"), HONOUR it whenever the trigger condition fires in today's other blocks (riskBudget, lowBetaScores, regime…). Cite the skill by name in your reasoning when you apply it.
+       - When a skill names a forbidden setup (e.g. "Never add into trend_down regime without bullCase dissent=0"), treat it as a hard veto on the named pattern. Downgrade the offending action to "watch" and cite the skill.
+       - Skills sourced from "reflection" or "ab_test" are the system's own learned playbook — equally authoritative as manually-authored ones once approved.
+       - When two skills appear to conflict, prefer the one whose description references the more specific signal block (e.g. a skill explicitly mentioning today's regime overrides a generic risk-averse skill).
+       - When the block is absent treat it as "no special playbook beyond the default discipline above"; do NOT invent skills not in the block.
+   - When input.recentLessons is present (Sprint 1 / S1): every row is one distilled lesson the agent learning system stored within the last ~14 days. Each row carries the trading date, the agent role that produced it (pm / risk / researcher / trader / "" for fund-wide daily summaries), and the lesson body. These are the textual memories you would carry as a human PM ("we got chopped on TSLA last Wednesday by adding into a trend_down regime"). Use them as a personalised soft prior that COMPLEMENTS lessonReplay (which is the attribution-derived view):
+       - Scan the rows for any pattern that matches a current candidate action — same symbol, same sector, same signal-block combination — and let it shift sizing or action class accordingly. Cite the lesson date + the agent role when it changes your action ("recentLessons 2026-05-21 pm: 'added into trend_down on TSLA, lost 1.8%' — demoting today's TSLA add to watch").
+       - The newest rows are at the top; if you read more than 5 rows before finding a relevant one, you're at the edge of the freshness budget and the lesson is mostly historical.
+       - Sprint 3 / M1: when a row carries hitRate + samplesObserved > 0, treat that as the lesson's empirical track record. hitRate >= 0.6 (across >= 3 samples) = the lesson reliably anticipated outcomes — weight it heavily. hitRate <= 0.3 (across >= 3 samples) = past predictions failed — strongly down-weight or ignore. samplesObserved < 3 means the rate is not yet meaningful; defer to other priors.
+       - Lessons that contradict each other (one says "buy the dip", another says "don't buy chop") are real disagreements between past selves — prefer the more recent one AND the one whose context block (the row's tags) more closely matches today.
+       - When the block is absent treat it as "first day of operation OR consolidation skipped" — fall back on lessonReplay and your other priors. Do NOT infer "no constraints" from absence.
+   - When input.intradaySnapshots is present (Sprint 3 / L1): up to 20 rows, one per candidate symbol carrying intraday OHLC microstructure. Each row reports trendDirection ∈ {up, down, range} on the configured intraday interval (5m default), the realised vol z-score (z > +1 means today's intraday range is unusually wide, z < -1 means unusually narrow), and the volume ratio of the latest bar vs the median (> 1.5 means a volume spike).
+       - Use intraday as TIMING confirmation, not thesis: when daily blocks (universeRanking + sleeves) already favour a buy, an intraday trendDirection=up AND volRatio > 1.2 reinforces the entry. When daily blocks favour a buy but intraday trendDirection=down with volRatio > 1.5, prefer to demote sizing or stage the entry (cite the row in reasoning).
+       - When intraday trendDirection=range, treat the snapshot as neutral and lean on daily blocks.
+       - volZScore > 2 with trendDirection=range often signals indecision — flag it in reasoning but do NOT let a single intraday vol spike override the daily thesis.
+       - When the block is absent treat it as "intraday data unavailable" (weekend, off-session, provider down) — fall back on daily blocks. Do NOT infer "low intraday vol" from absence.
+   - When input.longTermReflections is present (Sprint 1 / S1): at most 5 of the newest layer=long_term reflection memories (~30-day window). These are the higher-distilled, strategy-level summaries the reflexion / distiller cron produces by aggregating the per-agent lessons. Use them as the slow-moving steering field on top of recentLessons:
+       - A reflection naming a recurring pattern (e.g. "we systematically overweight high-beta names into earnings weeks and bleed on the print") is a structural correction the operator expects you to APPLY. When today's plan would repeat the pattern, downgrade the offending action and cite the reflection by date.
+       - Reflections are not commands but accumulated heuristics. Prefer them over a single recentLessons row when the two disagree.
+       - When the block is absent treat it as "no long-horizon synthesis yet" — fall back on recentLessons. Reflections being absent is informational, not a signal.
+   - When input.semanticRecall is present (Sprint 3 / L3): at most 6 rows of memories the system retrieved by SEMANTIC similarity (cosine, range 0..1) to today's macro briefing + universe. Unlike recentLessons (which is recency-driven) and longTermReflections (which is the distilled rollup), these rows are "the last time we sounded like we sound today". Each row carries createdAt, layer (agent / daily / long_term), title, a 260-char snippet, tags, and similarity:
+       - Use semanticRecall as a PATTERN-MATCH oracle. When a row with similarity > 0.85 contradicts the action the daily blocks would otherwise suggest, treat it as a high-priority warning and demote sizing or flip to watch. When a row reinforces the same action, you may upsize within risk limits.
+       - Tags carrying symbols / sectors should be cross-referenced against today's candidate list — a precedent that mentions a current candidate is worth more than one that doesn't, even at the same similarity.
+       - Similarity below 0.6 is weak signal; cite only if the snippet itself is unusually specific to today's plan.
+       - When the block is absent treat it as "no semantically-similar precedent indexed yet" (e.g. embedding backfill not run). Do NOT infer novelty from absence.
+
 5. Locale: write reasoning text in the same language the input MacroBriefing / RoundtableConsensus uses (Chinese ⇄ English). If the input is empty or mixed, default to Chinese.
 
 Return only the JSON object. Any text outside the JSON object will be rejected as a parsing failure.`
@@ -177,6 +231,9 @@ func userPrompt(input DecisionInput) string {
 		QuantSnapshots      []quantSnapshotPromptItem    `json:"quantSnapshots,omitempty"`
 		UniverseRanking     []universeRankingPromptItem  `json:"universeRanking,omitempty"`
 		QualityScores       []qualityScorePromptItem     `json:"qualityScores,omitempty"`
+		ValueScores         []valueScorePromptItem       `json:"valueScores,omitempty"`
+		LowBetaScores       []lowBetaScorePromptItem     `json:"lowBetaScores,omitempty"`
+		PEAD                *peadPromptBlock             `json:"pead,omitempty"`
 		Cooldowns           []cooldownPromptItem         `json:"cooldowns,omitempty"`
 		RiskBudget          *riskBudgetPromptItem        `json:"riskBudget,omitempty"`
 		NewsCatalysts       []newsCatalystPromptItem     `json:"newsCatalysts,omitempty"`
@@ -184,6 +241,11 @@ func userPrompt(input DecisionInput) string {
 		Exposure            *exposurePromptItem          `json:"exposure,omitempty"`
 		Correlations        *correlationsPromptItem      `json:"correlations,omitempty"`
 		PairSpreads         *pairSpreadsPromptItem       `json:"pairSpreads,omitempty"`
+		AgentSkills         []AgentSkillContext          `json:"agentSkills,omitempty"`
+		RecentLessons       []RecentLessonContext        `json:"recentLessons,omitempty"`
+		LongTermReflections []LongTermReflectionContext  `json:"longTermReflections,omitempty"`
+		IntradaySnapshots   []IntradayContext            `json:"intradaySnapshots,omitempty"`
+		SemanticRecall      []SemanticRecallContext      `json:"semanticRecall,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
 		RiskNotes           []string                     `json:"riskNotes,omitempty"`
 	}{
@@ -210,6 +272,9 @@ func userPrompt(input DecisionInput) string {
 		QuantSnapshots:      buildQuantSnapshotPromptItems(input.QuantSnapshots),
 		UniverseRanking:     buildUniverseRankingPromptItems(input.UniverseRanking),
 		QualityScores:       buildQualityScorePromptItems(input.QualityScores),
+		ValueScores:         buildValueScorePromptItems(input.ValueScores),
+		LowBetaScores:       buildLowBetaScorePromptItems(input.LowBetaScores),
+		PEAD:                buildPEADPromptBlock(input.PEAD),
 		Cooldowns:           buildCooldownPromptItems(input.Cooldowns),
 		RiskBudget:          buildRiskBudgetPromptItem(input.RiskBudget),
 		NewsCatalysts:       buildNewsCatalystPromptItems(input.NewsCatalysts),
@@ -217,6 +282,11 @@ func userPrompt(input DecisionInput) string {
 		Exposure:            buildExposurePromptItem(input.Exposure),
 		Correlations:        buildCorrelationsPromptItem(input.Correlations),
 		PairSpreads:         buildPairSpreadsPromptItem(input.PairSpreads),
+		AgentSkills:         capAgentSkillContexts(input.AgentSkills, 20),
+		RecentLessons:       capRecentLessonContexts(input.RecentLessons, 12),
+		LongTermReflections: capLongTermReflectionContexts(input.LongTermReflections, 5),
+		IntradaySnapshots:   capIntradayContexts(input.IntradaySnapshots, 20),
+		SemanticRecall:      capSemanticRecallContexts(input.SemanticRecall, 6),
 		BuyBudget:           input.BuyBudget,
 		RiskNotes:           input.RiskNotes,
 	}
@@ -248,6 +318,126 @@ type roundtableSymbolPromptItem struct {
 	BearCase     string `json:"bearCase,omitempty"`
 	QuantCase    string `json:"quantCase,omitempty"`
 	DissentVotes int    `json:"dissentVotes"`
+}
+
+// capAgentSkillContexts trims each skill description to a 240-char
+// budget (so a 12-skill block stays under ~3 KB in the prompt) and
+// caps the slice length at limit. The wiring layer is allowed to pass
+// in arbitrarily many skills; the cap here is the prompt-side defence
+// so a misconfigured fund with 200 enabled skills can't blow the
+// token budget.
+func capAgentSkillContexts(items []AgentSkillContext, limit int) []AgentSkillContext {
+	if len(items) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	const maxDesc = 240
+	out := make([]AgentSkillContext, 0, len(items))
+	for _, s := range items {
+		s.Description = truncatePromptRunes(s.Description, maxDesc)
+		out = append(out, s)
+	}
+	return out
+}
+
+// capRecentLessonContexts trims each lesson body to a 280-char budget
+// and caps the slice length at limit. The wiring layer pre-sorts by
+// recency (newest first); cap here is the prompt-budget defence.
+func capRecentLessonContexts(items []RecentLessonContext, limit int) []RecentLessonContext {
+	if len(items) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	const maxContent = 280
+	out := make([]RecentLessonContext, 0, len(items))
+	for _, l := range items {
+		l.Content = truncatePromptRunes(l.Content, maxContent)
+		l.Title = truncatePromptRunes(l.Title, 80)
+		out = append(out, l)
+	}
+	return out
+}
+
+// capLongTermReflectionContexts mirrors capRecentLessonContexts but
+// reflections are deliberately allowed a wider body (the distiller's
+// output) since the cap is just 5 rows.
+func capLongTermReflectionContexts(items []LongTermReflectionContext, limit int) []LongTermReflectionContext {
+	if len(items) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	const maxContent = 360
+	out := make([]LongTermReflectionContext, 0, len(items))
+	for _, r := range items {
+		r.Content = truncatePromptRunes(r.Content, maxContent)
+		r.Title = truncatePromptRunes(r.Title, 80)
+		out = append(out, r)
+	}
+	return out
+}
+
+// capIntradayContexts limits the intraday block to `limit` rows. We
+// don't truncate strings — each row is already tiny (symbol + interval
+// + direction + 3 floats) so there's nothing to shrink. Sorted by the
+// caller (intraday.Builder); we preserve order.
+func capIntradayContexts(items []IntradayContext, limit int) []IntradayContext {
+	if len(items) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]IntradayContext, len(items))
+	copy(out, items)
+	return out
+}
+
+// capSemanticRecallContexts trims body / title to a sane budget and
+// caps the row count. The recall service already sorts by similarity
+// desc — we preserve that order. Limit is intentionally smaller (6)
+// than RecentLessons because semantic recall fundamentally repeats
+// information also present in long-term reflections; we just want a
+// few high-signal precedents.
+func capSemanticRecallContexts(items []SemanticRecallContext, limit int) []SemanticRecallContext {
+	if len(items) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	const maxSnippet = 260
+	out := make([]SemanticRecallContext, 0, len(items))
+	for _, r := range items {
+		r.Snippet = truncatePromptRunes(r.Snippet, maxSnippet)
+		r.Title = truncatePromptRunes(r.Title, 80)
+		// Round to 3 decimals so the prompt JSON is stable across
+		// floating-point noise (the same query rerun should produce
+		// the same prompt — important for prompt-hash caches).
+		r.Similarity = float64(int(r.Similarity*1000)) / 1000.0
+		out = append(out, r)
+	}
+	return out
+}
+
+// truncatePromptRunes preserves UTF-8 boundaries (Chinese characters
+// are 3 bytes each in UTF-8, so naive byte-slicing would corrupt the
+// trailing rune and break json.Marshal).
+func truncatePromptRunes(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
 }
 
 // quantSnapshotPromptItem is the on-the-wire shape we expose for the
@@ -385,6 +575,144 @@ func buildQualityScorePromptItems(rows []SymbolQualityScore) []qualityScorePromp
 			CompositeZ:          round4Signed(r.CompositeZ),
 			Quartile:            r.Quartile,
 			ComponentsAvailable: r.ComponentsAvailable,
+		})
+	}
+	return out
+}
+
+// valueScorePromptItem is the on-the-wire shape for the Sprint
+// F #1 cross-sectional value factor table. Mirrors
+// decision.SymbolValueScore but rounds the z-scores so the
+// prompt JSON stays diff-friendly across runs.
+//
+// HIGH composite = CHEAP. The system prompt's value-factor rules
+// teach the PM to treat Q1 ValueScores as the long-horizon
+// Fama-French HML tilt; the synergy with Q1 QualityScores is the
+// "Quality at a Reasonable Price" canonical setup.
+type valueScorePromptItem struct {
+	Symbol              string  `json:"symbol"`
+	BookToPriceZ        float64 `json:"bookToPriceZ"`
+	EarningsToPriceZ    float64 `json:"earningsToPriceZ"`
+	DividendYieldZ      float64 `json:"dividendYieldZ"`
+	CompositeZ          float64 `json:"compositeZ"`
+	Quartile            int     `json:"quartile,omitempty"`
+	ComponentsAvailable int     `json:"componentsAvailable"`
+}
+
+// buildValueScorePromptItems mirrors buildQualityScorePromptItems
+// for the value block.
+func buildValueScorePromptItems(rows []SymbolValueScore) []valueScorePromptItem {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]valueScorePromptItem, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, valueScorePromptItem{
+			Symbol:              r.Symbol,
+			BookToPriceZ:        round4Signed(r.BookToPriceZ),
+			EarningsToPriceZ:    round4Signed(r.EarningsToPriceZ),
+			DividendYieldZ:      round4Signed(r.DividendYieldZ),
+			CompositeZ:          round4Signed(r.CompositeZ),
+			Quartile:            r.Quartile,
+			ComponentsAvailable: r.ComponentsAvailable,
+		})
+	}
+	return out
+}
+
+// lowBetaScorePromptItem is the on-the-wire shape for the
+// Sprint F #2 Betting-Against-Beta defensive overlay table.
+// Mirrors decision.SymbolLowBetaScore but rounds the floats so
+// the prompt JSON stays diff-friendly across runs.
+//
+// HIGH compositeZ = DEFENSIVE (low beta + low vol). The system
+// prompt teaches the PM to tilt toward Q1 in drawdown regimes
+// and toward Q4 in confirmed trend_up regimes.
+type lowBetaScorePromptItem struct {
+	Symbol              string  `json:"symbol"`
+	Beta                float64 `json:"beta"`
+	Volatility          float64 `json:"volatility"`
+	BetaZ               float64 `json:"betaZ"`
+	VolatilityZ         float64 `json:"volatilityZ"`
+	CompositeZ          float64 `json:"compositeZ"`
+	Quartile            int     `json:"quartile,omitempty"`
+	ComponentsAvailable int     `json:"componentsAvailable"`
+}
+
+// buildLowBetaScorePromptItems mirrors the value/quality prompt
+// builders. Returns nil on empty input so the block is omitted.
+func buildLowBetaScorePromptItems(rows []SymbolLowBetaScore) []lowBetaScorePromptItem {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]lowBetaScorePromptItem, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, lowBetaScorePromptItem{
+			Symbol:              r.Symbol,
+			Beta:                round4Signed(r.Beta),
+			Volatility:          round4Signed(r.Volatility),
+			BetaZ:               round4Signed(r.BetaZ),
+			VolatilityZ:         round4Signed(r.VolatilityZ),
+			CompositeZ:          round4Signed(r.CompositeZ),
+			Quartile:            r.Quartile,
+			ComponentsAvailable: r.ComponentsAvailable,
+		})
+	}
+	return out
+}
+
+// peadSignalPromptItem is the on-the-wire shape for one row of
+// the Sprint F #3 Post-Earnings Announcement Drift table. Carries
+// the symbol's recent surprise + drift + classified state.
+//
+// Compact percentages (signed, 4-dp rounded) keep the prompt
+// JSON diff-friendly across runs. Dates serialise as YYYY-MM-DD
+// because we filter to day-granularity inside the service.
+type peadSignalPromptItem struct {
+	Symbol          string  `json:"symbol"`
+	EventDate       string  `json:"eventDate"`
+	DaysSinceEvent  int     `json:"daysSinceEvent"`
+	SurprisePercent float64 `json:"surprisePercent"`
+	DriftPercent    float64 `json:"driftPercent"`
+	EntryClose      float64 `json:"entryClose"`
+	CurrentClose    float64 `json:"currentClose"`
+	State           string  `json:"state"`
+}
+
+// peadPromptBlock is the top-level shape for the prompt section.
+// Carries the snapshot-level metadata (lookback, threshold) plus
+// the per-symbol rows.
+type peadPromptBlock struct {
+	AsOf           string                 `json:"asOf"`
+	LookbackDays   int                    `json:"lookbackDays"`
+	MinSurprisePct float64                `json:"minSurprisePct"`
+	Signals        []peadSignalPromptItem `json:"signals"`
+}
+
+// buildPEADPromptBlock mirrors the other build* helpers. Returns
+// nil on a nil snapshot OR a snapshot with no non-neutral rows
+// (HasSignal == false). Mirrors the EarningsCalendar block's
+// "drop entirely when nothing actionable" rule.
+func buildPEADPromptBlock(snap *PEADSnapshot) *peadPromptBlock {
+	if snap == nil || !snap.HasSignal() {
+		return nil
+	}
+	out := &peadPromptBlock{
+		AsOf:           snap.AsOf.Format("2006-01-02"),
+		LookbackDays:   snap.LookbackDays,
+		MinSurprisePct: round4Signed(snap.MinSurprisePct),
+		Signals:        make([]peadSignalPromptItem, 0, len(snap.Signals)),
+	}
+	for _, sig := range snap.Signals {
+		out.Signals = append(out.Signals, peadSignalPromptItem{
+			Symbol:          sig.Symbol,
+			EventDate:       sig.EventDate.Format("2006-01-02"),
+			DaysSinceEvent:  sig.DaysSinceEvent,
+			SurprisePercent: round4Signed(sig.SurprisePercent),
+			DriftPercent:    round4Signed(sig.DriftPercent),
+			EntryClose:      round4Signed(sig.EntryClose),
+			CurrentClose:    round4Signed(sig.CurrentClose),
+			State:           string(sig.State),
 		})
 	}
 	return out

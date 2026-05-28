@@ -307,7 +307,71 @@ LLM_PROVIDER=openai
 
 ## 7. 回归用 smoke test
 
-每次部署后跑这一条命令，30 秒内 ok 则视为新功能没回归：
+### 7.1 决策管线 24 块 smoke (最高 leverage)
+
+每次部署后 / 开盘第一笔 plan 落库后跑这一条，<1s 给出 24 块的 present/absent 表：
+
+```bash
+./scripts/smoke-decision.sh                  # 当前最后一笔决策
+./scripts/smoke-decision.sh <fund_id>        # 指定基金最后一笔决策
+./scripts/smoke-decision.sh --json | jq .    # 机读模式，可入 CI
+```
+
+返回 exit code:
+- `0` = 全部 critical 块到位
+- `1` = 至少一个 critical 块缺失 (instrumentHints / quantSnapshots) → 阻断决策
+- `2` = 还没有任何决策被记录 (PM 没跑 / 日志窗口太短，加 `--tail 5000`)
+- `3` = 容器没起 (`docker compose up -d` 没做)
+
+> 24 块 = 21 (Sprint A→E) + 3 (Sprint F)。Sprint F 新增: `valueScores`
+> (Fama-French HML 横截面), `lowBetaScores` (Frazzini-Pedersen 防御性 tilt),
+> `pead` (Bernard-Thomas 盈利公告后漂移). 这三块缺失不阻断决策（PM 会回退到原有
+> 的 21 块组合），但缺失意味着 Sprint F 链路有问题。
+
+### 7.1b 一段时间窗内各 block 的"被引用率" (G1 #2)
+
+`smoke-decision.sh` 看的是"最近一笔决策有没有 block"，但有时候我们想看
+"过去 7 天 PM 实际上引用了哪些 block"。这才是"PM 是不是真的在用我们喂的信号"
+的指标。
+
+```bash
+./scripts/block-attribution-report.sh                       # 最近 7 天
+./scripts/block-attribution-report.sh --days 30             # 最近 30 天
+./scripts/block-attribution-report.sh --days 14 --fund X    # 单个基金
+./scripts/block-attribution-report.sh --json | jq .         # 机读模式
+```
+
+返回 exit code:
+- `0` = 表渲染成功
+- `1` = 窗口内没有带 attribution 的 plan（writer 还没部署 / fund 没在跑）
+- `2` = postgres container 没起
+
+颜色含义:
+- **绿色**: 健康 — 喂进去的 block 被引用率 ≥ 20%
+- **红色**: 喂了 block 但 PM 几乎不引用 (cited < 20% × present) — 说明 prompt
+  教学规则没起作用，或者 LLM 在用它但没有显式 cite (后者可以接受)
+- **黄色**: cited > present — PM 引用了 wiring 没喂的 block (prompt drift)
+
+这报告依赖 migration `040_plan_block_contributions.sql` + writer
+(`runtimePMAgent.persistBlockContributions`)。如果跑出来 exit=1 而你确认
+PM 在跑，先检查 migration 是不是上了:
+
+```sql
+\d investment_plans
+-- 应该看到 block_contributions jsonb NOT NULL DEFAULT '{}'
+```
+
+> **2026-05-24 hotfix 备忘**: 早期版本的 citation vocabulary 只识别英文，
+> 而 LLM 在 reasoning 字段里写的几乎全是中文 (e.g. "动量排名 Q1"、"低Beta得分"、
+> "辩论结论"、"宇宙排名 Q2"、"分歧票数=2"、"MACD" 等)。`attribution.go` 已经在
+> 这次升级里加齐双语 vocabulary，rebuild 之后 cite rate 应该会从 ~0 直接抬到
+> 健康区间。同期还把 `combineReasoning(reasoning, actions)` 接进 writer，把
+> per-action 的 LLM 自然语言一起喂给 regex (`investment_plans.reasoning` 只是
+> 摘要文本，几乎不会显式 cite 任何 block)。如果你看到 cite rate 远低于
+> present rate，先看 `plan_actions.reasoning` 列里实际用了什么短语，必要时
+> 往 `internal/decision/attribution.go::citationVocabulary` 里再补一行 alias。
+
+### 7.2 Go 单元 / 集成测试 smoke
 
 ```bash
 cd server && go test \
@@ -315,6 +379,13 @@ cd server && go test \
   ./internal/correlation/ \
   ./internal/exposure/ \
   ./internal/decision/ \
+  ./internal/earnings/ \
+  ./internal/quality/ \
+  ./internal/value/ \
+  ./internal/lowbeta/ \
+  ./internal/pead/ \
+  ./internal/pairspread/ \
+  ./internal/strategy/ \
   ./internal/llm/ \
   -count=1 -short
 ```
@@ -327,12 +398,52 @@ cd server && go test ./cmd/server/ \
   -count=1 -short
 ```
 
+### 7.3 G1 #3 factorlab — per因子 IS Sharpe / DD / 命中率
+
+这是 LLM-free 的纯规则回测，用来快速看 momentum / low_beta / low_vol 几个
+策略的 IS 表现。默认跑合成 fixture (2 年模拟 OHLC + 5 个 profile 已经预置好)，
+也可以接真实历史 CSV。
+
+```bash
+# 跑合成 fixture（确定性，CI 友好）
+cd server && go run ./cmd/factorlab/
+
+# 跑真实 fixture（你提供 CSV 目录，per-symbol 一个 CSV，
+# 列要求 date,close 最少，open/high/low/volume 可选）
+cd server && go run ./cmd/factorlab/ --fixture /path/to/csv-dir
+
+# 调滑点 / 调起始 NAV / 只跑子集
+cd server && go run ./cmd/factorlab/ --slippage 10 --nav 100000
+cd server && go run ./cmd/factorlab/ --strategies momentum_12_1m,low_beta
+```
+
+输出 markdown 表，含每个策略的 `TotalRet / AnnRet / AnnVol / Sharpe / MaxDD /
+HitRate`。表头加 `*` 是 cohort 内最高 Sharpe，加 `!` 是 Sharpe 比
+equal_weight_long 还低 (说明这个因子在当前 fixture 上没产生 alpha 或被换手
+吃掉了)。
+
+合成 fixture 是用来跑通流程验证 framework 本身的，**不是用来下结论的**。
+真实结论要喂真实历史 CSV — 推荐 SPY + 10-20 个大盘股 × 2 年。
+
 ---
 
 ## 8. 上线后的"看板顺序"建议
 
 > 同事接手的话推荐按这个顺序"看 3 个东西就够了"
 
-1. **Grafana / Prometheus**: `fundai_decision_input_calls_total` + `fundai_decision_input_blocks_total{present="true"}` 的 ratio 曲线；
-2. **`investment_plans` 表的 confidence 分布**：连续 3 个交易日中位数 < 0.4 → 信号链路掉了；
-3. **`docker compose logs app | grep decision_input_fingerprint | tail -50`**：眼力快速过一遍，看哪些 `p_*=false` 是预期外的。
+1. **`./scripts/smoke-decision.sh`** — 30 秒看最近一笔 PM 决策 24 块的健康表，含 `block_contributions.cited` 交叉验证 (优先) / Plan.Reasoning 关键字 fallback。
+2. **Prometheus** — `docs/PROMETHEUS_QUERIES.md §6` 综合验收 dashboard 一页 6 张图：决策速率 + 24 块出现率 + exposure 触发 + risk-budget throttle + LLM 成功率 + workflow 失败率。
+3. **`docker compose logs app | grep decision_input_fingerprint | tail -50`** — 眼力快速过一遍，看哪些 `p_*=false` 是预期外的。
+
+如果没拉 Prometheus，直接 `curl http://localhost:8080/api/metrics | grep fundai_decision_` 也能拿到同样的数据，只是要手工算 ratio。
+
+---
+
+## 9. 相关文档
+
+- `docs/PROMETHEUS_QUERIES.md` — PromQL 速查（10 条最常用查询 + 综合面板 PromQL）
+- `scripts/smoke-decision.sh` — 24 块 smoke 健康检查（终端 / CI 友好，自带 JSON 输出）
+- `scripts/block-attribution-report.sh` — 时间窗内 block 引用率报告（G1 #2）
+- `scripts/fetch-yahoo-ohlc.sh` — Yahoo / NASDAQ 日 K CSV 拉取，给 factorlab 喂真实数据
+- `cmd/factorlab/` — LLM-free 规则回测 CLI，输出 markdown 表
+- `docs/SYSTEM_SPEC.md` — 系统全局架构说明

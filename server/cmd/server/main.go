@@ -34,9 +34,11 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/lotbackfill"
+	"github.com/fundai/server/internal/mailer"
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketplace"
 	"github.com/fundai/server/internal/promotion"
+	"github.com/fundai/server/internal/recall"
 	"github.com/fundai/server/internal/repository"
 	"github.com/fundai/server/internal/scheduler"
 	"github.com/fundai/server/internal/quota"
@@ -145,6 +147,18 @@ type Config struct {
 	LLMDefaults             LLMDefaultsConfig
 	MarketData              marketdata.Config
 	NewsTranslator          marketdata.TranslatorConfig
+	Mailer                  mailer.Config
+	AppPublicURL            string
+	RecallEmbed             RecallEmbedConfig
+}
+
+// RecallEmbedConfig 控制 L3 memory pgvector backfill worker。
+// APIKey 为空 → loop 不启动；recall.Service 没有 embedding 列时
+// 也会自动短路，所以两端都是软启用。
+type RecallEmbedConfig struct {
+	APIKey  string
+	BaseURL string
+	Model   string
 }
 
 // LoadConfig reads configuration from environment with sensible defaults.
@@ -214,6 +228,25 @@ func LoadConfig() *Config {
 			APIKey:   firstEnv("MARKETDATA_TRANSLATOR_API_KEY", ""),
 			Model:    firstEnv("MARKETDATA_TRANSLATOR_MODEL", ""),
 			Timeout:  envDuration("MARKETDATA_TRANSLATOR_TIMEOUT", 8*time.Second),
+		},
+		Mailer: mailer.Config{
+			Host:      firstEnv("SMTP_HOST", ""),
+			Port:      envInt("SMTP_PORT", 587),
+			Username:  firstEnv("SMTP_USERNAME", "SMTP_USER", ""),
+			Password:  firstEnv("SMTP_PASSWORD", "SMTP_PASS", ""),
+			From:      firstEnv("SMTP_FROM", ""),
+			FromName:  firstEnv("SMTP_FROM_NAME", "FundAI"),
+			UseTLS:    envBoolWithDefault("SMTP_USE_TLS", false),
+			StartTLS:  envBoolWithDefault("SMTP_STARTTLS", true),
+			Timeout:   envDuration("SMTP_TIMEOUT", 15*time.Second),
+			AppURL:    strings.TrimRight(firstEnv("APP_PUBLIC_URL", "http://localhost:5173"), "/"),
+			BrandName: firstEnv("BRAND_NAME", "FundAI"),
+		},
+		AppPublicURL: strings.TrimRight(firstEnv("APP_PUBLIC_URL", "http://localhost:5173"), "/"),
+		RecallEmbed: RecallEmbedConfig{
+			APIKey:  firstEnv("RECALL_OPENAI_API_KEY", "OPENAI_API_KEY", ""),
+			BaseURL: firstEnv("RECALL_OPENAI_BASE_URL", "OPENAI_BASE_URL", ""),
+			Model:   firstEnv("RECALL_EMBED_MODEL", "text-embedding-3-small"),
 		},
 	}
 
@@ -451,6 +484,18 @@ func runMigrations(db *sql.DB, migrationsPath string) error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
+		// Skip *.down.sql files — they are reverse migrations
+		// for manual rollback (operator runs them via psql), not
+		// for the boot-time forward runner. Alphabetical order
+		// would otherwise execute `040_x.down.sql` BEFORE
+		// `040_x.sql`, dropping the column the up migration is
+		// about to add — harmless today because every down uses
+		// IF EXISTS, but the wasted DROP/CREATE cycle is
+		// confusing in the slog and one missing IF EXISTS would
+		// fail the boot.
+		if strings.HasSuffix(entry.Name(), ".down.sql") {
+			continue
+		}
 
 		// Skip already-applied migrations.
 		var exists bool
@@ -511,6 +556,10 @@ type Services struct {
 	PromotionAdapter       *promotionServiceAdapter
 	PromotionResolver      *promotion.Resolver
 	PromotionDecayLoop     *promotionDecayLoop
+	LessonScoringLoop      *lessonScoringLoop
+	MemoryArchiveLoop      *memoryArchiveLoop
+	MemoryEmbedLoop        *memoryEmbedLoop
+	Mailer                 mailer.Mailer
 }
 
 func (s *Services) Stop() {
@@ -537,6 +586,15 @@ func (s *Services) Stop() {
 	}
 	if s.PromotionDecayLoop != nil {
 		s.PromotionDecayLoop.Stop()
+	}
+	if s.LessonScoringLoop != nil {
+		s.LessonScoringLoop.Stop()
+	}
+	if s.MemoryArchiveLoop != nil {
+		s.MemoryArchiveLoop.Stop()
+	}
+	if s.MemoryEmbedLoop != nil {
+		s.MemoryEmbedLoop.Stop()
 	}
 	if s.LeaseManager != nil {
 		s.LeaseManager.Stop()
@@ -590,6 +648,9 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	leaseManager.Register(AuctionSettlementLeaseName)
 	leaseManager.Register(ActivityRetentionLeaseName)
 	leaseManager.Register(PositionQuoteRefreshLeaseName)
+	leaseManager.Register(LessonLineageLeaseName)
+	leaseManager.Register(MemoryArchiveLeaseName)
+	leaseManager.Register(MemoryEmbedLeaseName)
 
 	workflowService.scheduler.SetLeaderChecker(leaseManager)
 	workflowService.StartBackgroundScheduler()
@@ -604,6 +665,18 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	marketplaceReconciler.SetLeaderChecker(leaseManager)
 	marketplaceReconciler.Start()
 
+	// Mailer: prefer real SMTP when configured, fall back to an
+	// in-memory recorder in dev so /forgot-password still completes
+	// with the link/code logged out for click-through testing.
+	var mailerInstance mailer.Mailer
+	if cfg.Mailer.Enabled() {
+		mailerInstance = mailer.NewSMTPSender(cfg.Mailer)
+		slog.Info("mailer: SMTP enabled", "host", cfg.Mailer.Host, "port", cfg.Mailer.Port)
+	} else {
+		mailerInstance = &mailer.Recorder{}
+		slog.Warn("mailer: SMTP not configured, using in-memory recorder (dev only)")
+	}
+
 	services := &Services{
 		DB:                    db,
 		SubscriptionService:   subscriptionService,
@@ -614,6 +687,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		MarketplaceReconciler: marketplaceReconciler,
 		LeaseManager:          leaseManager,
 		MarketDataService:     marketDataService,
+		Mailer:                mailerInstance,
 		SubscriptionHandler: api.NewSubscriptionHandler(
 			newSubscriptionServiceAdapter(subscriptionService),
 			newUsageTrackerAdapter(usageTracker),
@@ -729,6 +803,46 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		services.PositionQuoteRefresher = positionRefresher
 	}
 
+	// Sprint 3 / M1 lesson lineage scoring + M4 memory archive.
+	// Both are leader-gated, daily-ish cadence, soft-failing.
+	// Wired only when DB is present (every prod path) — skipping
+	// in tests / smoke runs that don't have a DB.
+	if db != nil {
+		lessonScoring := newLessonScoringLoop(db)
+		lessonScoring.SetLeaderChecker(leaseManager)
+		lessonScoring.Start()
+		services.LessonScoringLoop = lessonScoring
+
+		memoryArchive := newMemoryArchiveLoop(db)
+		memoryArchive.SetLeaderChecker(leaseManager)
+		memoryArchive.Start()
+		services.MemoryArchiveLoop = memoryArchive
+
+		// L3: pgvector backfill + read service. Only spins up when
+		// OPENAI_API_KEY (or an OpenAI-compatible drop-in) is
+		// configured. Without it, embedding column stays NULL and
+		// recall.Service short-circuits to nil — existing behavior
+		// unchanged.
+		if apiKey := strings.TrimSpace(cfg.RecallEmbed.APIKey); apiKey != "" {
+			embedder := recall.NewOpenAIEmbedder(apiKey)
+			if cfg.RecallEmbed.BaseURL != "" {
+				embedder.BaseURL = cfg.RecallEmbed.BaseURL
+			}
+			if cfg.RecallEmbed.Model != "" {
+				embedder.ModelID = cfg.RecallEmbed.Model
+			}
+			memoryEmbed := newMemoryEmbedLoop(db, embedder)
+			memoryEmbed.SetLeaderChecker(leaseManager)
+			memoryEmbed.Start()
+			services.MemoryEmbedLoop = memoryEmbed
+			recallSvc := recall.New(db)
+			workflowService.WithSemanticRecall(recallSvc, embedder)
+			slog.Info("memory embed loop enabled", "model", embedder.Model())
+		} else {
+			slog.Info("memory embed loop disabled (no OPENAI_API_KEY)")
+		}
+	}
+
 	// One-shot lot backfill at boot. Funds that held positions
 	// before migration 038 (lot ledger) ran will otherwise never
 	// produce closed_lots rows on a sell — their attribution
@@ -770,10 +884,25 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	mux.HandleFunc("GET /api/metrics", handleMetrics(svc))
 	mux.HandleFunc("POST /api/auth/register", handleRegister(svc, cfg))
 	mux.HandleFunc("POST /api/auth/login", handleLogin(svc, cfg))
+	mux.HandleFunc("POST /api/auth/wechat-login", handleWechatLogin(svc, cfg))
 	mux.HandleFunc("POST /api/auth/logout", handleLogout(cfg))
 	mux.HandleFunc("GET /api/auth/session", handleSession(svc, cfg))
+	mux.HandleFunc("POST /api/auth/send-verification", handleSendVerification(svc, cfg))
+	mux.HandleFunc("POST /api/auth/verify-email", handleVerifyEmail(svc, cfg))
+	mux.HandleFunc("POST /api/auth/forgot-password", handleForgotPassword(svc, cfg))
+	mux.HandleFunc("POST /api/auth/reset-password", handleResetPassword(svc, cfg))
+	mux.HandleFunc("POST /api/auth/change-password", handleChangePassword(svc, cfg))
 	mux.HandleFunc("GET /api/account/kyc", handleGetAccountKYC(svc))
 	mux.HandleFunc("POST /api/account/kyc", handleSubmitAccountKYC(svc))
+
+	// Sprint 4 / android-core: FCM device-token registry + push
+	// fan-out hook for terminal plan transitions.
+	deviceTokens := newDeviceTokensService(svc.DB)
+	mux.HandleFunc("POST /api/devices/register", deviceTokens.handleRegister)
+	mux.HandleFunc("POST /api/devices/unregister", deviceTokens.handleUnregister)
+	if svc.WorkflowService != nil {
+		svc.WorkflowService.WithPlanLifecycleNotifier(newPlanLifecycleNotifierAdapter(deviceTokens))
+	}
 
 	// ---- Real application routes ----
 	if svc.SubscriptionHandler != nil {
@@ -1008,7 +1137,11 @@ func handleLogin(svc *Services, cfg *Config) http.HandlerFunc {
 			status := http.StatusInternalServerError
 			message := "login failed"
 			detail := "登录失败，请稍后再试。"
-			if errors.Is(err, errInvalidCredentials) {
+			if errors.Is(err, errAccountLocked) {
+				status = http.StatusTooManyRequests
+				message = "account locked"
+				detail = "账号已临时锁定，请稍后再试或重置密码。"
+			} else if errors.Is(err, errInvalidCredentials) {
 				status = http.StatusUnauthorized
 				message = "invalid credentials"
 				detail = "邮箱或密码错误。"
@@ -1656,6 +1789,7 @@ var (
 	errEmailAlreadyExists     = errors.New("email already exists")
 	errInvalidCredentials     = errors.New("invalid credentials")
 	errUserNotFoundOrInactive = errors.New("user not found or inactive")
+	errAccountLocked          = errors.New("account temporarily locked")
 )
 
 func normalizeEmail(email string) string {
@@ -1681,10 +1815,75 @@ func authenticateUserByPassword(ctx context.Context, db *sql.DB, email, password
 	if strings.TrimSpace(user.PasswordHash) == "" {
 		return nil, errInvalidCredentials
 	}
+	// Login throttling. Sprint 2A: 5 misses in a row locks the
+	// account for 15 minutes so credential-stuffing scripts can't
+	// burn through it. We tolerate missing columns (migration 042
+	// not yet applied) so this code still works against an older
+	// schema during rolling deployments.
+	if locked, lockedUntil := lockedAccount(ctx, db, user.ID); locked {
+		slog.Warn("login blocked: account locked", "user_id", user.ID, "locked_until", lockedUntil)
+		return nil, errAccountLocked
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		recordFailedLogin(ctx, db, user.ID)
 		return nil, errInvalidCredentials
 	}
+	recordSuccessfulLogin(ctx, db, user.ID)
 	return user, nil
+}
+
+func lockedAccount(ctx context.Context, db *sql.DB, userID string) (bool, time.Time) {
+	if db == nil {
+		return false, time.Time{}
+	}
+	var until sql.NullTime
+	err := db.QueryRowContext(ctx, `SELECT locked_until FROM users WHERE id = $1`, userID).Scan(&until)
+	if err != nil {
+		return false, time.Time{}
+	}
+	if !until.Valid {
+		return false, time.Time{}
+	}
+	if time.Now().UTC().After(until.Time) {
+		return false, time.Time{}
+	}
+	return true, until.Time
+}
+
+func recordFailedLogin(ctx context.Context, db *sql.DB, userID string) {
+	if db == nil {
+		return
+	}
+	// Bump attempt counter; if we cross the threshold, set locked_until.
+	// Computing the new lock window in SQL avoids a separate round-trip.
+	_, err := db.ExecContext(ctx, `
+		UPDATE users
+		SET failed_login_attempts = failed_login_attempts + 1,
+		    locked_until = CASE
+		        WHEN failed_login_attempts + 1 >= $2 THEN NOW() + $3::interval
+		        ELSE locked_until
+		    END
+		WHERE id = $1
+	`, userID, loginLockThreshold, fmt.Sprintf("%d seconds", int(loginLockDuration.Seconds())))
+	if err != nil {
+		slog.Debug("record failed login (best-effort)", "user_id", userID, "error", err)
+	}
+}
+
+func recordSuccessfulLogin(ctx context.Context, db *sql.DB, userID string) {
+	if db == nil {
+		return
+	}
+	_, err := db.ExecContext(ctx, `
+		UPDATE users
+		SET failed_login_attempts = 0,
+		    locked_until = NULL,
+		    last_login_at = NOW()
+		WHERE id = $1
+	`, userID)
+	if err != nil {
+		slog.Debug("record successful login (best-effort)", "user_id", userID, "error", err)
+	}
 }
 
 func loadUserByEmail(ctx context.Context, db *sql.DB, email string) (*authenticatedUser, error) {
@@ -1817,7 +2016,8 @@ func isUniqueViolation(err error) bool {
 func isPublicRoute(path string) bool {
 	if strings.HasPrefix(path, "/api/") {
 		switch path {
-		case "/api/health", "/api/version", "/api/metrics", "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/session":
+		case "/api/health", "/api/version", "/api/metrics", "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/session",
+			"/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/wechat-login":
 			return true
 		default:
 			return false
@@ -2806,6 +3006,22 @@ func envBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+// parseDurationEnv reads a Go-duration env var (e.g. "6h", "300ms").
+// Empty / unparseable / non-positive → fallback. Returns the
+// fallback unchanged when the caller wants the downstream
+// package's default; this keeps the env knob optional.
+func parseDurationEnv(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 // envBoolWithDefault is the variant used when the absence of the env var

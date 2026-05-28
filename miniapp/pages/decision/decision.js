@@ -23,8 +23,12 @@ function formatDate(value) {
 }
 
 function statusKey(status) {
-  if (status === 'approved' || status === 'executed') return 'approved';
+  if (status === 'approved' || status === 'executed' || status === 'completed') return 'approved';
   if (status === 'rejected') return 'rejected';
+  // Sprint 3 / L2: partial-fill plans surfaced as a distinct mixed
+  // status; WXSS uses status-mixed class to give it an amber dot
+  // instead of the green "all good" / red "all bad" dichotomy.
+  if (status === 'mixed') return 'mixed';
   return 'pending';
 }
 

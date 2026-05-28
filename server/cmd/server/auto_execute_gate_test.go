@@ -259,6 +259,142 @@ func TestExtractPlanConfidenceFallsBackToActionMean(t *testing.T) {
 	}
 }
 
+// Regression for OCS fund 2026-05-26T02:10 UTC: the PM stamped
+// plan_conf=0.55 because it averaged in a watch@0.50 sibling, even
+// though the only executing action was buy@0.74. The 0.60 floor
+// auto-rejected the plan and the position only opened 4h later on
+// the next PM tick. Server-side normalisation must override the
+// PM-reported number with min(executing actions) = 0.74.
+func TestExtractPlanConfidencePrefersExecutingMinOverPMReported(t *testing.T) {
+	actions := []repository.PlanAction{
+		{
+			Action:     "buy",
+			Confidence: sql.NullFloat64{Float64: 0.74, Valid: true},
+		},
+		{
+			Action:     "watch",
+			Confidence: sql.NullFloat64{Float64: 0.50, Valid: true},
+		},
+	}
+	plan := &repository.InvestmentPlan{
+		Confidence: sql.NullFloat64{Float64: 0.55, Valid: true},
+		RiskReview: json.RawMessage(`{"confidence":0.55}`),
+	}
+	got := extractPlanConfidence(plan, actions)
+	if got < 0.739 || got > 0.741 {
+		t.Errorf("effective conf = %v, want 0.74 (min over executing actions, ignoring watch)", got)
+	}
+}
+
+// The inverse case: PM inflated plan_conf above what its weakest
+// executing action supports. We must use the executing min so a
+// marginal trade can't be slipped past the gate by a confident-
+// sounding header.
+func TestExtractPlanConfidenceClampsPMInflation(t *testing.T) {
+	actions := []repository.PlanAction{
+		{Action: "buy", Confidence: sql.NullFloat64{Float64: 0.85, Valid: true}},
+		{Action: "add", Confidence: sql.NullFloat64{Float64: 0.40, Valid: true}},
+		{Action: "watch", Confidence: sql.NullFloat64{Float64: 0.95, Valid: true}},
+	}
+	plan := &repository.InvestmentPlan{
+		Confidence: sql.NullFloat64{Float64: 0.88, Valid: true},
+	}
+	got := extractPlanConfidence(plan, actions)
+	if got < 0.39 || got > 0.41 {
+		t.Errorf("effective conf = %v, want 0.40 (min over executing, clamping PM 0.88)", got)
+	}
+}
+
+// Watch-only plan: there are no executing actions, so the floor
+// can't be computed and we must fall back to the PM-reported number.
+// This is the common "all-hold-today" path and must not regress to
+// 0 (which would always fail the gate).
+func TestExtractPlanConfidenceFallsBackWhenNoExecutingActions(t *testing.T) {
+	actions := []repository.PlanAction{
+		{Action: "watch", Confidence: sql.NullFloat64{Float64: 0.30, Valid: true}},
+		{Action: "hold", Confidence: sql.NullFloat64{Float64: 0.20, Valid: true}},
+	}
+	plan := &repository.InvestmentPlan{
+		Confidence: sql.NullFloat64{Float64: 0.72, Valid: true},
+	}
+	got := extractPlanConfidence(plan, actions)
+	if got != 0.72 {
+		t.Errorf("effective conf = %v, want 0.72 (PM column wins; no executing actions)", got)
+	}
+}
+
+// Executing action present but its confidence is null (legacy data
+// or a PM that didn't fill the per-action field): same fallback as
+// the watch-only case.
+func TestExtractPlanConfidenceFallsBackWhenExecutingConfMissing(t *testing.T) {
+	actions := []repository.PlanAction{
+		{Action: "buy" /* Confidence.Valid=false */},
+	}
+	plan := &repository.InvestmentPlan{
+		RiskReview: json.RawMessage(`{"confidence":0.66}`),
+	}
+	got := extractPlanConfidence(plan, actions)
+	if got != 0.66 {
+		t.Errorf("effective conf = %v, want 0.66 (JSON fallback; executing conf null)", got)
+	}
+}
+
+// End-to-end through runAutoExecuteGuardrails: the 10:10 fixture
+// must now PASS instead of tripping confidence_below_floor. This is
+// the actual regression observers see in the audit log.
+func TestRunAutoExecuteGuardrailsRecoversPMUnderPricing(t *testing.T) {
+	gw := newGatewayWithFrozenClock()
+	fund := &repository.Fund{
+		ID:          "fund-1",
+		TotalAssets: 1_000_000,
+		Config:      json.RawMessage(`{}`),
+	}
+	plan := &repository.InvestmentPlan{
+		ID:         "plan-ocs-1410",
+		FundID:     "fund-1",
+		Confidence: sql.NullFloat64{Float64: 0.55, Valid: true},
+		RiskReview: json.RawMessage(`{"confidence":0.55}`),
+	}
+	actions := []repository.PlanAction{
+		{
+			ID:         "act-buy",
+			PlanID:     "plan-ocs-1410",
+			Symbol:     "688205",
+			Action:     "buy",
+			Market:     sql.NullString{String: "a_share", Valid: true},
+			Amount:     sql.NullFloat64{Float64: 96822, Valid: true},
+			Confidence: sql.NullFloat64{Float64: 0.74, Valid: true},
+		},
+		{
+			ID:         "act-watch",
+			PlanID:     "plan-ocs-1410",
+			Symbol:     "688195",
+			Action:     "watch",
+			Market:     sql.NullString{String: "a_share", Valid: true},
+			Confidence: sql.NullFloat64{Float64: 0.50, Valid: true},
+		},
+	}
+	// Match the OCS fund's actual auto-execute config that produced
+	// the prod incident: per-order cap 80% NAV, daily cap 80% NAV,
+	// min confidence 60%. The 96822 notional is 9.68% of NAV — well
+	// under the cap; the only gate it ever tripped was confidence.
+	cfg := resolveAutoExecuteConfig(&api.FundAutoExecuteConfig{
+		Enabled:             true,
+		MinConfidence:       floatPtrLocal(0.60),
+		MaxOrderPctOfAssets: floatPtrLocal(0.80),
+		MaxDailyPctOfAssets: floatPtrLocal(0.80),
+	})
+
+	d := gw.runAutoExecuteGuardrails(context.Background(), cfg, fund, plan, actions, fundMarketProfile{Market: "a_share"})
+
+	if !d.passed {
+		t.Fatalf("expected pass after normalisation, got reasonCode=%q reason=%q confidence=%v", d.reasonCode, d.reason, d.confidence)
+	}
+	if d.confidence < 0.739 || d.confidence > 0.741 {
+		t.Errorf("decision.confidence = %v, want 0.74 (executing buy's per-action conf)", d.confidence)
+	}
+}
+
 // AllowedMarkets is a whitelist: explicit list must include both the
 // fund's market and every action's market. If any one slips through
 // the plan goes back to manual.

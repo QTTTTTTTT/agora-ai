@@ -1,5 +1,34 @@
 /// <reference types="vite/client" />
 
+// ---------------------------------------------------------------------------
+// Shared API type affinity
+// ---------------------------------------------------------------------------
+//
+// We import the wire-shape types from `@fundai/api-client` (the shared
+// workspace package that also feeds the Android RN app) and intersect
+// them with the additional web-only / admin / KYC fields below. The
+// shared package is the SINGLE source of truth for any field that
+// both web and Android rely on: if anyone renames `user_id` →
+// `userId` over in shared/, the web build breaks immediately because
+// our intersection types stop matching the wire payload.
+//
+// Why intersection (`Shared.X & WebExtras`) instead of duplication:
+//   1. shared/ stays minimal — it only declares the 5 core-page
+//      endpoints that Android consumes.
+//   2. web/ keeps its richer admin / wallet / marketplace / KYC
+//      surface area without forcing those fields into RN.
+//   3. tsc enforces drift detection at compile time across BOTH
+//      workspaces because the same type tokens flow through both.
+//
+// If you add a field to a `Shared.*` interface, the web side
+// inherits it automatically. If you add a web-only field, it lives
+// in the `& { ... }` block here so it stays out of Android's bundle.
+import type {
+  LoginResponse as SharedLoginResponse,
+  SessionResponse as SharedSessionResponse,
+  LoginInput as SharedLoginInput,
+} from "@fundai/api-client";
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const PRIMARY_TOKEN_STORAGE_KEY = "fundai.jwt";
 const PRIMARY_SESSION_STORAGE_KEY = "fundai.session";
@@ -264,9 +293,12 @@ export function apiDelete<T>(path: string): Promise<T> {
   return apiRequest<T>(path, { method: "DELETE" });
 }
 
-export interface LoginResponse {
-  token: string;
-  user_id: string;
+// LoginResponse extends the shared wire type with the web-only
+// KYC + request_id fields the admin surface needs. expires_at is
+// non-optional in web (sessions are token-based and the UI relies
+// on it to schedule silent refresh) but optional in shared (RN
+// can run without it).
+export type LoginResponse = SharedLoginResponse & {
   email: string;
   display_name: string;
   role: string;
@@ -274,27 +306,22 @@ export interface LoginResponse {
   kyc_level?: string;
   expires_at: string;
   request_id?: string;
-}
+};
 
-export interface SessionResponse {
+export type SessionResponse = SharedSessionResponse & {
   authenticated: boolean;
-  user_id?: string;
-  email?: string;
-  display_name?: string;
-  role?: string;
   kyc_status?: string;
   kyc_level?: string;
-  expires_at?: string;
   request_id?: string;
   error?: string;
   detail?: string;
-}
+};
 
-export interface AuthPayload {
-  email: string;
-  password: string;
+// AuthPayload extends the shared LoginInput shape with the optional
+// displayName field used by the web /register page.
+export type AuthPayload = SharedLoginInput & {
   displayName?: string;
-}
+};
 
 function persistLogin(payload: LoginResponse): LoginResponse {
   storeSession(payload.token, {
@@ -333,6 +360,90 @@ export function loginWithPassword(payload: AuthPayload): Promise<LoginResponse> 
 
 export function registerWithPassword(payload: AuthPayload): Promise<LoginResponse> {
   return submitAuth("/api/auth/register", payload);
+}
+
+export interface SendVerificationResponse {
+  status: string;
+  expires_at?: string;
+  dev_code?: string;
+  request_id?: string;
+}
+
+export async function requestEmailVerification(): Promise<SendVerificationResponse> {
+  return jsonRequest<SendVerificationResponse>("/api/auth/send-verification", { method: "POST" });
+}
+
+export interface VerifyEmailResponse {
+  status: string;
+  email_verified?: boolean;
+  email_verified_at?: string;
+  request_id?: string;
+}
+
+export async function confirmEmailVerification(code: string): Promise<VerifyEmailResponse> {
+  return jsonRequest<VerifyEmailResponse>("/api/auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
+export interface ForgotPasswordResponse {
+  status: string;
+  dev_reset_link?: string;
+  request_id?: string;
+}
+
+export async function requestPasswordReset(email: string): Promise<ForgotPasswordResponse> {
+  return jsonRequest<ForgotPasswordResponse>("/api/auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export interface ResetPasswordResponse {
+  status: string;
+  request_id?: string;
+}
+
+export async function confirmPasswordReset(token: string, newPassword: string): Promise<ResetPasswordResponse> {
+  return jsonRequest<ResetPasswordResponse>("/api/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ token, newPassword }),
+  });
+}
+
+export interface ChangePasswordResponse {
+  status: string;
+  request_id?: string;
+}
+
+export async function changePassword(oldPassword: string, newPassword: string): Promise<ChangePasswordResponse> {
+  return jsonRequest<ChangePasswordResponse>("/api/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ oldPassword, newPassword }),
+  });
+}
+
+async function jsonRequest<T>(path: string, init: RequestInit): Promise<T> {
+  const headers = new Headers(init.headers ?? {});
+  headers.set("Content-Type", "application/json");
+  headers.set("X-Request-ID", createRequestId());
+  const token = getApiToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(buildUrl(path), {
+    ...init,
+    headers,
+    credentials: "include",
+  });
+  const payload = (await response.json().catch(() => null)) as (T & { error?: string; detail?: string; request_id?: string }) | null;
+  if (!response.ok) {
+    const fallback = `请求失败，状态码 ${response.status}`;
+    const normalized = normalizeErrorMessage(payload, fallback);
+    throw new ApiError(normalized.message, response.status, normalized.detail, payload?.request_id);
+  }
+  return (payload ?? ({} as T));
 }
 
 export async function fetchSession(): Promise<SessionResponse> {

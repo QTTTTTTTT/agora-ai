@@ -109,6 +109,12 @@
   background: linear-gradient(180deg, #2ecc71, #27ae60);
 }
 
+.plan-bar-mixed {
+  /* Sprint 3 / L2: partial fill — amber gradient signals "部分成交"，
+     与 approved 的绿色 + rejected 的红色都明显有别。 */
+  background: linear-gradient(180deg, #f39c12, #e67e22);
+}
+
 .plan-bar-rejected {
   background: linear-gradient(180deg, #e74c3c, #c0392b);
 }

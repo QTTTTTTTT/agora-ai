@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/fundai/server/internal/yahooauth"
 )
 
 // YahooProvider talks to Yahoo Finance's quoteSummary endpoint:
@@ -53,27 +55,79 @@ func (p *YahooProvider) Supports(market string) bool {
 
 // Fetch implements Provider. Returns ErrNoData when Yahoo replies
 // "no module" or 404; other 4xx/5xx errors bubble up unchanged.
+//
+// Sprint 1 / S5: the call is now crumb-aware. We attempt the
+// quoteSummary endpoint with a cached (cookie, crumb) pair from
+// yahooauth.Default; a 401/403 invalidates the cache and retries
+// once. On a second 401 we surface the failure to the caller's
+// provider chain, which will fall through to the alternate
+// provider (nasdaq.com, akshare, etc.).
 func (p *YahooProvider) Fetch(ctx context.Context, req FetchRequest) (*Metrics, error) {
 	req = req.Normalize()
 	if req.Symbol == "" {
 		return nil, ErrNoData
 	}
+	body, err := p.doFetch(ctx, req, false)
+	if err == nil {
+		return parseYahooQuoteSummary(body, req.Symbol)
+	}
+	// Treat 401/403 as the "stale crumb" signal — invalidate and
+	// retry once with a fresh handshake. Any other error is final.
+	if !isCrumbAuthError(err) {
+		return nil, err
+	}
+	yahooauth.Default.Invalidate()
+	body, retryErr := p.doFetch(ctx, req, true)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return parseYahooQuoteSummary(body, req.Symbol)
+}
+
+// doFetch performs a single quoteSummary HTTP call. When retry is
+// false this is the first attempt (uses the cached crumb); when
+// retry is true the cache has already been invalidated and Get()
+// will re-seed.
+func (p *YahooProvider) doFetch(ctx context.Context, req FetchRequest, retry bool) ([]byte, error) {
+	_ = retry // included in signature so tests can assert call-shape later
 	endpoint, err := p.endpoint(req)
 	if err != nil {
 		return nil, err
+	}
+	// Pull a (crumb, jar) pair from the shared cache. Failure is
+	// non-fatal — we still issue the request without crumb so a
+	// network-restricted environment that can't reach fc.yahoo.com
+	// continues to function on whatever endpoints Yahoo still
+	// allows keyless (the quoteSummary 401 will then be the
+	// caller's fallback trigger).
+	crumb, jar, authErr := yahooauth.Default.Get(ctx)
+	if authErr == nil && crumb != "" {
+		joiner := "?"
+		if strings.Contains(endpoint, "?") {
+			joiner = "&"
+		}
+		endpoint = endpoint + joiner + "crumb=" + url.QueryEscape(crumb)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	// Yahoo 403s the default Go UA; mimic a desktop browser.
-	httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-	httpReq.Header.Set("Accept", "application/json")
+	yahooauth.AttachToRequest(httpReq)
 
 	client := p.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
+	// Attach the cookie jar to the request when the underlying
+	// client doesn't already carry one. Setting Jar on a shared
+	// client is safe — net/http handles concurrent cookie reads
+	// internally and we only mutate the jar via the seed flow.
+	if jar != nil && client.Jar == nil {
+		clone := *client
+		clone.Jar = jar
+		client = &clone
+	}
+
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("yahoo fundamental: http: %w", err)
@@ -81,6 +135,10 @@ func (p *YahooProvider) Fetch(ctx context.Context, req FetchRequest) (*Metrics, 
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, ErrNoData
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("yahoo fundamental: status %d (crumb auth): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -90,7 +148,17 @@ func (p *YahooProvider) Fetch(ctx context.Context, req FetchRequest) (*Metrics, 
 	if err != nil {
 		return nil, fmt.Errorf("yahoo fundamental: read: %w", err)
 	}
-	return parseYahooQuoteSummary(body, req.Symbol)
+	return body, nil
+}
+
+// isCrumbAuthError matches the 401/403 error strings doFetch produces
+// when the crumb is stale.
+func isCrumbAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "status 401") || strings.Contains(msg, "status 403")
 }
 
 func (p *YahooProvider) endpoint(req FetchRequest) (string, error) {

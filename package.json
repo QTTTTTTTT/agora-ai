@@ -1,0 +1,19 @@
+{
+  "name": "ai-fund-platform-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AI Fund Platform monorepo: web + android + miniapp + shared TypeScript packages.",
+  "workspaces": [
+    "web",
+    "android",
+    "shared/*"
+  ],
+  "scripts": {
+    "build:web": "npm run build -w ai-fund-platform",
+    "build:shared": "npm run build -w @fundai/api-client",
+    "test:web": "npm run lint -w ai-fund-platform"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}

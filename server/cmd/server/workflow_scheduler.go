@@ -753,7 +753,7 @@ func (s *fundWorkflowScheduler) findCatchUpSlot(now time.Time, fundID string, pr
 		if !workflowRunIsRecoveryFailure(todayRun) {
 			return time.Time{}, time.Time{}, false
 		}
-		if !s.claimRecoveryRetry(fundID, todayStorage, candidate) {
+		if !s.claimRecoveryRetry(fundID, todayStorage, candidate, now) {
 			return time.Time{}, time.Time{}, false
 		}
 		slog.Info("catch-up: retrying recovery-failed slot",
@@ -799,7 +799,7 @@ func workflowRunIsRecoveryFailure(run *repository.WorkflowRun) bool {
 // restart-failed the run, so granting it a fresh retry budget is
 // safe. The map is pruned of stale trading dates on each call so it
 // can't grow without bound for long-running processes.
-func (s *fundWorkflowScheduler) claimRecoveryRetry(fundID string, tradingDate, slot time.Time) bool {
+func (s *fundWorkflowScheduler) claimRecoveryRetry(fundID string, tradingDate, slot, now time.Time) bool {
 	if s == nil {
 		return false
 	}
@@ -808,7 +808,17 @@ func (s *fundWorkflowScheduler) claimRecoveryRetry(fundID string, tradingDate, s
 	if s.recoveryRetries == nil {
 		s.recoveryRetries = make(map[string]struct{})
 	}
-	cutoff := time.Now().UTC().AddDate(0, 0, -1)
+	// Use the caller-supplied `now` so the prune window stays
+	// consistent with whatever clock the scheduler is operating
+	// against (production = wall clock; tests = injected time).
+	// Falling back to time.Now() would aggressively delete
+	// dedupe rows whenever the test wall-clock is past
+	// tradingDate+1d, leaking the slot back through every tick.
+	cutoffBase := now
+	if cutoffBase.IsZero() {
+		cutoffBase = time.Now()
+	}
+	cutoff := cutoffBase.UTC().AddDate(0, 0, -1)
 	for key := range s.recoveryRetries {
 		parts := strings.SplitN(key, "|", 3)
 		if len(parts) != 3 {

@@ -77,6 +77,8 @@ const Login: React.FC = () => {
               registering: "Registering...",
               signIn: "Sign in and continue",
               register: "Register and continue",
+              wechat: "Sign in with WeChat",
+              wechatHint: "Scan in the WeChat app (miniapp users can also tap from inside their account).",
             },
             errors: {
               loginFailed: "Sign in failed",
@@ -90,6 +92,7 @@ const Login: React.FC = () => {
               "When the session expires, the frontend clears local credentials and redirects back to login.",
             ],
             backHome: "Back to home",
+            forgotPassword: "Forgot your password?",
           }
         : {
             checkingSession: "正在检查现有登录会话...",
@@ -123,6 +126,8 @@ const Login: React.FC = () => {
               registering: "注册中...",
               signIn: "登录并进入系统",
               register: "注册并进入系统",
+              wechat: "使用微信登录",
+              wechatHint: "请在微信中扫码（小程序用户也可在小程序内直接点击进入）。",
             },
             errors: {
               loginFailed: "登录失败",
@@ -136,6 +141,7 @@ const Login: React.FC = () => {
               "如果会话失效，前端会清空本地凭证并跳回登录页。",
             ],
             backHome: "返回首页",
+            forgotPassword: "忘记密码？",
           },
     [language],
   );
@@ -219,7 +225,12 @@ const Login: React.FC = () => {
           password: form.password,
           displayName: form.displayName.trim(),
         });
-        navigate("/companies", { replace: true });
+        // Route new accounts to /verify-email so they're nudged to
+        // confirm their address before going deep into the product.
+        // We pass the email forward so the page can pre-fill the
+        // resend field; users who skip can still reach /companies via
+        // the "Skip for now" link on that page.
+        navigate(`/verify-email?email=${encodeURIComponent(form.email.trim())}`, { replace: true });
         return;
       }
       navigate(redirectTo, { replace: true });
@@ -324,6 +335,40 @@ const Login: React.FC = () => {
             {submitting ? (mode === "login" ? copy.actions.signingIn : copy.actions.registering) : mode === "login" ? copy.actions.signIn : copy.actions.register}
           </button>
         </form>
+
+        {mode === "login" ? (
+          <>
+            <div className="mt-4 text-center text-xs text-slate-400">
+              <Link to="/forgot-password" className="text-indigo-300 transition hover:text-indigo-200">
+                {copy.forgotPassword}
+              </Link>
+            </div>
+
+            {/*
+              * WeChat login entry. The product surface lists WeChat sign-in
+              * as a supported path on both web and miniapp; previously web
+              * only exposed email/password and the WeChat box was missing
+              * entirely. Until the OAuth-redirect handler is wired on the
+              * server we keep this as an *information* button that explains
+              * how to complete the WeChat flow today (via the miniapp's
+              * code2session, which already shares the JWT keyring with web
+              * via the auth_wechat handler). Replace the click handler with
+              * the OAuth redirect once /api/auth/wechat-redirect ships.
+              */}
+            <div className="mt-6 flex flex-col items-center gap-2 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-4 text-xs text-emerald-200">
+              <button
+                type="button"
+                onClick={() =>
+                  window.alert(copy.actions.wechatHint)
+                }
+                className="rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/20"
+              >
+                {copy.actions.wechat}
+              </button>
+              <p className="text-center text-[11px] text-emerald-200/80">{copy.actions.wechatHint}</p>
+            </div>
+          </>
+        ) : null}
 
         <div className="mt-8 rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-xs leading-6 text-slate-300">
           <p className="font-medium text-slate-100">{copy.minimumAccountTitle}</p>

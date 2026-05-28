@@ -25,6 +25,7 @@ package decision
 
 import (
 	"log/slog"
+	"strings"
 )
 
 // SignalsPresence is the boolean side of the fingerprint: for
@@ -47,6 +48,9 @@ type SignalsPresence struct {
 	QuantSnapshots     bool `json:"quant_snapshots"`
 	UniverseRanking    bool `json:"universe_ranking"`
 	QualityScores      bool `json:"quality_scores"`
+	ValueScores        bool `json:"value_scores"`
+	LowBetaScores      bool `json:"low_beta_scores"`
+	PEAD               bool `json:"pead"`
 	Cooldowns          bool `json:"cooldowns"`
 	RiskBudget         bool `json:"risk_budget"`
 	NewsCatalysts      bool `json:"news_catalysts"`
@@ -54,6 +58,13 @@ type SignalsPresence struct {
 	Exposure           bool `json:"exposure"`
 	Correlations       bool `json:"correlations"`
 	PairSpreads        bool `json:"pair_spreads"`
+	// Sprint 1 / S1 — direct learning-loop closure flags.
+	AgentSkills         bool `json:"agent_skills"`
+	RecentLessons       bool `json:"recent_lessons"`
+	LongTermReflections bool `json:"long_term_reflections"`
+	// Sprint 1 / S2 — macro briefing presence (was always-zero in the
+	// fingerprint because the field was never populated upstream).
+	MacroBriefing bool `json:"macro_briefing"`
 }
 
 // SignalCounts captures the row-count side of the fingerprint —
@@ -66,6 +77,9 @@ type SignalCounts struct {
 	QuantSnapshots    int `json:"quant_snapshots"`
 	UniverseRanking   int `json:"universe_ranking"`
 	QualityScores     int `json:"quality_scores"`
+	ValueScores       int `json:"value_scores"`
+	LowBetaScores     int `json:"low_beta_scores"`
+	PEADSignals       int `json:"pead_signals"`
 	Cooldowns         int `json:"cooldowns"`
 	NewsCatalysts     int `json:"news_catalysts"`
 	EarningsCalendar  int `json:"earnings_calendar"`
@@ -73,6 +87,10 @@ type SignalCounts struct {
 	CorrelationsHigh  int `json:"correlations_high"`
 	CorrCandidates    int `json:"corr_candidates"`
 	PairSpreads       int `json:"pair_spreads"`
+	// Sprint 1 / S1 — row counts on the new learning-loop blocks.
+	AgentSkills         int `json:"agent_skills"`
+	RecentLessons       int `json:"recent_lessons"`
+	LongTermReflections int `json:"long_term_reflections"`
 }
 
 // Trace is the prompt-call fingerprint. Designed to be cheap to
@@ -98,9 +116,15 @@ func Fingerprint(in DecisionInput) Trace {
 			QuantSnapshots:   len(in.QuantSnapshots),
 			UniverseRanking:  len(in.UniverseRanking),
 			QualityScores:    len(in.QualityScores),
+			ValueScores:      len(in.ValueScores),
+			LowBetaScores:    len(in.LowBetaScores),
 			Cooldowns:        len(in.Cooldowns),
+			// PEADSignals filled below (depends on snapshot nil-ness).
 			NewsCatalysts:    len(in.NewsCatalysts),
 			ExposureBreaches: len(in.Exposure.Breaches),
+			AgentSkills:         len(in.AgentSkills),
+			RecentLessons:       len(in.RecentLessons),
+			LongTermReflections: len(in.LongTermReflections),
 		},
 		Signals: SignalsPresence{
 			RoundtableStance:   in.RoundtableStance != "",
@@ -117,6 +141,9 @@ func Fingerprint(in DecisionInput) Trace {
 			QuantSnapshots:     len(in.QuantSnapshots) > 0,
 			UniverseRanking:    len(in.UniverseRanking) > 0,
 			QualityScores:      len(in.QualityScores) > 0,
+			ValueScores:        len(in.ValueScores) > 0,
+			LowBetaScores:      len(in.LowBetaScores) > 0,
+			PEAD:               in.PEAD != nil && in.PEAD.HasSignal(),
 			Cooldowns:          len(in.Cooldowns) > 0,
 			RiskBudget:         in.RiskBudget != nil,
 			NewsCatalysts:      len(in.NewsCatalysts) > 0,
@@ -124,10 +151,17 @@ func Fingerprint(in DecisionInput) Trace {
 			Exposure:           in.Exposure.HasSignal(),
 			Correlations:       in.Correlations != nil && in.Correlations.HasSignal(),
 			PairSpreads:        in.PairSpreads != nil && in.PairSpreads.HasSignal(),
+			AgentSkills:         len(in.AgentSkills) > 0,
+			RecentLessons:       len(in.RecentLessons) > 0,
+			LongTermReflections: len(in.LongTermReflections) > 0,
+			MacroBriefing:       strings.TrimSpace(in.MacroBriefing) != "",
 		},
 	}
 	if in.EarningsCalendar != nil {
 		t.Counts.EarningsCalendar = len(in.EarningsCalendar.PerSymbol)
+	}
+	if in.PEAD != nil {
+		t.Counts.PEADSignals = len(in.PEAD.Signals)
 	}
 	if in.PairSpreads != nil {
 		t.Counts.PairSpreads = len(in.PairSpreads.PairsByAbsZ)
@@ -165,6 +199,9 @@ func (t Trace) SlogAttrs() []any {
 		slog.Int("count_quant_snapshots", t.Counts.QuantSnapshots),
 		slog.Int("count_universe_ranking", t.Counts.UniverseRanking),
 		slog.Int("count_quality_scores", t.Counts.QualityScores),
+		slog.Int("count_value_scores", t.Counts.ValueScores),
+		slog.Int("count_low_beta_scores", t.Counts.LowBetaScores),
+		slog.Int("count_pead_signals", t.Counts.PEADSignals),
 		slog.Int("count_cooldowns", t.Counts.Cooldowns),
 		slog.Int("count_news_catalysts", t.Counts.NewsCatalysts),
 		slog.Int("count_earnings_calendar", t.Counts.EarningsCalendar),
@@ -187,6 +224,9 @@ func (t Trace) SlogAttrs() []any {
 		slog.Bool("p_quant_snapshots", t.Signals.QuantSnapshots),
 		slog.Bool("p_universe_ranking", t.Signals.UniverseRanking),
 		slog.Bool("p_quality_scores", t.Signals.QualityScores),
+		slog.Bool("p_value_scores", t.Signals.ValueScores),
+		slog.Bool("p_low_beta_scores", t.Signals.LowBetaScores),
+		slog.Bool("p_pead", t.Signals.PEAD),
 		slog.Bool("p_cooldowns", t.Signals.Cooldowns),
 		slog.Bool("p_risk_budget", t.Signals.RiskBudget),
 		slog.Bool("p_news_catalysts", t.Signals.NewsCatalysts),
@@ -194,6 +234,14 @@ func (t Trace) SlogAttrs() []any {
 		slog.Bool("p_exposure", t.Signals.Exposure),
 		slog.Bool("p_correlations", t.Signals.Correlations),
 		slog.Bool("p_pair_spreads", t.Signals.PairSpreads),
+		// Sprint 1 / S1 + S2 — learning-loop + macro presence.
+		slog.Bool("p_agent_skills", t.Signals.AgentSkills),
+		slog.Bool("p_recent_lessons", t.Signals.RecentLessons),
+		slog.Bool("p_long_term_reflections", t.Signals.LongTermReflections),
+		slog.Bool("p_macro_briefing", t.Signals.MacroBriefing),
+		slog.Int("count_agent_skills", t.Counts.AgentSkills),
+		slog.Int("count_recent_lessons", t.Counts.RecentLessons),
+		slog.Int("count_long_term_reflections", t.Counts.LongTermReflections),
 	}
 }
 
@@ -248,6 +296,15 @@ func (t Trace) PresentBlocks() []string {
 	if t.Signals.QualityScores {
 		out = append(out, "qualityScores")
 	}
+	if t.Signals.ValueScores {
+		out = append(out, "valueScores")
+	}
+	if t.Signals.LowBetaScores {
+		out = append(out, "lowBetaScores")
+	}
+	if t.Signals.PEAD {
+		out = append(out, "pead")
+	}
 	if t.Signals.Cooldowns {
 		out = append(out, "cooldowns")
 	}
@@ -268,6 +325,18 @@ func (t Trace) PresentBlocks() []string {
 	}
 	if t.Signals.PairSpreads {
 		out = append(out, "pairSpreads")
+	}
+	if t.Signals.AgentSkills {
+		out = append(out, "agentSkills")
+	}
+	if t.Signals.RecentLessons {
+		out = append(out, "recentLessons")
+	}
+	if t.Signals.LongTermReflections {
+		out = append(out, "longTermReflections")
+	}
+	if t.Signals.MacroBriefing {
+		out = append(out, "macroBriefing")
 	}
 	return out
 }
@@ -326,6 +395,15 @@ func (t Trace) AbsentBlocks() []string {
 	if !t.Signals.QualityScores {
 		out = append(out, "qualityScores")
 	}
+	if !t.Signals.ValueScores {
+		out = append(out, "valueScores")
+	}
+	if !t.Signals.LowBetaScores {
+		out = append(out, "lowBetaScores")
+	}
+	if !t.Signals.PEAD {
+		out = append(out, "pead")
+	}
 	if !t.Signals.Cooldowns {
 		out = append(out, "cooldowns")
 	}
@@ -346,6 +424,18 @@ func (t Trace) AbsentBlocks() []string {
 	}
 	if !t.Signals.PairSpreads {
 		out = append(out, "pairSpreads")
+	}
+	if !t.Signals.AgentSkills {
+		out = append(out, "agentSkills")
+	}
+	if !t.Signals.RecentLessons {
+		out = append(out, "recentLessons")
+	}
+	if !t.Signals.LongTermReflections {
+		out = append(out, "longTermReflections")
+	}
+	if !t.Signals.MacroBriefing {
+		out = append(out, "macroBriefing")
 	}
 	return out
 }

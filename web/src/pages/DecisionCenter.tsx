@@ -54,6 +54,11 @@ const DecisionCenter: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
+  // actionSuccess is a transient confirmation banner shown for ~3s
+  // after a successful approve / reject / refresh. Kept separate from
+  // actionError so the success path doesn't paint into the red panel.
+  // Auto-dismisses via the timer set in the helpers below.
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   // Price-refresh dialog state. After the user clicks "Refresh quote"
   // we compare each action's price before and after the API call; if
   // any drift exceeds PRICE_DRIFT_DIALOG_THRESHOLD we surface a modal
@@ -69,7 +74,12 @@ const DecisionCenter: React.FC = () => {
   // surfaced above the grid (outside the approval card) when any of approve /
   // reject / refresh-quote fails.
   const [decisionTraceByPlanKey, setDecisionTraceByPlanKey] = useState<Record<string, DecisionTrace | null>>({});
+  const [decisionTraceErrorByPlanKey, setDecisionTraceErrorByPlanKey] = useState<Record<string, string | null>>({});
   const [decisionTraceLoading, setDecisionTraceLoading] = useState(false);
+  // Bumping this counter triggers the trace effect to re-fetch even
+  // when the plan key already has an entry in the cache; used by the
+  // "Retry" button to recover from a previous fetch error.
+  const [decisionTraceRetryCounter, setDecisionTraceRetryCounter] = useState(0);
   // PR-4: live quotes pushed from the SSE stream, keyed by symbol so
   // the ActionListCard can render the "现价" column without re-rendering
   // the entire plan list on every tick.
@@ -129,6 +139,10 @@ const DecisionCenter: React.FC = () => {
             priceRefreshColumnDrift: "Drift",
             priceRefreshAcknowledge: "I've reviewed the changes",
             retry: "Retry",
+            traceLoadFailed: "Failed to load decision trace",
+            successApproved: "Plan approved — queued for execution",
+            successRejected: "Plan rejected",
+            successRefreshed: "Prices refreshed",
             title: "Decision center",
             subtitle: "Review pending plans, action details, and risk conclusions in one place, then approve or reject them here.",
             emptyTitle: "No investment plans yet",
@@ -310,6 +324,7 @@ const DecisionCenter: React.FC = () => {
               approved: "Approved",
               rejected: "Rejected",
               completed: "Completed",
+              mixed: "Partial fill",
               watch_only: "Watch only",
             },
             actionType: {
@@ -364,6 +379,10 @@ const DecisionCenter: React.FC = () => {
             priceRefreshColumnDrift: "变动幅度",
             priceRefreshAcknowledge: "我已确认价格变动",
             retry: "重试",
+            traceLoadFailed: "决策轨迹加载失败",
+            successApproved: "计划已通过，已排入执行队列",
+            successRejected: "计划已驳回",
+            successRefreshed: "报价已刷新",
             title: "决策中心",
             subtitle: "集中查看待审批计划、动作明细与风控结论，并在这里完成通过或驳回。",
             emptyTitle: "当前还没有投资计划",
@@ -545,6 +564,7 @@ const DecisionCenter: React.FC = () => {
               approved: "已通过",
               rejected: "已驳回",
               completed: "已完成",
+              mixed: "部分成交",
               watch_only: "今日观望",
             },
             actionType: {
@@ -597,6 +617,9 @@ const DecisionCenter: React.FC = () => {
         approved: "bg-emerald-50 text-emerald-700 border-emerald-200",
         rejected: "bg-red-50 text-red-700 border-red-200",
         completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+        // Sprint 3 / L2 — partial fill 用 amber + emerald 渐近的混合色，
+        // 一眼能看出来"既有成功也有失败"。
+        mixed: "bg-orange-50 text-orange-700 border-orange-200",
         // Watch-only deserves its own muted-blue palette so the
         // operator can scan a long history list and immediately
         // separate "PM chose to wait" rows from "trades executed"
@@ -803,11 +826,23 @@ const DecisionCenter: React.FC = () => {
   );
 
   useEffect(() => {
-    if (!fundId || !selectedPlanKey || decisionTraceByPlanKey[selectedPlanKey] !== undefined) {
+    if (!fundId || !selectedPlanKey) {
+      return;
+    }
+    // Skip when we already have a successful trace cached AND there's
+    // no retry pending. Errors trigger a re-fetch via the retry counter.
+    if (
+      decisionTraceByPlanKey[selectedPlanKey] !== undefined &&
+      decisionTraceErrorByPlanKey[selectedPlanKey] == null &&
+      decisionTraceRetryCounter === 0
+    ) {
       return;
     }
     let cancelled = false;
     setDecisionTraceLoading(true);
+    // Reset any prior error for this key BEFORE the fetch so the UI
+    // doesn't double-flash the error during retry.
+    setDecisionTraceErrorByPlanKey((current) => ({ ...current, [selectedPlanKey]: null }));
     void fetchFundDecisionTrace(fundId, selectedTradingDate, selectedPlanKey)
       .then((trace) => {
         if (cancelled) {
@@ -815,11 +850,14 @@ const DecisionCenter: React.FC = () => {
         }
         setDecisionTraceByPlanKey((current) => ({ ...current, [selectedPlanKey]: trace }));
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled) {
           return;
         }
         setDecisionTraceByPlanKey((current) => ({ ...current, [selectedPlanKey]: null }));
+        const message =
+          err instanceof Error && err.message ? err.message : "Failed to load decision trace";
+        setDecisionTraceErrorByPlanKey((current) => ({ ...current, [selectedPlanKey]: message }));
       })
       .finally(() => {
         if (!cancelled) {
@@ -829,7 +867,34 @@ const DecisionCenter: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [decisionTraceByPlanKey, fundId, selectedPlanKey, selectedTradingDate]);
+  }, [
+    decisionTraceByPlanKey,
+    decisionTraceErrorByPlanKey,
+    decisionTraceRetryCounter,
+    fundId,
+    selectedPlanKey,
+    selectedTradingDate,
+  ]);
+
+  const decisionTraceError = selectedPlanKey
+    ? decisionTraceErrorByPlanKey[selectedPlanKey] ?? null
+    : null;
+  const retryDecisionTrace = useCallback(() => {
+    if (!selectedPlanKey) return;
+    // Drop the cached null so the effect dependency check passes and
+    // the fetch re-runs.
+    setDecisionTraceByPlanKey((current) => {
+      const next = { ...current };
+      delete next[selectedPlanKey];
+      return next;
+    });
+    setDecisionTraceErrorByPlanKey((current) => {
+      const next = { ...current };
+      delete next[selectedPlanKey];
+      return next;
+    });
+    setDecisionTraceRetryCounter((c) => c + 1);
+  }, [selectedPlanKey]);
 
   const updatePlan = useCallback((updated: ApiPlan) => {
     setPlans((prev) => prev.map((plan) => (plan.id === updated.id ? updated : plan)));
@@ -842,6 +907,17 @@ const DecisionCenter: React.FC = () => {
   // so a fresh attempt isn't blocked by a stale red banner from a previous
   // failure, and they THROW on failure so ApprovalActions can show its own
   // error toast.
+  // flashActionSuccess sets a transient confirmation banner that
+  // auto-dismisses after 3s. Hides any current error so the banner is
+  // unambiguous.
+  const flashActionSuccess = useCallback((message: string) => {
+    setActionError(null);
+    setActionSuccess(message);
+    window.setTimeout(() => {
+      setActionSuccess((current) => (current === message ? null : current));
+    }, 3000);
+  }, []);
+
   const approvePlan = useCallback(async () => {
     if (!selected) {
       return;
@@ -849,7 +925,8 @@ const DecisionCenter: React.FC = () => {
     setActionError(null);
     const updated = await apiPost<ApiPlan>(`/api/plans/${selected.id}/approve`);
     updatePlan(updated);
-  }, [selected, updatePlan]);
+    flashActionSuccess(copy.successApproved);
+  }, [copy.successApproved, flashActionSuccess, selected, updatePlan]);
 
   const rejectPlan = useCallback(
     async (reason: string) => {
@@ -859,8 +936,9 @@ const DecisionCenter: React.FC = () => {
       setActionError(null);
       const updated = await apiPost<ApiPlan>(`/api/plans/${selected.id}/reject`, { reason });
       updatePlan(updated);
+      flashActionSuccess(copy.successRejected);
     },
-    [selected, updatePlan],
+    [copy.successRejected, flashActionSuccess, selected, updatePlan],
   );
 
   // Threshold for surfacing the price-refresh confirmation dialog.
@@ -920,7 +998,11 @@ const DecisionCenter: React.FC = () => {
       setPriceRefreshRows(rows);
       setPriceRefreshDialogOpen(true);
     }
-  }, [selected, selectedPlanDetail, updatePlan]);
+    // Always show a confirmation toast when refresh succeeds, even
+    // when no row drifted enough to trigger the dialog — otherwise the
+    // user can't tell whether the refresh ran.
+    flashActionSuccess(copy.successRefreshed);
+  }, [copy.successRefreshed, flashActionSuccess, selected, selectedPlanDetail, updatePlan]);
 
   const closePriceRefreshDialog = useCallback(() => {
     setPriceRefreshDialogOpen(false);
@@ -1416,6 +1498,9 @@ const DecisionCenter: React.FC = () => {
       </div>
 
       {actionError ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{actionError}</div> : null}
+      {actionSuccess ? (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{actionSuccess}</div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
         <PlanListSidebar
@@ -1506,6 +1591,22 @@ const DecisionCenter: React.FC = () => {
                 formatPercent={formatPercent}
                 formatQuantity={formatQuantity}
               />
+
+              {decisionTraceError ? (
+                <div className="flex items-center justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  <span>
+                    {copy.traceLoadFailed}
+                    {decisionTraceError ? `: ${decisionTraceError}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={retryDecisionTrace}
+                    className="rounded-lg border border-rose-400 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100"
+                  >
+                    {copy.retry}
+                  </button>
+                </div>
+              ) : null}
 
               <TraceboardCard
                 decisionTrace={selectedDecisionTrace}

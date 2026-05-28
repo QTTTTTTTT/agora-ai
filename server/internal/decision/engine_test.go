@@ -1101,3 +1101,250 @@ func TestTruncateSummaryUTF8Safe(t *testing.T) {
 		t.Errorf("zero cap should produce empty, got %q", got)
 	}
 }
+
+// =============================================================================
+// Sprint 1 / Tier-S learning-loop closure: prompt-side coverage for
+// AgentSkills / RecentLessons / LongTermReflections.
+//
+// These three blocks are the ground-truth contract between the wiring
+// layer (which loads them) and the LLM (which acts on them). When the
+// audit found they were wired but had ZERO prompt-side assertions we
+// added these tests to nail down (a) the system prompt teaches the
+// LLM how to consume each block, (b) the user prompt actually surfaces
+// the data under the documented JSON key, and (c) the cap helpers
+// enforce the documented limits so a runaway skill set or memory
+// burst can't blow the prompt budget.
+// =============================================================================
+
+// SystemPrompt documents the agentSkills block — the LLM needs to
+// know how to weigh approved skills (e.g. "first-class behavioural
+// constraint"). Asserts on stable substrings from prompt.go.
+func TestSystemPromptDocumentsAgentSkillsRules(t *testing.T) {
+	fl := &fakeLLM{
+		respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Content: `{"actions":[],"stance":"watch","confidence":0.5}`}, nil
+		},
+	}
+	engine := &LLMDecisionEngine{Client: fl}
+	_, _ = engine.Decide(context.Background(), DecisionInput{FundID: "f", Universe: []string{"AAPL"}})
+	sys := fl.lastReq.Messages[0].Content
+	for _, want := range []string{"input.agentSkills", "APPROVED + ENABLED", "first-class behavioural constraint"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt missing %q\n--- prompt ---\n%s", want, sys)
+		}
+	}
+}
+
+// User prompt surfaces agentSkills under the documented JSON key with
+// the human-readable fields (name + description + source) intact.
+func TestLLMDecisionEngineInjectsAgentSkills(t *testing.T) {
+	fl := &fakeLLM{
+		respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Content: `{"actions":[],"stance":"watch","confidence":0.5}`}, nil
+		},
+	}
+	engine := &LLMDecisionEngine{Client: fl}
+	_, _ = engine.Decide(context.Background(), DecisionInput{
+		FundID:      "fund-skills",
+		TradingDate: time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"AAPL"},
+		AgentSkills: []AgentSkillContext{
+			{
+				AgentRole:   "pm",
+				AgentName:   "PM-Alpha",
+				Name:        "earnings_window_caution",
+				Description: "降低 5 个交易日内有财报标的的新建仓比例",
+				Source:      "reflection",
+			},
+		},
+	})
+	user := fl.lastReq.Messages[1].Content
+	for _, want := range []string{"agentSkills", "earnings_window_caution", "PM-Alpha", "reflection", "降低"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("user prompt missing %q\n--- prompt ---\n%s", want, user)
+		}
+	}
+}
+
+// When the wiring layer passes no skills the JSON key must be omitted
+// (omitempty) so the LLM doesn't hallucinate a "no skills configured"
+// signal where none exists.
+func TestLLMDecisionEngineOmitsAgentSkillsWhenEmpty(t *testing.T) {
+	fl := &fakeLLM{
+		respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Content: `{"actions":[],"stance":"watch","confidence":0.5}`}, nil
+		},
+	}
+	engine := &LLMDecisionEngine{Client: fl}
+	_, _ = engine.Decide(context.Background(), DecisionInput{
+		FundID:   "fund-bare",
+		Universe: []string{"AAPL"},
+	})
+	user := fl.lastReq.Messages[1].Content
+	if strings.Contains(user, "agentSkills") {
+		t.Errorf("user prompt contains agentSkills key despite empty input:\n%s", user)
+	}
+}
+
+// SystemPrompt documents recentLessons — the textual memory the PM
+// should pattern-match against today's candidates.
+func TestSystemPromptDocumentsRecentLessonsRules(t *testing.T) {
+	fl := &fakeLLM{
+		respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Content: `{"actions":[],"stance":"watch","confidence":0.5}`}, nil
+		},
+	}
+	engine := &LLMDecisionEngine{Client: fl}
+	_, _ = engine.Decide(context.Background(), DecisionInput{FundID: "f", Universe: []string{"AAPL"}})
+	sys := fl.lastReq.Messages[0].Content
+	for _, want := range []string{"input.recentLessons", "distilled lesson", "Cite the lesson date"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt missing %q\n--- prompt ---\n%s", want, sys)
+		}
+	}
+}
+
+// User prompt surfaces recentLessons with date / layer / role / body.
+func TestLLMDecisionEngineInjectsRecentLessons(t *testing.T) {
+	fl := &fakeLLM{
+		respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Content: `{"actions":[],"stance":"watch","confidence":0.5}`}, nil
+		},
+	}
+	engine := &LLMDecisionEngine{Client: fl}
+	_, _ = engine.Decide(context.Background(), DecisionInput{
+		FundID:      "fund-lessons",
+		TradingDate: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"TSLA"},
+		RecentLessons: []RecentLessonContext{
+			{
+				TradingDate: "2026-05-21",
+				Layer:       "agent",
+				AgentRole:   "pm",
+				Title:       "TSLA add in trend_down",
+				Content:     "added TSLA into a confirmed trend_down regime, lost 1.8% same session",
+				Tags:        []string{"trend_down", "TSLA"},
+			},
+		},
+	})
+	user := fl.lastReq.Messages[1].Content
+	for _, want := range []string{"recentLessons", "2026-05-21", "pm", "TSLA add in trend_down", "lost 1.8%"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("user prompt missing %q\n--- prompt ---\n%s", want, user)
+		}
+	}
+}
+
+// SystemPrompt documents longTermReflections — the slow-moving
+// steering field on top of recentLessons.
+func TestSystemPromptDocumentsLongTermReflectionsRules(t *testing.T) {
+	fl := &fakeLLM{
+		respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Content: `{"actions":[],"stance":"watch","confidence":0.5}`}, nil
+		},
+	}
+	engine := &LLMDecisionEngine{Client: fl}
+	_, _ = engine.Decide(context.Background(), DecisionInput{FundID: "f", Universe: []string{"AAPL"}})
+	sys := fl.lastReq.Messages[0].Content
+	for _, want := range []string{"input.longTermReflections", "at most 5", "slow-moving steering field"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt missing %q\n--- prompt ---\n%s", want, sys)
+		}
+	}
+}
+
+// User prompt surfaces longTermReflections with createdAt + body.
+func TestLLMDecisionEngineInjectsLongTermReflections(t *testing.T) {
+	fl := &fakeLLM{
+		respond: func(_ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Content: `{"actions":[],"stance":"watch","confidence":0.5}`}, nil
+		},
+	}
+	engine := &LLMDecisionEngine{Client: fl}
+	_, _ = engine.Decide(context.Background(), DecisionInput{
+		FundID:      "fund-reflections",
+		TradingDate: time.Date(2026, 5, 23, 0, 0, 0, 0, time.UTC),
+		Universe:    []string{"NVDA"},
+		LongTermReflections: []LongTermReflectionContext{
+			{
+				CreatedAt: "2026-05-10",
+				Title:     "AI infra leadership thesis",
+				Content:   "NVDA + AMD + AVGO持续受益于推理需求，回调即买点直到 Q4 财报季",
+				Tags:      []string{"ai", "semis"},
+			},
+		},
+	})
+	user := fl.lastReq.Messages[1].Content
+	for _, want := range []string{"longTermReflections", "2026-05-10", "AI infra leadership thesis", "持续受益"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("user prompt missing %q\n--- prompt ---\n%s", want, user)
+		}
+	}
+}
+
+// Cap fence: capAgentSkillContexts enforces both the slice-length cap
+// (so a fund with 200 skills can't blow the prompt budget) and the
+// per-row description cap (so a single 5000-char skill doesn't slip
+// through). limit=0 / nil input return nil rather than empty slice so
+// json.MarshalIndent emits omitempty.
+func TestCapAgentSkillContextsEnforcesBudgets(t *testing.T) {
+	if got := capAgentSkillContexts(nil, 10); got != nil {
+		t.Errorf("nil input should return nil, got %v", got)
+	}
+	if got := capAgentSkillContexts([]AgentSkillContext{{Name: "x"}}, 0); got != nil {
+		t.Errorf("zero limit should return nil, got %v", got)
+	}
+	// Length cap at 3
+	items := []AgentSkillContext{{Name: "a"}, {Name: "b"}, {Name: "c"}, {Name: "d"}}
+	if got := capAgentSkillContexts(items, 3); len(got) != 3 {
+		t.Errorf("length cap: got len=%d, want 3", len(got))
+	}
+	// Description rune cap at 240
+	long := strings.Repeat("一", 300)
+	out := capAgentSkillContexts([]AgentSkillContext{{Name: "n", Description: long}}, 5)
+	if len(out) != 1 {
+		t.Fatalf("got %d items, want 1", len(out))
+	}
+	if runes := []rune(out[0].Description); len(runes) > 241 { // 240 + ellipsis
+		t.Errorf("description not truncated: %d runes (want ≤241)", len(runes))
+	}
+	if !strings.HasSuffix(out[0].Description, "…") {
+		t.Errorf("description missing ellipsis suffix: %q", out[0].Description)
+	}
+}
+
+// Cap fence: capRecentLessonContexts limit + body 280 + title 80.
+func TestCapRecentLessonContextsEnforcesBudgets(t *testing.T) {
+	if got := capRecentLessonContexts(nil, 10); got != nil {
+		t.Errorf("nil input should return nil")
+	}
+	items := []RecentLessonContext{{Content: "a"}, {Content: "b"}, {Content: "c"}}
+	if got := capRecentLessonContexts(items, 2); len(got) != 2 {
+		t.Errorf("length cap: got %d, want 2", len(got))
+	}
+	bigContent := strings.Repeat("内", 400)
+	bigTitle := strings.Repeat("题", 100)
+	out := capRecentLessonContexts([]RecentLessonContext{{Title: bigTitle, Content: bigContent}}, 5)
+	if r := []rune(out[0].Content); len(r) > 281 {
+		t.Errorf("content not truncated: %d runes", len(r))
+	}
+	if r := []rune(out[0].Title); len(r) > 81 {
+		t.Errorf("title not truncated: %d runes", len(r))
+	}
+}
+
+// Cap fence: capLongTermReflectionContexts limit + body 360 + title 80.
+func TestCapLongTermReflectionContextsEnforcesBudgets(t *testing.T) {
+	if got := capLongTermReflectionContexts(nil, 5); got != nil {
+		t.Errorf("nil input should return nil")
+	}
+	items := []LongTermReflectionContext{{Content: "a"}, {Content: "b"}, {Content: "c"}, {Content: "d"}, {Content: "e"}, {Content: "f"}}
+	if got := capLongTermReflectionContexts(items, 5); len(got) != 5 {
+		t.Errorf("length cap: got %d, want 5", len(got))
+	}
+	bigContent := strings.Repeat("思", 500)
+	out := capLongTermReflectionContexts([]LongTermReflectionContext{{Content: bigContent}}, 5)
+	if r := []rune(out[0].Content); len(r) > 361 {
+		t.Errorf("content not truncated: %d runes", len(r))
+	}
+}

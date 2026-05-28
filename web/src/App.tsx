@@ -15,6 +15,10 @@ import { useAppPreferences } from "./lib/preferences";
 
 const Companies = lazy(() => import("./pages/Companies"));
 const Login = lazy(() => import("./pages/Login"));
+const ForgotPassword = lazy(() => import("./pages/ForgotPassword"));
+const ResetPassword = lazy(() => import("./pages/ResetPassword"));
+const VerifyEmail = lazy(() => import("./pages/VerifyEmail"));
+const AccountSecurity = lazy(() => import("./pages/AccountSecurity"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const TeamManagement = lazy(() => import("./pages/TeamManagement"));
 const DecisionCenter = lazy(() => import("./pages/DecisionCenter"));
@@ -32,6 +36,7 @@ const Subscription = lazy(() => import("./pages/Subscription"));
 const ModelConfig = lazy(() => import("./pages/ModelConfig"));
 const Usage = lazy(() => import("./pages/Usage"));
 const Admin = lazy(() => import("./pages/Admin"));
+const SkillInbox = lazy(() => import("./pages/SkillInbox"));
 const Wallet = lazy(() => import("./pages/Wallet"));
 const KYC = lazy(() => import("./pages/KYC"));
 const Marketplace = lazy(() => import("./pages/Marketplace"));
@@ -143,12 +148,17 @@ const AppRoutes: React.FC = () => {
           <Routes>
             <Route path="/" element={<Navigate to="/companies" replace />} />
             <Route path="/login" element={<Login />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/verify-email" element={<AuthGate><VerifyEmail /></AuthGate>} />
+            <Route path="/account/security" element={<AuthGate><AccountSecurity /></AuthGate>} />
             <Route path="/companies" element={<AuthGate><Companies /></AuthGate>} />
             <Route path="/wallet" element={<AuthGate><Wallet /></AuthGate>} />
             <Route path="/kyc" element={<AuthGate><KYC /></AuthGate>} />
             <Route path="/marketplace" element={<AuthGate><Marketplace /></AuthGate>} />
             <Route path="/auctions" element={<AuthGate><Auctions /></AuthGate>} />
             <Route path="/admin" element={<AuthGate><AdminGate><Admin /></AdminGate></AuthGate>} />
+            <Route path="/admin/skills/inbox" element={<AuthGate><AdminGate><SkillInbox /></AdminGate></AuthGate>} />
             <Route
               path="/funds/:fundId"
               element={<AuthGate><FundLayout /></AuthGate>}

@@ -45,6 +45,10 @@ type adminHandler struct {
 	// quotaService enforces per-fund resource caps (F28). Nil-safe;
 	// when absent, /api/admin/quotas/... endpoints return 503.
 	quotaService *quota.Service
+
+	// skillInbox 是 Sprint 3 / M5 跨基金技能审批 inbox 的 backend。
+	// nil 时对应端点 503。
+	skillInbox *skillInbox
 }
 
 // adminSuperAdminChecker implements audit.SuperAdminChecker by reading
@@ -182,6 +186,11 @@ func newAdminHandler(svc *Services) *adminHandler {
 		}
 		h.workflowService = svc.WorkflowService
 	}
+	// Wire Sprint 3 / M5 skill inbox if both DB and mailer are
+	// configured. Without mailer we still expose list + shadow-eval;
+	// only the auto-approve email notification degrades to a slog
+	// line, which matches the rest of the platform's mailer pattern.
+	h.skillInbox = newSkillInbox(svc.DB, svc.Mailer, "FundAI", "")
 	h.registerDualControlActions()
 	return h
 }
@@ -210,6 +219,90 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerDualControlRoutes(mux)
 	// F28 — per-fund quota administration.
 	h.registerQuotaRoutes(mux)
+	// Sprint 3 / M5 — skill inbox endpoints.
+	mux.HandleFunc("GET /api/admin/skills/proposed", h.handleListProposedSkills)
+	mux.HandleFunc("POST /api/admin/skills/{fundId}/{skillKey}/shadow-evaluate", h.handleShadowEvaluateSkill)
+	mux.HandleFunc("POST /api/admin/skills/{fundId}/{skillKey}/approve", h.handleManualApproveSkill)
+}
+
+// handleListProposedSkills implements GET /api/admin/skills/proposed.
+// Optional query param ageMinHours filters out anything proposed within
+// the last N hours so the operator can focus on "stuck" candidates.
+func (h *adminHandler) handleListProposedSkills(w http.ResponseWriter, r *http.Request) {
+	if !requireSuperAdmin(w, r) {
+		return
+	}
+	if h.skillInbox == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "skill inbox unavailable"})
+		return
+	}
+	ageMinHours := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("ageMinHours")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			ageMinHours = parsed
+		}
+	}
+	resp, err := h.skillInbox.ListProposed(r.Context(), ageMinHours)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleShadowEvaluateSkill implements POST /api/admin/skills/{fundId}/{skillKey}/shadow-evaluate.
+// Runs the factorlab simulator and returns the metrics; the same call
+// may auto-approve the skill when the run history clears the threshold.
+func (h *adminHandler) handleShadowEvaluateSkill(w http.ResponseWriter, r *http.Request) {
+	if !requireSuperAdmin(w, r) {
+		return
+	}
+	if h.skillInbox == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "skill inbox unavailable"})
+		return
+	}
+	fundID := strings.TrimSpace(r.PathValue("fundId"))
+	skillKey := strings.TrimSpace(r.PathValue("skillKey"))
+	if fundID == "" || skillKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "fundId and skillKey are required"})
+		return
+	}
+	resp, err := h.skillInbox.ShadowEvaluate(r.Context(), fundID, skillKey)
+	if err != nil {
+		if errors.Is(err, api.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "skill not found in fund"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleManualApproveSkill is the operator escape-hatch: when the
+// human admin is satisfied without waiting for 3 cleared shadow runs,
+// they can flip the proposed skill to approved with one call. We reuse
+// the same idempotent autoApprove pathway, so re-firing the call is a
+// no-op.
+func (h *adminHandler) handleManualApproveSkill(w http.ResponseWriter, r *http.Request) {
+	if !requireSuperAdmin(w, r) {
+		return
+	}
+	if h.skillInbox == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "skill inbox unavailable"})
+		return
+	}
+	fundID := strings.TrimSpace(r.PathValue("fundId"))
+	skillKey := strings.TrimSpace(r.PathValue("skillKey"))
+	if fundID == "" || skillKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "fundId and skillKey are required"})
+		return
+	}
+	if err := h.skillInbox.autoApprove(r.Context(), fundID, skillKey); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "fundId": fundID, "skillKey": skillKey})
 }
 
 // handleSchedulerSnapshot exposes the latest scheduler tick so operators

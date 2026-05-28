@@ -66,8 +66,18 @@ type InvestmentPlan struct {
 	// id so a retried write returns the original row instead of inserting
 	// a duplicate plan for the same workflow step.
 	ClientIdempotencyKey sql.NullString `json:"clientIdempotencyKey,omitempty"`
-	CreatedAt            time.Time      `json:"createdAt"`
-	UpdatedAt            time.Time      `json:"updatedAt"`
+	// BlockContributions (G1 #2) carries the per-plan
+	// decision-block attribution: which signal blocks were
+	// present in the DecisionInput, which the PM cited in its
+	// Reasoning, plus per-block counts and the trace
+	// fingerprint signature. Written by the wiring layer via
+	// SetBlockContributions after the plan is created. Empty
+	// JSON object ('{}') means "writer never ran" (legacy /
+	// fallback plans). The shape is intentionally loose so the
+	// writer can evolve without another migration.
+	BlockContributions json.RawMessage `json:"blockContributions,omitempty"`
+	CreatedAt          time.Time       `json:"createdAt"`
+	UpdatedAt          time.Time       `json:"updatedAt"`
 }
 
 type PlanAction struct {
@@ -144,6 +154,12 @@ type PlanAction struct {
 	//   - "manual"      - human-initiated override
 	// NULL for buy/add actions.
 	ExitReason sql.NullString `json:"exitReason"`
+
+	// Sprint 1 / S6 execution-strategy hint. NULL = "immediate"
+	// (legacy single-shot fill at the live quote). Other valid
+	// values: "twap", "vwap", "limit" — see migration 041 and
+	// runtimeTradingEngine.executeStrategyDispatch.
+	Strategy sql.NullString `json:"strategy"`
 }
 
 type TradeExecution struct {
@@ -642,6 +658,37 @@ func (r *PlanRepo) createTx(ctx context.Context, queryer queryRowContextExecutor
 	return id, nil
 }
 
+// SetBlockContributions stamps the G1 #2 attribution JSON onto an
+// existing plan. Called by the wiring layer after Create returns
+// successfully, in a separate UPDATE so the INSERT path (and its
+// extensive test coverage) stays unchanged. payload is the
+// already-marshalled JSONB blob — the caller owns the schema.
+//
+// Soft-fail contract: a nil / empty payload is a no-op. A DB
+// error is logged-and-ignored upstream; attribution is a soft
+// observability signal, not a correctness one. We never want
+// the decision-write path to fail because the attribution
+// writer couldn't persist (e.g. transient connection drop).
+func (r *PlanRepo) SetBlockContributions(ctx context.Context, planID string, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(planID) == "" {
+		return fmt.Errorf("plan_repo: SetBlockContributions: empty plan id")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE investment_plans
+		    SET block_contributions = $2,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		planID, payload,
+	)
+	if err != nil {
+		return fmt.Errorf("plan_repo: SetBlockContributions: %w", err)
+	}
+	return nil
+}
+
 func (r *PlanRepo) GetByID(ctx context.Context, id string) (*InvestmentPlan, error) {
 	p := &InvestmentPlan{}
 	err := r.db.QueryRowContext(ctx,
@@ -796,8 +843,8 @@ func (r *PlanRepo) createActionsTx(ctx context.Context, tx *sql.Tx, planID strin
 		return nil
 	}
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO plan_actions (plan_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, action, position_side, open_close, quantity, price, amount, stop_loss, take_profit, reasoning, confidence, supported_by, opposed_by, execution_status, sort_order, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, sleeve, regime_tag, signal_source, exit_reason)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)`,
+		`INSERT INTO plan_actions (plan_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, action, position_side, open_close, quantity, price, amount, stop_loss, take_profit, reasoning, confidence, supported_by, opposed_by, execution_status, sort_order, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, sleeve, regime_tag, signal_source, exit_reason, strategy)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`,
 	)
 	if err != nil {
 		return fmt.Errorf("plan_repo: prepare action insert: %w", err)
@@ -838,6 +885,7 @@ func (r *PlanRepo) createActionsTx(ctx context.Context, tx *sql.Tx, planID strin
 			actions[i].RegimeTag,
 			actions[i].SignalSource,
 			actions[i].ExitReason,
+			actions[i].Strategy,
 		); err != nil {
 			return fmt.Errorf("plan_repo: insert action [%d]: %w", i, err)
 		}
@@ -847,7 +895,7 @@ func (r *PlanRepo) createActionsTx(ctx context.Context, tx *sql.Tx, planID strin
 
 func (r *PlanRepo) GetActions(ctx context.Context, planID string) ([]PlanAction, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, plan_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, action, position_side, open_close, quantity, price, amount, stop_loss, take_profit, reasoning, confidence, supported_by, opposed_by, execution_status, sort_order, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, quote_refreshed_at, auto_executed_at, sleeve, regime_tag, signal_source, exit_reason
+		`SELECT id, plan_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, action, position_side, open_close, quantity, price, amount, stop_loss, take_profit, reasoning, confidence, supported_by, opposed_by, execution_status, sort_order, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, quote_refreshed_at, auto_executed_at, sleeve, regime_tag, signal_source, exit_reason, strategy
 		 FROM plan_actions WHERE plan_id = $1 ORDER BY sort_order, id`, planID,
 	)
 	if err != nil {
@@ -858,7 +906,7 @@ func (r *PlanRepo) GetActions(ctx context.Context, planID string) ([]PlanAction,
 	var actions []PlanAction
 	for rows.Next() {
 		var a PlanAction
-		if err := rows.Scan(&a.ID, &a.PlanID, &a.InstrumentKey, &a.Symbol, &a.Market, &a.Exchange, &a.AssetClass, &a.InstrumentType, &a.Action, &a.PositionSide, &a.OpenClose, &a.Quantity, &a.Price, &a.Amount, &a.StopLoss, &a.TakeProfit, &a.Reasoning, &a.Confidence, pq.Array(&a.SupportedBy), pq.Array(&a.OpposedBy), &a.ExecutionStatus, &a.SortOrder, &a.QuoteCurrency, &a.SettlementCurrency, &a.MarginMode, &a.Leverage, &a.ContractMultiplier, &a.ExpiryDate, &a.ReduceOnly, &a.QuoteRefreshedAt, &a.AutoExecutedAt, &a.Sleeve, &a.RegimeTag, &a.SignalSource, &a.ExitReason); err != nil {
+		if err := rows.Scan(&a.ID, &a.PlanID, &a.InstrumentKey, &a.Symbol, &a.Market, &a.Exchange, &a.AssetClass, &a.InstrumentType, &a.Action, &a.PositionSide, &a.OpenClose, &a.Quantity, &a.Price, &a.Amount, &a.StopLoss, &a.TakeProfit, &a.Reasoning, &a.Confidence, pq.Array(&a.SupportedBy), pq.Array(&a.OpposedBy), &a.ExecutionStatus, &a.SortOrder, &a.QuoteCurrency, &a.SettlementCurrency, &a.MarginMode, &a.Leverage, &a.ContractMultiplier, &a.ExpiryDate, &a.ReduceOnly, &a.QuoteRefreshedAt, &a.AutoExecutedAt, &a.Sleeve, &a.RegimeTag, &a.SignalSource, &a.ExitReason, &a.Strategy); err != nil {
 			return nil, fmt.Errorf("plan_repo: scan action: %w", err)
 		}
 		actions = append(actions, a)
@@ -1678,6 +1726,54 @@ func (r *MemoryRepo) ListByFund(ctx context.Context, fundID, layer string, limit
 	}
 	defer rows.Close()
 	return scanMemories(rows)
+}
+
+// ExistsByFundAgentLayerDate reports whether at least one memory row
+// already covers the given (fund, agent, layer, trading_date) tuple.
+// agentID may be a NULL NullString to match the fund-level summary row
+// (agent_id IS NULL).
+//
+// Used by ConsolidateDaily to dedupe intraday re-ticks: on a fund with
+// 30-min cadence the workflow's StepDailyReview fires 7-8 times per
+// trading day, and without this check each tick wrote a fresh row of
+// near-identical "self_learning" memory, polluting the agent learning
+// UI and bloating the input that the long-term reflection job later
+// distills. With the check the FIRST tick of the day writes; later
+// ticks early-continue and the LLM lesson call (Step D) is skipped
+// entirely. We deliberately use EXISTS instead of upsert so the
+// existing-row's content stays intact — the rest of the consolidate
+// pipeline (attribution, reflection) is still allowed to re-run.
+func (r *MemoryRepo) ExistsByFundAgentLayerDate(ctx context.Context, fundID string, agentID sql.NullString, layer string, tradingDate time.Time) (bool, error) {
+	var (
+		query string
+		args  []any
+	)
+	if agentID.Valid && strings.TrimSpace(agentID.String) != "" {
+		query = `SELECT 1 FROM memories
+				 WHERE fund_id = $1
+				   AND agent_id = $2
+				   AND layer    = $3
+				   AND trading_date = $4
+				 LIMIT 1`
+		args = []any{fundID, agentID.String, layer, tradingDate}
+	} else {
+		query = `SELECT 1 FROM memories
+				 WHERE fund_id = $1
+				   AND agent_id IS NULL
+				   AND layer    = $2
+				   AND trading_date = $3
+				 LIMIT 1`
+		args = []any{fundID, layer, tradingDate}
+	}
+	var one int
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("memory_repo: exists by fund agent layer date: %w", err)
+	}
+	return true, nil
 }
 
 func (r *MemoryRepo) ListByFundAndDate(ctx context.Context, fundID string, tradingDate time.Time, limit int) ([]Memory, error) {

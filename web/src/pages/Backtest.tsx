@@ -63,10 +63,19 @@ function statusTone(status?: string): string {
 // charting library — backtest results are typically ≤ 500
 // points and we only need a smoothed line, peak/trough markers,
 // and a baseline. The cost of recharts/d3 isn't worth it.
+//
+// width/height/padding are module-scoped constants so that
+// useMemo dependency arrays stay stable across renders and the
+// react-hooks/exhaustive-deps rule is satisfied without listing
+// each axis offset.
+const NAV_CHART_WIDTH = 720;
+const NAV_CHART_HEIGHT = 220;
+const NAV_CHART_PADDING = { top: 12, right: 12, bottom: 28, left: 56 };
+
 const NavChart: React.FC<{ curve: BacktestNavPoint[]; foldBoundaries?: number[] }> = ({ curve, foldBoundaries }) => {
-  const width = 720;
-  const height = 220;
-  const padding = { top: 12, right: 12, bottom: 28, left: 56 };
+  const width = NAV_CHART_WIDTH;
+  const height = NAV_CHART_HEIGHT;
+  const padding = NAV_CHART_PADDING;
 
   const chart = useMemo(() => {
     if (curve.length < 2) {
@@ -76,22 +85,22 @@ const NavChart: React.FC<{ curve: BacktestNavPoint[]; foldBoundaries?: number[] 
     const min = Math.min(...navs);
     const max = Math.max(...navs);
     const range = max - min || 1;
-    const innerW = width - padding.left - padding.right;
-    const innerH = height - padding.top - padding.bottom;
+    const innerW = NAV_CHART_WIDTH - NAV_CHART_PADDING.left - NAV_CHART_PADDING.right;
+    const innerH = NAV_CHART_HEIGHT - NAV_CHART_PADDING.top - NAV_CHART_PADDING.bottom;
     const xStep = innerW / Math.max(1, curve.length - 1);
 
     const points = curve.map((p, i) => {
-      const x = padding.left + i * xStep;
-      const y = padding.top + innerH - ((p.nav - min) / range) * innerH;
+      const x = NAV_CHART_PADDING.left + i * xStep;
+      const y = NAV_CHART_PADDING.top + innerH - ((p.nav - min) / range) * innerH;
       return { x, y, nav: p.nav, date: p.date };
     });
     const linePath = points
       .map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`)
       .join(" ");
-    const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(1)} ${(padding.top + innerH).toFixed(1)} L ${padding.left.toFixed(1)} ${(padding.top + innerH).toFixed(1)} Z`;
+    const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(1)} ${(NAV_CHART_PADDING.top + innerH).toFixed(1)} L ${NAV_CHART_PADDING.left.toFixed(1)} ${(NAV_CHART_PADDING.top + innerH).toFixed(1)} Z`;
 
     const baseline = curve[0].nav;
-    const baseY = padding.top + innerH - ((baseline - min) / range) * innerH;
+    const baseY = NAV_CHART_PADDING.top + innerH - ((baseline - min) / range) * innerH;
     const peak = points.reduce((acc, p) => (p.nav > acc.nav ? p : acc), points[0]);
     const trough = points.reduce((acc, p) => (p.nav < acc.nav ? p : acc), points[0]);
     return { points, linePath, areaPath, baseY, baseline, peak, trough, min, max };
@@ -1605,14 +1614,20 @@ const WalkForwardView: React.FC<{
 // normalised to 1.0 at each run's first point. Normalising
 // makes runs with different initialCash values visually
 // comparable. Color: A = indigo, B = emerald.
+//
+// Module-scoped chart geometry so useMemo deps stay stable.
+const NAV_OVERLAY_WIDTH = 720;
+const NAV_OVERLAY_HEIGHT = 240;
+const NAV_OVERLAY_PADDING = { top: 14, right: 14, bottom: 32, left: 56 };
+
 const NavOverlay: React.FC<{
   a: BacktestNavPoint[];
   b: BacktestNavPoint[];
   copy: ReturnType<typeof buildCopy>;
 }> = ({ a, b, copy }) => {
-  const width = 720;
-  const height = 240;
-  const padding = { top: 14, right: 14, bottom: 32, left: 56 };
+  const width = NAV_OVERLAY_WIDTH;
+  const height = NAV_OVERLAY_HEIGHT;
+  const padding = NAV_OVERLAY_PADDING;
 
   const chart = useMemo(() => {
     if (a.length < 2 && b.length < 2) return null;
@@ -1629,8 +1644,8 @@ const NavOverlay: React.FC<{
     const minV = Math.min(...values, 1);
     const maxV = Math.max(...values, 1);
     const range = maxV - minV || 1;
-    const innerW = width - padding.left - padding.right;
-    const innerH = height - padding.top - padding.bottom;
+    const innerW = NAV_OVERLAY_WIDTH - NAV_OVERLAY_PADDING.left - NAV_OVERLAY_PADDING.right;
+    const innerH = NAV_OVERLAY_HEIGHT - NAV_OVERLAY_PADDING.top - NAV_OVERLAY_PADDING.bottom;
     // Both series may have different lengths — use parallel x
     // axes (fraction of own length) so the curves stretch to fit
     // the same rectangle. This is what users intuit from "same
@@ -1639,8 +1654,8 @@ const NavOverlay: React.FC<{
       if (curve.length === 0) return { path: "", dots: [] as { x: number; y: number; v: number; d: string }[] };
       const step = innerW / Math.max(1, curve.length - 1);
       const dots = curve.map((p, i) => ({
-        x: padding.left + i * step,
-        y: padding.top + innerH - ((p.value - minV) / range) * innerH,
+        x: NAV_OVERLAY_PADDING.left + i * step,
+        y: NAV_OVERLAY_PADDING.top + innerH - ((p.value - minV) / range) * innerH,
         v: p.value,
         d: p.date,
       }));
@@ -1652,7 +1667,7 @@ const NavOverlay: React.FC<{
     const ticks = 4;
     const yLabels = Array.from({ length: ticks + 1 }, (_, i) => {
       const v = minV + (range * i) / ticks;
-      const y = padding.top + innerH - ((v - minV) / range) * innerH;
+      const y = NAV_OVERLAY_PADDING.top + innerH - ((v - minV) / range) * innerH;
       return { y, v };
     });
     return { pa, pb, yLabels };
@@ -1850,11 +1865,12 @@ const SweepView: React.FC<{
   onExit: () => void;
   onPickJob: (jobId: string) => void;
 }> = ({ sweep, loading, copy, language, onExit, onPickJob }) => {
-  const axes = sweep.axes ?? [];
   // Build the grid: index children by their (rowKey, colKey)
   // tuple. For 1D sweeps colKey is "_" so the grid collapses to
-  // a single column.
+  // a single column. `axes` is derived inline so the dependency
+  // array stays stable when sweep is the same reference.
   const grid = useMemo(() => {
+    const axes = sweep.axes ?? [];
     const children = sweep.children ?? [];
     const rowAxis = axes[0];
     const colAxis = axes[1];
@@ -1865,7 +1881,7 @@ const SweepView: React.FC<{
       lookup.set(`${r}|${k}`, c);
     }
     return { lookup, rowAxis, colAxis };
-  }, [sweep, axes]);
+  }, [sweep]);
 
   // Color scale for cumulative return: map [-maxAbs, +maxAbs] →
   // [red 800, white, green 700]. We use perceived-luminance

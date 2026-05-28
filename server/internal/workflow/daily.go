@@ -42,6 +42,9 @@ const (
 	PlanStatusRejected    PlanWorkflowStatus = "rejected"
 	PlanStatusExecuting   PlanWorkflowStatus = "executing"
 	PlanStatusCompleted   PlanWorkflowStatus = "completed"
+	// Sprint 3 / L2: 部分成交但有 action 失败。比"completed"更
+	// 诚实（不掩盖失败），又比"rejected"更准确（毕竟有 fill 发生）。
+	PlanStatusMixed PlanWorkflowStatus = "mixed"
 )
 
 // ---------------------------------------------------------------------------
@@ -293,6 +296,20 @@ type RoundtableResult struct {
 	FundamentalSummary string
 	SectorRotation     string
 	NewsSentiment      string
+	// Sprint 1 / S2 — macro briefing carry-through. The macro
+	// researcher (StepMacroBrief, day's first step) returns a
+	// ResearchReport.Content the orchestrator forwards into the
+	// roundtable / PM pipeline. Before this field was added it was
+	// dropped on the floor: DecisionInput had a MacroBriefing slot
+	// (and the PM system prompt expected it) but the wiring layer
+	// never populated it. The orchestrator now copies the macro
+	// report into this field after StepMacroBrief succeeds; the
+	// PMAgent forwards it into DecisionInput.MacroBriefing.
+	//
+	// Empty when the macro step failed or no macro researcher exists
+	// on the fund. The downstream decision prompt's "macroBriefing
+	// is optional" rule already covers that case.
+	MacroBriefing string
 }
 
 // RoundtableSymbolVerdict carries the per-symbol majority verdict
@@ -343,6 +360,33 @@ type TradingEngine interface {
 	Execute(ctx context.Context, planID string) error
 	// Settle runs end-of-day T+1 settlement and NAV calculation.
 	Settle(ctx context.Context, fundID string, tradingDate string) error
+}
+
+// PlanLifecycleNotifier is an OPTIONAL hook the orchestrator fires on
+// terminal plan transitions (completed / mixed / failed) so a push
+// fan-out (FCM) layer can notify the fund's owners. Implementations
+// must be non-blocking — the orchestrator runs the hook synchronously
+// at the end of the trading-execution step and can't afford a 10s
+// FCM call delaying NAV settlement.
+//
+// Sprint 4 / android-core. Soft-typed (any orchestrator without an
+// injected notifier just no-ops) — preserves test stubs.
+type PlanLifecycleNotifier interface {
+	NotifyPlanLifecycle(ctx context.Context, fundID, planID string, status PlanWorkflowStatus)
+}
+
+// PartialFillReporter is an OPTIONAL interface a TradingEngine may
+// implement to surface partial-fill outcomes. When implemented and the
+// last Execute call had at least one successful and at least one failed
+// plan_action, ReportPartialFill returns true; the orchestrator then
+// stamps PlanStatusMixed instead of PlanStatusCompleted.
+//
+// Decoupled into its own interface so:
+//   - Existing test stubs (noopTrading) keep compiling without changes.
+//   - Engines that don't track per-action status can opt out by simply
+//     not implementing this method.
+type PartialFillReporter interface {
+	ReportPartialFill(ctx context.Context, planID string) (partial bool, err error)
 }
 
 // MemorySystem persists daily learnings and performance data.
@@ -451,13 +495,14 @@ type DailyOrchestrator struct {
 	logger   *slog.Logger
 
 	// Dependencies — all required unless noted.
-	eventBus    EventBus
-	researchers ResearcherPool
-	pm          PMAgent
-	risk        RiskAgent // optional — nil means skip risk review
-	approval    UserApprovalGateway
-	trading     TradingEngine
-	memory      MemorySystem
+	eventBus     EventBus
+	researchers  ResearcherPool
+	pm           PMAgent
+	risk         RiskAgent // optional — nil means skip risk review
+	approval     UserApprovalGateway
+	trading      TradingEngine
+	memory       MemorySystem
+	planNotifier PlanLifecycleNotifier // optional — push fan-out hook
 
 	// Internal bookkeeping.
 	mu       sync.Mutex
@@ -495,6 +540,31 @@ func WithSchedule(s ScheduleConfig) OrchestratorOption {
 // time-seeded RNG initialized lazily.
 func WithRetryRNG(r *rand.Rand) OrchestratorOption {
 	return func(o *DailyOrchestrator) { o.retryRNG = r }
+}
+
+// WithPlanLifecycleNotifier wires the optional push fan-out hook
+// (Sprint 4 / android-core). Implementations should be non-blocking;
+// the orchestrator calls them on the trading-execution-completion path.
+func WithPlanLifecycleNotifier(n PlanLifecycleNotifier) OrchestratorOption {
+	return func(o *DailyOrchestrator) { o.planNotifier = n }
+}
+
+// notifyPlan fires the optional PlanLifecycleNotifier in a defensive
+// guarded way: panics from the hook are swallowed (with a log) so a
+// broken push provider can never tank a trading workflow run.
+func (o *DailyOrchestrator) notifyPlan(ctx context.Context, plan *InvestmentPlanResult) {
+	if o == nil || o.planNotifier == nil || plan == nil {
+		return
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			if o.logger != nil {
+				o.logger.Warn("plan lifecycle notifier panicked",
+					"plan_id", plan.ID, "fund_id", plan.FundID, "panic", rec)
+			}
+		}
+	}()
+	o.planNotifier.NotifyPlanLifecycle(ctx, plan.FundID, plan.ID, plan.Status)
 }
 
 // NewDailyOrchestrator creates an orchestrator for the given fund.
@@ -575,12 +645,19 @@ func (o *DailyOrchestrator) RunFull(ctx context.Context, tradingDate string) (*W
 	if err := waitForScheduledOrInterval(ctx, tradingDate, schedule.Location, schedule.MacroBriefTime, schedule.ResearcherInterval, schedule.ForceImmediate); err != nil {
 		return stateSnapshot(o.state), err
 	}
+	var macroReportContent string
 	macroBrief, err := o.runStep(ctx, StepMacroBrief, func(ctx context.Context) error {
 		report, e := o.researchers.MacroBrief(ctx, o.fundID, tradingDate)
 		if e != nil {
 			return e
 		}
 		allReports = append(allReports, report)
+		// Sprint 1 / S2: preserve the raw macro brief so we can
+		// stitch it onto the RoundtableResult after the roundtable
+		// step. Without this hand-off the LLMDecisionEngine never
+		// sees the macro analysis even though the prompt has a
+		// dedicated slot for it.
+		macroReportContent = report.Content
 		return nil
 	})
 	_ = macroBrief
@@ -623,6 +700,15 @@ func (o *DailyOrchestrator) RunFull(ctx context.Context, tradingDate string) (*W
 		rt, e := o.researchers.Roundtable(ctx, o.fundID, allReports, maxRounds)
 		if e != nil {
 			return e
+		}
+		// Sprint 1 / S2: stitch the macro brief onto the roundtable
+		// result so the downstream PMAgent.buildDecisionInput can
+		// populate DecisionInput.MacroBriefing. The roundtable engine
+		// itself doesn't own the macro report — the orchestrator does
+		// — so we do the join here rather than threading another
+		// argument through the researcher pool interface.
+		if rt != nil && strings.TrimSpace(rt.MacroBriefing) == "" {
+			rt.MacroBriefing = macroReportContent
 		}
 		roundtable = rt
 		return nil
@@ -754,7 +840,23 @@ func (o *DailyOrchestrator) RunFull(ctx context.Context, tradingDate string) (*W
 			if e := o.trading.Execute(ctx, plan.ID); e != nil {
 				return fmt.Errorf("trade execution failed: %w", e)
 			}
+			// Sprint 3 / L2: 当 trader 实现了 PartialFillReporter
+			// 且本轮有 partial fail 时，状态降级到 mixed 而不是
+			// completed。Reporter 实现可空 — 不实现 == 老行为，
+			// 单元测试与 noopTrading 不受影响。
+			if reporter, ok := o.trading.(PartialFillReporter); ok {
+				partial, rerr := reporter.ReportPartialFill(ctx, plan.ID)
+				if rerr != nil {
+					o.logger.Warn("partial-fill reporter failed; defaulting to completed",
+						"plan_id", plan.ID, "err", rerr)
+				} else if partial {
+					plan.Status = PlanStatusMixed
+					o.notifyPlan(ctx, plan)
+					return nil
+				}
+			}
 			plan.Status = PlanStatusCompleted
+			o.notifyPlan(ctx, plan)
 			return nil
 		})
 		if err != nil {

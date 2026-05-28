@@ -5,7 +5,6 @@ import {
   ApiError,
   formatApiError,
   AuctionListing,
-  AuctionBid,
   PlaceAuctionBidResponse,
   CreateAuctionInput,
   AuctionSettlementResult,
@@ -466,7 +465,11 @@ function AuctionDetail({
   recentSettlement,
   onClose,
 }: AuctionDetailProps) {
-  const now = Date.now();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
   const endsMs = auction.endsAt ? new Date(auction.endsAt).getTime() : 0;
   const remainingMs = endsMs > 0 ? endsMs - now : 0;
   const remaining =

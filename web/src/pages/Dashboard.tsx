@@ -533,6 +533,8 @@ export default function Dashboard() {
             loading: "Loading dashboard...",
             errorTitle: "Failed to load dashboard",
             retry: "Retry",
+            noFundSelected: "No fund selected. Pick a fund from the sidebar to continue.",
+            dashboardUnavailable: "The fund dashboard hasn't loaded yet. Try refreshing.",
             titles: {
               nav: "NAV trend",
               positions: "Open positions",
@@ -706,6 +708,8 @@ export default function Dashboard() {
             loading: "正在加载基金总览...",
             errorTitle: "加载基金总览失败",
             retry: "重试",
+            noFundSelected: "尚未选择基金，请先从侧栏选择一个基金。",
+            dashboardUnavailable: "基金总览数据尚未加载，请尝试刷新。",
             titles: {
               nav: "净值走势",
               positions: "当前持仓",
@@ -1219,8 +1223,29 @@ export default function Dashboard() {
     );
   }
 
-  if (!data || !fundId) {
-    return null;
+  if (!fundId) {
+    return (
+      <div className="rounded-xl border border-gray-200 bg-white p-6 text-center text-sm text-gray-600">
+        {copy.noFundSelected}
+      </div>
+    );
+  }
+  if (!data) {
+    // We're past the loading + error early returns above but still have
+    // no data — this is the rare race where fetch resolves with an
+    // unexpected shape. Surface an explicit empty/retry instead of a
+    // blank page so the user has a way out.
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-center text-sm text-amber-800">
+        <p>{copy.dashboardUnavailable}</p>
+        <button
+          onClick={() => void fetchData()}
+          className="mt-4 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-amber-700"
+        >
+          {copy.retry}
+        </button>
+      </div>
+    );
   }
 
   const workflowState = (data.workflow.state ?? "idle").toLowerCase();
