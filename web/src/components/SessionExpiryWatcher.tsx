@@ -43,7 +43,13 @@ const AUTH_FLOW_PATHS = [
 // users and must not trigger the redirect. Without this carve-out the
 // initial `apiClient.session()` call from AuthGate would yank a fresh
 // visitor to /login twice in a row.
-const SILENT_PATHS = ["/api/auth/session", "/api/auth/me"];
+//
+// Important: only list backend routes that actually exist. The
+// validate-api-contract CI scan greps every /api/-prefixed string
+// literal in src/ and fails the build for any that has no matching
+// HandleFunc on the server. /api/auth/session is the only probe
+// endpoint we expose today.
+const SILENT_PATHS = ["/api/auth/session"];
 
 const TOAST_VISIBLE_MS = 6000;
 // Burst dedup window: any session-expired events arriving within this

@@ -49,7 +49,17 @@ jobs:
         run: go mod download
 
       - name: Run tests
-        run: go test ./...
+        # -v enabled in CI because the cmd/server package has a small
+        # number of background goroutines (workflow scheduler / embed
+        # loop / reflection) that briefly outlive the test boundary
+        # they were spawned in and log to stdout. Without -v the test
+        # runner buffers PASS output and we observed a ~5% rate of
+        # spurious "FAIL <pkg>" exits when the buffered writer raced
+        # the leaked goroutine. With -v every line is flushed
+        # immediately and the race window closes. Verbose output is
+        # the right trade-off in CI (we want full logs on failure
+        # anyway) and costs a few hundred KB of log output.
+        run: go test -v ./...
 
       - name: Run go vet
         run: go vet ./...
