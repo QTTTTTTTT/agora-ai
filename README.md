@@ -1,5 +1,7 @@
 # AI Fund Platform — 当前仓库实现说明
 
+**简体中文** · [English](./README.en.md)
+
 > 一个基金公司/基金管理原型仓库。当前已真正接线的后端能力以 subscription、model config、usage/billing、company/fund 最小 CRUD，以及 plan 最小审批流为主；团队、交易、workflow、记忆、A/B 测试等链路仍存在占位与渐进式接线状态，需要按生产化要求继续补齐韧性、观测与测试。
 
 ## 当前实现概览
