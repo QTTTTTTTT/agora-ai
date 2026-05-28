@@ -45,19 +45,84 @@ var reflectionPlatitudePattern = regexp.MustCompile(
 	`(?i)^\s*(to\s+maximize\b|to\s+improve\b|to\s+ensure\b|ensure\s+that\b|always\s+focus\b|always\s+remember\b|it\s+is\s+important\b|the\s+key\s+is\b|in\s+order\s+to\b|为了\s*(让|实现|最大|提升|提高|确保)|要确保|要保证|要持续|应当持续|应当确保)`,
 )
 
-// isLowQualityReflection reports whether a distilled lesson is too
-// short or too generic to be worth persisting. Called in Reflect's
-// per-group loop right after empty-trim, so an unhelpful LLM response
-// never gets stored as a "long_term" memory and never gets broadcast
-// to every agent as a "needs approval" proposed skill.
+// reflectionTruncatedPatterns catches the failure mode where the LLM
+// started emitting a markdown header / list / subordinate clause but got
+// cut off before producing the actual lesson body. Observed in
+// production: the OCS Selection 2026-05-26 batch wrote
 //
-// Two-stage filter:
+//	"Lessons:* Researchers must"
+//	"When encountering zero daily returns or missing data"
+//
+// as long_term reflections — both passed the 25-rune floor and the
+// platitude blacklist but neither is a usable lesson. They were silently
+// fanned out as "proposed skills" to every agent on the team and would
+// have polluted the prompt resolver until a human noticed.
+//
+// Each pattern is anchored at start (`^`) and end (`$`) so it only
+// fires on the whole content; a fully-formed lesson that happens to
+// contain the word "Lessons:" inside it is not a false positive.
+var reflectionTruncatedPatterns = []*regexp.Regexp{
+	// "Lessons:* Researchers must", "Insights: To improve",
+	// "Adjustments: Reduce" — markdown list header glued to a
+	// half-sentence with no terminating punctuation.
+	regexp.MustCompile(`(?i)^\s*(lessons?|insights?|adjustments?|hits?|misses?|recommendations?|key\s+takeaways?|takeaways?|action\s+items?|todo|notes?)\s*:\s*\*?\s*[^.!?。！？\n]{0,80}$`),
+	// "When encountering zero daily returns or missing data" — leading
+	// subordinate clause word with no main clause and no terminating
+	// punctuation. We require at least 10 chars in the clause body so a
+	// fully-formed "When X happens, do Y." (which has a period) still
+	// passes.
+	regexp.MustCompile(`(?i)^\s*(when|if|while|whenever|once|after|before|since|because|although|though|unless)\s+[^.!?。！？\n]{8,}[^.!?。！？\s]\s*$`),
+	// Bare markdown header alone with no body: "Lessons:",
+	// "Adjustments:" (these would also be caught by len<25 in most
+	// cases, but list them explicitly for clarity).
+	regexp.MustCompile(`(?i)^\s*(lessons?|insights?|adjustments?|hits?|misses?|recommendations?|key\s+takeaways?|takeaways?|action\s+items?|notes?)\s*:\s*$`),
+}
+
+// reflectionTerminalPunctuation lists the sentence terminators we
+// consider valid endings for a polished reflection (ASCII + CJK + the
+// closing quotation marks that legitimately follow them).
+const reflectionTerminalPunctuation = ".!?。！？\"”』）)"
+
+// endsWithSentenceTerminator reports whether `s` (already trimmed)
+// ends with a recognised sentence terminator. A "lesson" without
+// terminating punctuation is almost always a `finish_reason=length`
+// truncation artefact.
+func endsWithSentenceTerminator(s string) bool {
+	if s == "" {
+		return false
+	}
+	r := []rune(s)
+	last := r[len(r)-1]
+	for _, term := range reflectionTerminalPunctuation {
+		if last == term {
+			return true
+		}
+	}
+	return false
+}
+
+// isLowQualityReflection reports whether a distilled lesson is too
+// short, too generic, or visibly truncated to be worth persisting.
+// Called in Reflect's per-group loop right after empty-trim, so an
+// unhelpful LLM response never gets stored as a "long_term" memory and
+// never gets broadcast to every agent as a "needs approval" proposed
+// skill.
+//
+// Four-stage filter (cheapest checks first):
 //  1. Length floor — catches the "got truncated to nothing" case where
 //     downstream firstSentence(160) cut at the first period and left a
 //     stub.
 //  2. Anchored regex on known-bad opening phrases (English + Chinese)
 //     — catches the "padded platitude" case where the model produced
 //     enough characters to clear the length gate but said nothing.
+//  3. Sentence terminator check — a polished lesson always ends in
+//     `.` / `!` / `?` / `。` / `！` / `？`. Missing terminators are
+//     overwhelmingly `finish_reason=length` cut-offs (the OCS Selection
+//     2026-05-26 batch wrote "When encountering zero daily returns or
+//     missing data" — 52 runes, no platitude, no terminator).
+//  4. Anchored truncation patterns — list-header stubs and bare
+//     subordinate clauses that the model never completed; see
+//     reflectionTruncatedPatterns for the catalogue.
 func isLowQualityReflection(content string) bool {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
@@ -68,6 +133,14 @@ func isLowQualityReflection(content string) bool {
 	}
 	if reflectionPlatitudePattern.MatchString(trimmed) {
 		return true
+	}
+	if !endsWithSentenceTerminator(trimmed) {
+		return true
+	}
+	for _, pat := range reflectionTruncatedPatterns {
+		if pat.MatchString(trimmed) {
+			return true
+		}
 	}
 	return false
 }

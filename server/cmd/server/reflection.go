@@ -393,16 +393,40 @@ func (d *llmReflectionDistiller) Distill(ctx context.Context, theme string, item
 		Messages: []llm.ChatMessage{
 			{
 				Role: "system",
+				// The output contract is intentionally rigid: plain prose,
+				// no markdown header / list / numbered bullets. We saw
+				// Gemini 3.1-pro-preview reply with "Lessons:* Researchers
+				// must" — i.e. it opened a markdown list and got cut off
+				// before completing the first item. That stub passed the
+				// length floor (26 runes > 25) but is useless as a recall
+				// hit and worse, it gets fanned out to every team agent
+				// as a "proposed skill" awaiting human approval. Forbid
+				// the failure mode at the prompt layer so the model has
+				// nowhere to hide.
 				Content: `You are the long-term memory consolidator for an investment fund's AI agents. ` +
-					`Given a theme and a batch of recent daily/agent learnings, output a single 1-2 sentence ` +
-					`lesson in English that captures the durable insight. Be concrete (mention symbols, ` +
-					`indicators, or trade patterns when relevant) and avoid hedging language. Do NOT echo the ` +
-					`input bullets verbatim. If the inputs contradict each other, surface the contradiction ` +
-					`explicitly so the PM agent can resolve it next session.`,
+					`Given a theme and a batch of recent daily/agent learnings, output a single self-contained ` +
+					`paragraph of 1-2 complete English sentences that captures the durable insight. ` +
+					`Strict output rules: ` +
+					`(1) plain prose only — NO markdown headers ("Lessons:", "Insights:", etc), NO bulleted or ` +
+					`numbered lists, NO leading asterisks; ` +
+					`(2) every sentence MUST end in a period; ` +
+					`(3) at least 40 characters total; ` +
+					`(4) be concrete — mention symbols, indicators, sectors, or trade patterns when relevant ` +
+					`and avoid hedging language; ` +
+					`(5) do NOT echo the input bullets verbatim; ` +
+					`(6) if the inputs contradict each other, surface the contradiction explicitly so the PM ` +
+					`agent can resolve it next session.`,
 			},
 			{Role: "user", Content: sb.String()},
 		},
-		MaxTokens:   220,
+		// Bumped from 220 → 600. 220 was tight for a "1-2 sentence
+		// English lesson when the input may contain Chinese context"
+		// — `finish_reason=length` early-truncations were silently
+		// producing half-sentence reflections. 600 leaves ~450 token
+		// headroom over a 2-sentence answer; if the model ever needs
+		// more than that, the lesson is too rambly to be useful and
+		// the length cap is a feature.
+		MaxTokens:   600,
 		Temperature: 0.3,
 		StepName:    "memory_reflection",
 	}

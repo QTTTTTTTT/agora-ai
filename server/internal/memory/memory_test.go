@@ -382,6 +382,27 @@ func TestReflect_DropsLowQualityLessons(t *testing.T) {
 		{"platitude chinese", "为了让研究价值最大化，团队应当持续优化输入质量。", false},
 		{"meaty english", "Avoid chasing the third consecutive green chip bar in pre-market trading on momentum spikes.", true},
 		{"meaty chinese", "688205 在融资客大幅净买入后两个交易日出现回吐，未来需结合资金流确认而非单一新闻。", true},
+
+		// --- truncation-pattern coverage (added 2026-05-28) ---
+		// These are the actual broken reflections persisted for the
+		// OCS Selection fund on 2026-05-26 — the LLM started a
+		// markdown list / subordinate clause and got cut off before
+		// emitting the lesson body. The 25-rune length floor and the
+		// platitude blacklist both let them through; the new
+		// terminator + truncation-pattern checks must reject them.
+		{"truncated list header", "Lessons:* Researchers must", false},
+		{"truncated subordinate clause", "When encountering zero daily returns or missing data", false},
+		// Hits the new "missing terminal punctuation" check even
+		// without matching the list/clause patterns.
+		{"meaty english no terminator", "Avoid chasing the third consecutive green chip bar in pre-market trading on momentum spikes", false},
+		// Hits the new "bare list header" pattern.
+		{"bare insights header", "Insights:", false},
+		// Hits the "list header + half sentence" pattern with a
+		// different header label.
+		{"action items truncated", "Action items: Reduce the position size", false},
+		// A short Chinese full sentence ending in `。` must still pass
+		// — the terminator check accepts CJK punctuation.
+		{"chinese with terminator", "688205 应当结合北向资金净买入数据二次确认。", true},
 	}
 	for _, tc := range cases {
 		tc := tc
