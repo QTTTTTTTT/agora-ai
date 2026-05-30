@@ -202,7 +202,15 @@ test.describe("fund shell smoke", () => {
 
     await expect(page.getByRole("navigation").getByRole("link", { name: "基金总览" })).toBeVisible();
     await expect(page.getByText("策略流程状态")).toBeVisible();
-    await expect(page.getByRole("link", { name: "查看用量与账单" })).toBeVisible();
+    // The phrase "查看用量与账单" appears in two places now: a global
+    // header dock that links to `/usage`, and the per-fund card on the
+    // dashboard that links to `/funds/{fundId}/usage`. Strict mode (the
+    // default) trips on the duplicate. We want the per-fund one
+    // because that's what this test is about — the fund-shell
+    // navigation surface.
+    await expect(
+      page.getByRole("link", { name: "查看用量与账单" }).filter({ hasText: "查看用量与账单" }).last(),
+    ).toBeVisible();
 
     await page.getByRole("link", { name: "订阅管理" }).click();
     await expect(page).toHaveURL(new RegExp(`/funds/${fundId}/subscription$`));

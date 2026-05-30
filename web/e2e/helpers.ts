@@ -138,6 +138,16 @@ export async function register(page: Page, user: E2EUser) {
   await page.getByPlaceholder("请输入至少 8 位密码").fill(user.password);
   await page.getByPlaceholder("请再次输入密码").fill(user.password);
   await page.getByRole("button", { name: "注册并进入系统" }).click();
+  // After registration the app routes new accounts to /verify-email
+  // first (the "nudge to confirm" flow added in account-security
+  // hardening). E2E tests don't have a mailbox to actually verify
+  // from, so we follow the "返回控制台" link the page exposes for
+  // exactly that case — users who skip verification can still reach
+  // /companies and use the product. Asserting on this intermediate
+  // hop catches the "verify-email page itself broke" regression
+  // separately from the "register endpoint broke" case.
+  await expect(page).toHaveURL(/\/verify-email/);
+  await page.getByRole("link", { name: "返回控制台" }).click();
   await expect(page).toHaveURL(/\/companies$/);
 }
 
