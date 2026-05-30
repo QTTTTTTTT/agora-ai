@@ -21,10 +21,19 @@ import (
 // returns a JSON skeleton, not an essay.
 type fundAssistAdapter struct {
 	client llm.LLMClient
-	// tier picks "standard" by default; cheaper than "advanced"
-	// and good enough for structured-JSON extraction. Centralised
-	// here so any future "make assist use tier=simple" is a
-	// one-line change.
+	// tier picks "simple" by default. Rationale:
+	//   - Assist is a structured-JSON extraction task. Cheap models
+	//     (gpt-4o-mini, gemini-flash, deepseek-chat) handle it
+	//     reliably; reaching for "standard" would burn budget for
+	//     no quality gain.
+	//   - It's the tier every subscription plan can call (free plan
+	//     only allows "simple"; standard / advanced gate behind
+	//     paid tiers). Falling back to a tier the user can't access
+	//     would surface as a confusing "model access denied" 500
+	//     instead of a working feature.
+	//   - It also means assist inherits the global LLM_* env block
+	//     when LLM_SIMPLE_* isn't set — which IS the "use the .env
+	//     default" UX users expect.
 	tier llm.ModelTier
 }
 
@@ -37,7 +46,7 @@ func newFundAssistAdapter(client llm.LLMClient) *fundAssistAdapter {
 	}
 	return &fundAssistAdapter{
 		client: client,
-		tier:   llm.TierStandard,
+		tier:   llm.TierSimple,
 	}
 }
 
@@ -55,10 +64,17 @@ func (a *fundAssistAdapter) Chat(ctx context.Context, userID, system, user strin
 		return "", errors.New("fund assist adapter has no llm client")
 	}
 	resp, err := a.client.Chat(ctx, llm.ChatRequest{
-		UserID:    userID,
-		StepName:  "fund_assist",
+		UserID:   userID,
+		StepName: "fund_assist",
 		ModelTier: a.tier,
-		MaxTokens: 1024,
+		// MaxTokens needs enough headroom for the full structured
+		// plan: 1 fund block + up to ~6 agents with systemPrompts +
+		// rationale ≈ 1000-1500 output tokens in practice. We saw
+		// Gemini truncate to empty content at 1024, so we lift to
+		// 4096 — still cheap on simple-tier models, and prevents
+		// the silent-truncation failure mode where the model
+		// returns "" because it hit the cap mid-generation.
+		MaxTokens: 4096,
 		Messages: []llm.ChatMessage{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
