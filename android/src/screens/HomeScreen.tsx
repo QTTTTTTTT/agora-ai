@@ -23,6 +23,9 @@ import type { CompanyWithFunds, FundSummary } from '@fundai/api-client';
 
 import { apiClient } from '../lib/api';
 import { useActiveFund } from '../lib/activeFund';
+import { CorpActionTimelineCard } from '../components/CorpActionTimelineCard';
+import { BenchmarkMiniChart } from '../components/BenchmarkMiniChart';
+import { HoldingsTrendsGrid } from '../components/HoldingsTrendsGrid';
 
 export default function HomeScreen(): JSX.Element {
   const { t } = useTranslation();
@@ -112,28 +115,37 @@ function FundCard({
 }): JSX.Element {
   const { t } = useTranslation();
   return (
-    <Pressable
-      style={[styles.fundCard, active ? styles.fundCardActive : null]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      accessibilityLabel={`${fund.name} ${active ? 'active' : ''}`}
-    >
-      <View style={styles.row}>
-        <Text style={[styles.fundName, active ? styles.fundNameActive : null]}>{fund.name}</Text>
-        {active ? <Text style={styles.activeChip}>•</Text> : null}
-      </View>
-      <View style={styles.row}>
-        <Text style={styles.mutedSmall}>{t('home.navLabel')}</Text>
-        <Text style={styles.fundValue}>{fund.nav.toFixed(3)}</Text>
-      </View>
-      <View style={styles.row}>
-        <Text style={styles.mutedSmall}>{t('home.assetsLabel')}</Text>
-        <Text style={styles.fundValue}>
-          {fund.total_assets.toLocaleString()} {fund.base_currency ?? ''}
-        </Text>
-      </View>
-    </Pressable>
+    <View>
+      <Pressable
+        style={[styles.fundCard, active ? styles.fundCardActive : null]}
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityState={{ selected: active }}
+        accessibilityLabel={`${fund.name} ${active ? 'active' : ''}`}
+      >
+        <View style={styles.row}>
+          <Text style={[styles.fundName, active ? styles.fundNameActive : null]}>{fund.name}</Text>
+          {active ? <Text style={styles.activeChip}>•</Text> : null}
+        </View>
+        <View style={styles.row}>
+          <Text style={styles.mutedSmall}>{t('home.navLabel')}</Text>
+          <Text style={styles.fundValue}>{fund.nav.toFixed(3)}</Text>
+        </View>
+        <View style={styles.row}>
+          <Text style={styles.mutedSmall}>{t('home.assetsLabel')}</Text>
+          <Text style={styles.fundValue}>
+            {fund.total_assets.toLocaleString()} {fund.base_currency ?? ''}
+          </Text>
+        </View>
+      </Pressable>
+      {/* Timeline only renders when this fund is the active one,
+          to keep the home list short and focused. The card itself
+          starts collapsed and is gated by react-query's `enabled`
+          flag, so inactive funds never trigger network calls. */}
+      {active ? <BenchmarkMiniChart fundId={fund.id} /> : null}
+      {active ? <HoldingsTrendsGrid fundId={fund.id} /> : null}
+      {active ? <CorpActionTimelineCard fundId={fund.id} /> : null}
+    </View>
   );
 }
 

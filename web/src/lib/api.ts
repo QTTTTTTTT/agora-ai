@@ -27,6 +27,25 @@ import type {
   LoginResponse as SharedLoginResponse,
   SessionResponse as SharedSessionResponse,
   LoginInput as SharedLoginInput,
+  CorpActionApplication as SharedCorpActionApplication,
+  CorpActionListResponse as SharedCorpActionListResponse,
+  BenchmarkPoint as SharedBenchmarkPoint,
+  BenchmarkSeries as SharedBenchmarkSeries,
+  BenchmarkCatalogItem as SharedBenchmarkCatalogItem,
+  BenchmarkPartialFailure as SharedBenchmarkPartialFailure,
+  BenchmarkHistoryResponse as SharedBenchmarkHistoryResponse,
+  BenchmarkHoldingOverlap as SharedBenchmarkHoldingOverlap,
+  HoldingSeries as SharedHoldingSeries,
+  HoldingsSeriesResponse as SharedHoldingsSeriesResponse,
+  ABTestShadowAgent as SharedABTestShadowAgent,
+  ABTestShadowAgentVariant as SharedABTestShadowAgentVariant,
+  ABTestShadowAgentResponse as SharedABTestShadowAgentResponse,
+  ABTestShadowAgentDay as SharedABTestShadowAgentDay,
+  ABTestShadowMemory as SharedABTestShadowMemory,
+  ABEvolutionConfigDiff as SharedABEvolutionConfigDiff,
+  ABAttributionTotals as SharedABAttributionTotals,
+  ABAttributionSymbolRow as SharedABAttributionSymbolRow,
+  ABTestOperationalAttribution as SharedABTestOperationalAttribution,
 } from "@fundai/api-client";
 import { dispatchSessionExpired } from "./sessionExpiryEvent";
 
@@ -49,13 +68,20 @@ export class ApiError extends Error {
   status: number;
   detail?: string;
   requestId?: string;
+  // payload carries the full server-side JSON body when present.
+  // Most callers don't care, but a few endpoints (e.g. /assist
+  // returning 422 with a structured `issues` list) need access to
+  // the raw body to render a typed UI. Stored as `unknown` so any
+  // client code that touches it does its own type narrowing.
+  payload?: unknown;
 
-  constructor(message: string, status = 500, detail?: string, requestId?: string) {
+  constructor(message: string, status = 500, detail?: string, requestId?: string, payload?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.requestId = requestId;
+    this.payload = payload;
   }
 }
 
@@ -249,9 +275,9 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
         path,
         reason: "api_request_401",
       });
-      throw new ApiError("登录状态已失效，请重新登录后再试。", response.status, normalized.detail, responseRequestId);
+      throw new ApiError("登录状态已失效，请重新登录后再试。", response.status, normalized.detail, responseRequestId, payload);
     }
-    throw new ApiError(normalized.message, response.status, normalized.detail, responseRequestId);
+    throw new ApiError(normalized.message, response.status, normalized.detail, responseRequestId, payload);
   }
 
   return payload as T;
@@ -1668,6 +1694,125 @@ export function fetchFundTodayPnL(fundId: string): Promise<FundTodayPnL> {
   return apiGet<FundTodayPnL>(`/api/funds/${fundId}/today-pnl`);
 }
 
+// ---------------------------------------------------------------------------
+// Corporate actions (split / cash dividend / stock dividend / combined)
+// ---------------------------------------------------------------------------
+//
+// The wire shape lives in `@fundai/api-client` so Android can reuse it
+// verbatim. We re-export the types here so consumers don't have to
+// import from two places.
+
+export type CorpActionApplication = SharedCorpActionApplication;
+export type CorpActionListResponse = SharedCorpActionListResponse;
+
+/** Fetch the corp-action timeline for a fund. The server caps limit
+ *  at 200; non-numeric / out-of-range values fall back to the server
+ *  default (50). */
+export function fetchFundCorpActions(
+  fundId: string,
+  limit?: number,
+): Promise<CorpActionListResponse> {
+  const qs = limit && limit > 0 ? `?limit=${limit}` : "";
+  return apiGet<CorpActionListResponse>(`/api/funds/${fundId}/corp-actions${qs}`);
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark history — fund vs market overlay (Card B).
+// ---------------------------------------------------------------------------
+
+/** Re-export shared benchmark types so consumers don't have to dual-import. */
+export type BenchmarkPoint = SharedBenchmarkPoint;
+export type BenchmarkSeries = SharedBenchmarkSeries;
+export type BenchmarkCatalogItem = SharedBenchmarkCatalogItem;
+export type BenchmarkPartialFailure = SharedBenchmarkPartialFailure;
+export type BenchmarkHistoryResponse = SharedBenchmarkHistoryResponse;
+export type BenchmarkHoldingOverlap = SharedBenchmarkHoldingOverlap;
+
+/** Fetch fund vs benchmark history.
+ *
+ * Empty / undefined `seriesIds` lets the server choose defaults from
+ * the fund's universe. The server soft-clamps `days` to [7, 1825]
+ * and ignores unknown ids (surfaces them in `partialFailures`), so
+ * callers don't need to guard the input shape. */
+export function fetchFundBenchmarkHistory(
+  fundId: string,
+  days?: number,
+  seriesIds?: string[],
+): Promise<BenchmarkHistoryResponse> {
+  const params = new URLSearchParams();
+  if (typeof days === "number" && Number.isFinite(days)) {
+    params.set("days", String(Math.trunc(days)));
+  }
+  if (Array.isArray(seriesIds) && seriesIds.length > 0) {
+    params.set("series", seriesIds.join(","));
+  }
+  const qs = params.toString();
+  return apiGet<BenchmarkHistoryResponse>(
+    `/api/funds/${fundId}/benchmark-history${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Holdings series (P1-2).
+// ---------------------------------------------------------------------------
+
+export type HoldingSeries = SharedHoldingSeries;
+export type HoldingsSeriesResponse = SharedHoldingsSeriesResponse;
+
+/** Fetch the per-holding normalized-price grid. Same soft-clamp /
+ *  partial-failure semantics as fetchFundBenchmarkHistory. */
+export function fetchFundHoldingsSeries(
+  fundId: string,
+  days?: number,
+): Promise<HoldingsSeriesResponse> {
+  const qs = typeof days === "number" && Number.isFinite(days)
+    ? `?days=${Math.trunc(days)}`
+    : "";
+  return apiGet<HoldingsSeriesResponse>(
+    `/api/funds/${fundId}/holdings/series${qs}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A/B test shadow comparison (Card D).
+// ---------------------------------------------------------------------------
+//
+// The wire shapes live in `@fundai/api-client` so Android can reuse them
+// verbatim once the AB compare screen lands on mobile. We re-export
+// here so consumers don't need to dual-import.
+
+export type ABTestShadowAgent = SharedABTestShadowAgent;
+export type ABTestShadowAgentVariant = SharedABTestShadowAgentVariant;
+export type ABTestShadowAgentResponse = SharedABTestShadowAgentResponse;
+export type ABTestShadowAgentDay = SharedABTestShadowAgentDay;
+export type ABTestShadowMemory = SharedABTestShadowMemory;
+export type ABEvolutionConfigDiff = SharedABEvolutionConfigDiff;
+export type ABAttributionTotals = SharedABAttributionTotals;
+export type ABAttributionSymbolRow = SharedABAttributionSymbolRow;
+export type ABTestOperationalAttribution = SharedABTestOperationalAttribution;
+
+/** Fetch per-variant shadow-agent learning timeline for an AB test.
+ *  Surfaces what the alternative strategy's agents thought during
+ *  the shadow run so the comparison page can render A vs B
+ *  lessons / adjustments / proposed evolution-config diffs. */
+export function fetchABShadowAgents(
+  testId: string,
+): Promise<ABTestShadowAgentResponse> {
+  return apiGet<ABTestShadowAgentResponse>(
+    `/api/abtests/${testId}/shadow-agents`,
+  );
+}
+
+/** Fetch per-symbol A vs B operational attribution table (PnL,
+ *  turnover, gap). Bounded server-side to top 50 rows by |gap|. */
+export function fetchABOperationalAttribution(
+  testId: string,
+): Promise<ABTestOperationalAttribution> {
+  return apiGet<ABTestOperationalAttribution>(
+    `/api/abtests/${testId}/operational-attribution`,
+  );
+}
+
 export function fetchFundPnLAttribution(fundId: string, from?: string, to?: string): Promise<PnLAttribution> {
   const params = new URLSearchParams();
   if (from?.trim()) {
@@ -2144,4 +2289,117 @@ export function formatApiError(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Fund Assist (LLM-backed natural-language fund + team creation)
+// ---------------------------------------------------------------------------
+//
+// The "describe a fund + team in plain Chinese / English and we'll
+// create it" flow that backs <FundAssistDialog />. The wire-shape
+// below mirrors api.FundAssistRequest / FundAssistResponse on the
+// server side; if you change it, also touch
+// server/internal/api/fund_assist.go and re-run the API tests.
+
+export interface FundAssistPlanUniverse {
+  mode?: string;
+  symbols?: string[];
+  themes?: string[];
+}
+
+export interface FundAssistPlanSpecialization {
+  markets?: string[];
+  assetClasses?: string[];
+  themes?: string[];
+  instruments?: string[];
+  styleHints?: string[];
+}
+
+export interface FundAssistPlanFund {
+  name: string;
+  description?: string;
+  market: string;
+  exchange?: string;
+  assetClass?: string;
+  baseCurrency?: string;
+  benchmarkSymbol?: string;
+  primaryDirection?: string;
+  initialCapital?: number;
+  universe?: FundAssistPlanUniverse;
+  specialization?: FundAssistPlanSpecialization;
+}
+
+export interface FundAssistPlanAgent {
+  role: string;
+  name?: string;
+  focus?: string;
+  systemPrompt?: string;
+}
+
+export interface FundAssistPlan {
+  fund: FundAssistPlanFund;
+  agents: FundAssistPlanAgent[];
+  rationale?: string;
+}
+
+export interface FundAssistAgentResult {
+  id: string;
+  role: string;
+  focus?: string;
+}
+
+export interface FundAssistResponse {
+  fundId?: string;
+  fund?: { id: string; name: string; market?: string };
+  agents?: FundAssistAgentResult[];
+  plan: FundAssistPlan;
+  warnings?: string[];
+}
+
+export interface FundAssistPlanIssue {
+  field: string;
+  code: string;
+  message: string;
+}
+
+// FundAssistRejectedError mirrors the 422 response shape from the
+// /assist endpoint: a structured "plan rejected" result the UI can
+// render as a list of corrections rather than a generic toast. We
+// extract the typed payload at the api boundary so callers can do
+// `if (err instanceof FundAssistRejectedError) { ... }` without
+// re-parsing the JSON.
+export class FundAssistRejectedError extends Error {
+  readonly issues: FundAssistPlanIssue[];
+  readonly plan?: FundAssistPlan;
+  readonly warnings: string[];
+  constructor(payload: { detail?: string; issues?: FundAssistPlanIssue[]; plan?: FundAssistPlan; warnings?: string[] }) {
+    super(payload.detail ?? "AI 输出的方案未通过校验");
+    this.name = "FundAssistRejectedError";
+    this.issues = payload.issues ?? [];
+    this.plan = payload.plan;
+    this.warnings = payload.warnings ?? [];
+  }
+}
+
+export async function assistCreateFund(
+  companyId: string,
+  body: { prompt: string; dryRun?: boolean; languageHint?: string },
+): Promise<FundAssistResponse> {
+  try {
+    return await apiPost<FundAssistResponse>(
+      `/api/companies/${encodeURIComponent(companyId)}/funds:assist`,
+      body,
+    );
+  } catch (err) {
+    // 422 plan_rejected is the one error path that carries
+    // structured payload the UI needs verbatim — re-throw as a
+    // typed error so the caller can render the issues list. Any
+    // other ApiError (400 / 502 / 503 / 500) bubbles up as-is and
+    // is rendered with formatApiError.
+    if (err instanceof ApiError && err.status === 422 && err.payload) {
+      const payload = err.payload as { detail?: string; issues?: FundAssistPlanIssue[]; plan?: FundAssistPlan; warnings?: string[] };
+      throw new FundAssistRejectedError(payload);
+    }
+    throw err;
+  }
 }

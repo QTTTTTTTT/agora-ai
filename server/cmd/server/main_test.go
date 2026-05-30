@@ -2264,6 +2264,137 @@ func TestMetricsExportIncludesDecisionInputSignals(t *testing.T) {
 	}
 }
 
+// TestServerMetrics_RecordCorpActionExports pins the Card-G
+// metrics surface end-to-end: the Record* methods feed counters
+// and gauges that ExportPrometheus stamps with stable names. If
+// any of these names change, the operator's PromQL alerts in
+// docs/PROMETHEUS_QUERIES.md silently break — this test catches
+// that at compile/CI time.
+func TestServerMetrics_RecordCorpActionExports(t *testing.T) {
+	metrics := newServerMetrics()
+	// Drive every Record* method at least once with a couple of
+	// distinct labels so the export contains both the label-cardinality
+	// shape and the canonical label values.
+	metrics.RecordCorpActionTick("ok")
+	metrics.RecordCorpActionTick("skipped_not_leader")
+	metrics.RecordCorpActionProviderError("a_share", "transient")
+	metrics.RecordCorpActionProviderError("us_equity", "fatal")
+	metrics.RecordCorpActionRetry("a_share", "succeeded")
+	metrics.RecordCorpActionRetry("a_share", "exhausted")
+	metrics.RecordCorpActionEvent("split", "upserted")
+	metrics.RecordCorpActionEvent("cash_dividend", "upsert_error")
+	metrics.RecordCorpActionApply("applied")
+	metrics.RecordCorpActionApply("missing")
+	metrics.RecordCorpActionApply("error")
+
+	output := metrics.ExportPrometheus()
+	mustContain := []string{
+		"# TYPE fundai_corp_action_ingest_ticks_total counter",
+		"fundai_corp_action_ingest_ticks_total{status=\"ok\"} 1",
+		"fundai_corp_action_ingest_ticks_total{status=\"skipped_not_leader\"} 1",
+		"# TYPE fundai_corp_action_ingest_provider_errors_total counter",
+		"fundai_corp_action_ingest_provider_errors_total{market=\"a_share\",outcome=\"transient\"} 1",
+		"fundai_corp_action_ingest_provider_errors_total{market=\"us_equity\",outcome=\"fatal\"} 1",
+		"# TYPE fundai_corp_action_ingest_retries_total counter",
+		"fundai_corp_action_ingest_retries_total{market=\"a_share\",outcome=\"succeeded\"} 1",
+		"fundai_corp_action_ingest_retries_total{market=\"a_share\",outcome=\"exhausted\"} 1",
+		"# TYPE fundai_corp_action_ingest_events_total counter",
+		"fundai_corp_action_ingest_events_total{action=\"split\",phase=\"upserted\"} 1",
+		"fundai_corp_action_ingest_events_total{action=\"cash_dividend\",phase=\"upsert_error\"} 1",
+		"# TYPE fundai_corp_action_ingest_apply_total counter",
+		"fundai_corp_action_ingest_apply_total{outcome=\"applied\"} 1",
+		"fundai_corp_action_ingest_apply_total{outcome=\"missing\"} 1",
+		"fundai_corp_action_ingest_apply_total{outcome=\"error\"} 1",
+		"# TYPE fundai_corp_action_ingest_last_tick_unix gauge",
+		"# TYPE fundai_corp_action_ingest_last_success_unix gauge",
+	}
+	for _, want := range mustContain {
+		if !bytes.Contains([]byte(output), []byte(want)) {
+			t.Errorf("ExportPrometheus missing line: %q\n%s", want, output)
+		}
+	}
+	// last_tick_unix should be > 0 after the Record calls; we don't
+	// pin the exact value because Now() drift is allowed.
+	if !bytes.Contains([]byte(output), []byte("fundai_corp_action_ingest_last_tick_unix ")) {
+		t.Error("missing last_tick_unix gauge")
+	}
+	// last_success should also be advanced because we recorded an
+	// "ok" tick.
+	if bytes.Contains([]byte(output), []byte("fundai_corp_action_ingest_last_success_unix 0")) {
+		t.Error("last_success_unix should be > 0 after RecordCorpActionTick(ok)")
+	}
+}
+
+// TestServerMetrics_CorpActionNilSafe pins the contract that
+// every Card-G recorder is no-op on a nil receiver. The
+// production wiring guarantees a non-nil registry, but tests
+// often build subsystems with no metrics injected and we don't
+// want a stray ":" in a label string to crash a deep call path.
+func TestServerMetrics_CorpActionNilSafe(t *testing.T) {
+	var metrics *serverMetrics
+	// no panic = pass
+	metrics.RecordCorpActionTick("ok")
+	metrics.RecordCorpActionProviderError("a_share", "fatal")
+	metrics.RecordCorpActionRetry("a_share", "succeeded")
+	metrics.RecordCorpActionEvent("split", "upserted")
+	metrics.RecordCorpActionApply("applied")
+}
+
+// TestServerMetrics_RecordABShadowLLMCallExports pins K-5: every
+// outcome label that the LLM-shadow decider emits must show up
+// in `fundai_ab_shadow_llm_calls_total{outcome=...}` after a
+// single-pass export. Operator dashboards (cost burn, fallback
+// rate) parse the label set; if the names drift this test will
+// fail loudly.
+func TestServerMetrics_RecordABShadowLLMCallExports(t *testing.T) {
+	metrics := newServerMetrics()
+	for _, outcome := range []string{
+		"decided_by_llm",
+		"fallback_llm_error",
+		"fallback_parse_error",
+		"fallback_budget_cap",
+		"recap_decided_by_llm",
+		"recap_fallback_llm_error",
+		"recap_fallback_parse_error",
+	} {
+		metrics.RecordABShadowLLMCall(outcome)
+	}
+	// Bump one of them twice so we know counters accumulate
+	// rather than overwrite.
+	metrics.RecordABShadowLLMCall("decided_by_llm")
+
+	export := metrics.ExportPrometheus()
+	if !strings.Contains(export, "# TYPE fundai_ab_shadow_llm_calls_total counter") {
+		t.Errorf("export missing TYPE comment for fundai_ab_shadow_llm_calls_total\n%s", export)
+	}
+	for _, want := range []string{
+		`fundai_ab_shadow_llm_calls_total{outcome="decided_by_llm"} 2`,
+		`fundai_ab_shadow_llm_calls_total{outcome="fallback_llm_error"} 1`,
+		`fundai_ab_shadow_llm_calls_total{outcome="fallback_parse_error"} 1`,
+		`fundai_ab_shadow_llm_calls_total{outcome="fallback_budget_cap"} 1`,
+		`fundai_ab_shadow_llm_calls_total{outcome="recap_decided_by_llm"} 1`,
+		`fundai_ab_shadow_llm_calls_total{outcome="recap_fallback_llm_error"} 1`,
+		`fundai_ab_shadow_llm_calls_total{outcome="recap_fallback_parse_error"} 1`,
+	} {
+		if !strings.Contains(export, want) {
+			t.Errorf("export missing line %q\n--- export ---\n%s", want, export)
+		}
+	}
+	// Empty/whitespace outcomes are coerced to "unknown" so the
+	// label cardinality stays bounded.
+	metrics.RecordABShadowLLMCall("   ")
+	if !strings.Contains(metrics.ExportPrometheus(), `fundai_ab_shadow_llm_calls_total{outcome="unknown"}`) {
+		t.Errorf("blank outcome must coerce to unknown")
+	}
+}
+
+func TestServerMetrics_ABShadowLLMCallNilSafe(t *testing.T) {
+	var metrics *serverMetrics
+	// no panic = pass
+	metrics.RecordABShadowLLMCall("decided_by_llm")
+	metrics.RecordABShadowLLMCall("fallback_budget_cap")
+}
+
 // Receiver nil-guard: ObserveDecisionInput must be safe on a
 // nil *serverMetrics so test wirings that omit the registry can
 // still call into PM code paths.

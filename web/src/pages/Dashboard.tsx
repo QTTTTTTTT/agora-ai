@@ -36,6 +36,9 @@ import {
   formatNumberForLanguage,
   useAppPreferences,
 } from "../lib/preferences";
+import { CorpActionTimeline } from "../components/CorpActionTimeline";
+import { BenchmarkChart } from "../components/BenchmarkChart";
+import { HoldingsTrendsGrid } from "../components/HoldingsTrendsGrid";
 
 interface FundUniverse {
   mode: string;
@@ -1829,6 +1832,18 @@ export default function Dashboard() {
             </tbody>
           </table>
         )}
+      </div>
+
+      <div className="mt-6">
+        {fundId ? <BenchmarkChart fundId={fundId} language={language} /> : null}
+      </div>
+
+      <div className="mt-6">
+        {fundId ? <HoldingsTrendsGrid fundId={fundId} language={language} /> : null}
+      </div>
+
+      <div className="mt-6">
+        {fundId ? <CorpActionTimeline fundId={fundId} language={language} /> : null}
       </div>
 
       <div className="mt-6 overflow-x-auto rounded-xl border border-gray-200 bg-white p-6 shadow-sm">

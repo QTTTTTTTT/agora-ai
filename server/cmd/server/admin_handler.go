@@ -49,6 +49,11 @@ type adminHandler struct {
 	// skillInbox 是 Sprint 3 / M5 跨基金技能审批 inbox 的 backend。
 	// nil 时对应端点 503。
 	skillInbox *skillInbox
+
+	// corpActionRepo backs POST /api/admin/corp-actions and the
+	// per-fund timeline endpoint. Nil → corp-action endpoints return
+	// 503; tests that don't need them can leave it unset.
+	corpActionRepo *repository.CorpActionRepo
 }
 
 // adminSuperAdminChecker implements audit.SuperAdminChecker by reading
@@ -191,6 +196,10 @@ func newAdminHandler(svc *Services) *adminHandler {
 	// only the auto-approve email notification degrades to a slog
 	// line, which matches the rest of the platform's mailer pattern.
 	h.skillInbox = newSkillInbox(svc.DB, svc.Mailer, "FundAI", "")
+	// Sprint 4 / corp-action: ledger + applier shared across
+	// admin + scheduled ingest. Repository is cheap to construct
+	// (just wraps *sql.DB) so we always wire it.
+	h.corpActionRepo = repository.NewCorpActionRepo(svc.DB)
 	h.registerDualControlActions()
 	return h
 }
@@ -223,6 +232,10 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/skills/proposed", h.handleListProposedSkills)
 	mux.HandleFunc("POST /api/admin/skills/{fundId}/{skillKey}/shadow-evaluate", h.handleShadowEvaluateSkill)
 	mux.HandleFunc("POST /api/admin/skills/{fundId}/{skillKey}/approve", h.handleManualApproveSkill)
+	// Sprint 4 / corp-action — apply a split / dividend to one or
+	// more fund holdings, and read back the per-fund timeline.
+	mux.HandleFunc("POST /api/admin/corp-actions", h.handleApplyCorpAction)
+	mux.HandleFunc("GET /api/admin/funds/{fundId}/corp-actions", h.handleListCorpActionsForFund)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

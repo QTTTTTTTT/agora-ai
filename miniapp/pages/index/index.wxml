@@ -61,6 +61,12 @@
     </view>
   </view>
 
+  <!-- ===== 3.1 基金 vs 大盘（Card I 引入） ===== -->
+  <benchmark-mini-chart
+    wx:if="{{fund && fund.id}}"
+    fund-id="{{fund.id}}"
+  />
+
   <!-- ===== 4. 持仓列表（横向滚动） ===== -->
   <view class="section">
     <view class="section-header">
@@ -102,6 +108,13 @@
       </view>
     </view>
   </view>
+
+  <!-- ===== 5.1 公司行动时间线（Card I 引入） ===== -->
+  <corp-action-timeline
+    wx:if="{{fund && fund.id}}"
+    fund-id="{{fund.id}}"
+    limit="{{20}}"
+  />
 
   <!-- ===== 6. 工作流状态 ===== -->
   <view class="section">

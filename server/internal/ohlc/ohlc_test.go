@@ -106,6 +106,42 @@ func TestRegistryRoutesByMarket(t *testing.T) {
 	}
 }
 
+// TestYahooSupportsDefault pins the YahooProvider's default Markets
+// list. Adding/removing a market here is a CONTRACT change that
+// affects whether the dashboard surfaces csi300 / chinext / star50
+// or shows a "skipped" toast — pin tightly so the breaking change
+// shows up in code review.
+func TestYahooSupportsDefault(t *testing.T) {
+	p := &YahooProvider{}
+	want := map[string]bool{
+		"us_equity": true,
+		"hk_equity": true,
+		"a_share":   true,
+		"crypto":    false,
+		"futures":   false,
+		"":          false,
+	}
+	for m, expected := range want {
+		got := p.Supports(m)
+		if got != expected {
+			t.Errorf("Supports(%q) = %v, want %v", m, got, expected)
+		}
+	}
+}
+
+// TestYahooSupportsRespectsExplicitMarkets ensures operators can
+// still narrow the provider (e.g., when wiring Akshare for A-share
+// stocks AND wanting to keep Yahoo US-only for backtests).
+func TestYahooSupportsRespectsExplicitMarkets(t *testing.T) {
+	p := &YahooProvider{Markets: []string{"us_equity"}}
+	if !p.Supports("us_equity") {
+		t.Error("explicit us_equity should be supported")
+	}
+	if p.Supports("a_share") {
+		t.Error("explicit Markets should NOT fall back to default")
+	}
+}
+
 // When the first matching provider returns ErrNoData, the registry
 // must try the next one before giving up.
 func TestRegistryFallsThroughToNextProviderOnNoData(t *testing.T) {

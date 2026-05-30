@@ -26,9 +26,12 @@ type YahooProvider struct {
 	// back to the public host.
 	BaseURL string
 	// Markets is the list of canonical market tags this provider
-	// claims to cover. Defaults to {"us_equity", "hk_equity"} when
-	// empty; operators can override (e.g., add "etf" or restrict
-	// to "us_equity" only).
+	// claims to cover. Defaults to {"us_equity", "hk_equity",
+	// "a_share"} when empty (Yahoo's Chart endpoint serves index
+	// data for the major A-share benchmarks via the .SS / .SZ
+	// suffixes — see Supports for details). Operators can override
+	// to restrict (e.g., "us_equity" only when a dedicated
+	// Akshare-MCP is wired).
 	Markets []string
 }
 
@@ -39,7 +42,16 @@ func (p *YahooProvider) Name() string { return "yahoo" }
 func (p *YahooProvider) Supports(market string) bool {
 	markets := p.Markets
 	if len(markets) == 0 {
-		markets = []string{"us_equity", "hk_equity"}
+		// Yahoo's Chart endpoint serves index data for A-shares
+		// (000300.SS / 000905.SS / 399006.SZ / 000688.SS) and HK
+		// (^HSI / ^HSCE) in addition to its native US coverage,
+		// so we claim all three by default. Operators with a
+		// dedicated Akshare-MCP for A-share STOCKS should still
+		// register that provider FIRST in cmd/server wiring so
+		// the registry tries it before falling through to Yahoo
+		// (Akshare has more reliable individual-stock coverage
+		// than Yahoo for the A-share market).
+		markets = []string{"us_equity", "hk_equity", "a_share"}
 	}
 	for _, m := range markets {
 		if strings.EqualFold(m, market) {

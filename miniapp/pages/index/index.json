@@ -2,7 +2,9 @@
   "navigationBarTitleText": "AI基金平台",
   "usingComponents": {
     "nav-chart": "/components/nav-chart/nav-chart",
-    "metric-card": "/components/metric-card/metric-card"
+    "metric-card": "/components/metric-card/metric-card",
+    "benchmark-mini-chart": "/components/benchmark-mini-chart/benchmark-mini-chart",
+    "corp-action-timeline": "/components/corp-action-timeline/corp-action-timeline"
   },
   "enablePullDownRefresh": true
 }

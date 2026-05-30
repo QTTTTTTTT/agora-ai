@@ -276,6 +276,27 @@ const api = {
     return get('/api/funds/' + fundId + '/nav');
   },
 
+  // ---- 基准走势（fund vs market） ----
+  // Card I: 拉服务端推荐的基准曲线 + 基金 NAV 曲线（已 rebase 到
+  // 100），让小程序首页能直接画"基金 vs 大盘"叠加图。
+  // - days 默认 90，与 Web/Android 默认窗口一致。
+  // - 不传 seriesIds，让服务端按 fund.market 选默认基准。
+  getBenchmarkHistory: function (fundId, days) {
+    var params = {};
+    if (typeof days === 'number' && isFinite(days)) {
+      params.days = Math.trunc(days);
+    }
+    return get('/api/funds/' + fundId + '/benchmark-history', params);
+  },
+
+  // ---- 公司行动（拆股 / 派息） ----
+  // Card I: 拉已经应用到该 fund 的 corp action 时间线（最新 N 条）。
+  // 服务端如果没启 corp-action 服务会返回 503，调用方需 catch
+  // 并优雅降级（隐藏整块）。
+  getCorpActions: function (fundId, params) {
+    return get('/api/funds/' + fundId + '/corp-actions', params || { limit: 20 });
+  },
+
   // ---- 用量与账单 ----
   getTodayUsage: function () {
     return get('/api/usage/today');

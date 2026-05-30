@@ -1708,6 +1708,29 @@ type FundHandler struct {
 	// shadow + decay-monitor service. nil disables the
 	// /promotions endpoints with a 503 / empty list.
 	promotions       PromotionService
+	// corpActions is the Sprint 4 corp-action read service.
+	// nil-safe: GetCorpActions returns 503 when unset.
+	corpActions      CorpActionService
+	// benchmarks powers the benchmark-history overlay on the fund
+	// dashboard. nil-safe: GetBenchmarkHistory returns 503 when
+	// unwired so deployments without ohlc providers stay healthy.
+	benchmarks       BenchmarkService
+	// holdingsSeries powers the per-holding mini-chart grid (P1-2).
+	// Same nil-safety contract as benchmarks; both lean on the
+	// shared ohlc.Fetcher so they share the same kill-switch.
+	holdingsSeries   HoldingsSeriesService
+	// abShadowAgents surfaces the per-variant shadow agent
+	// learning timeline (Card D). nil-safe: the handler returns
+	// 503 when unwired so AB analyses still work without it.
+	abShadowAgents   ABShadowAgentService
+	// abAttribution surfaces the per-symbol A vs B operational
+	// attribution table (Card D). Same nil-safety contract.
+	abAttribution    ABOperationalAttributionService
+	// fundAssist is the LLM-backed "describe a fund + team in
+	// natural language and we'll create them" feature. nil-safe:
+	// the endpoint returns 503 when unwired so deployments without
+	// LLM keys still work.
+	fundAssist       FundAssistService
 }
 
 // WithBacktestService wires the Phase 2E backtest service. nil
@@ -1716,6 +1739,16 @@ type FundHandler struct {
 func (h *FundHandler) WithBacktestService(svc BacktestService) *FundHandler {
 	if h != nil {
 		h.backtests = svc
+	}
+	return h
+}
+
+// WithFundAssistService wires the LLM-backed fund-creation assistant
+// onto the handler. nil disables /api/companies/{companyId}/funds:assist
+// with a 503, matching the rest of the nil-safe pattern. Idempotent.
+func (h *FundHandler) WithFundAssistService(svc FundAssistService) *FundHandler {
+	if h != nil {
+		h.fundAssist = svc
 	}
 	return h
 }
@@ -1798,10 +1831,14 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/companies", h.ListCompanies)
 	mux.HandleFunc("GET /api/companies/overview", h.ListCompanyOverviews)
 	mux.HandleFunc("POST /api/companies/{companyId}/funds", h.CreateFund)
+	mux.HandleFunc("POST /api/companies/{companyId}/funds:assist", h.AssistCreateFund)
 	mux.HandleFunc("GET /api/companies/{companyId}/funds", h.ListFunds)
 	mux.HandleFunc("GET /api/funds/{fundId}", h.GetFund)
 	mux.HandleFunc("GET /api/funds/{fundId}/dashboard", h.GetDashboard)
 	mux.HandleFunc("GET /api/funds/{fundId}/forward-gate", h.GetForwardGate)
+	mux.HandleFunc("GET /api/funds/{fundId}/corp-actions", h.GetCorpActions)
+	mux.HandleFunc("GET /api/funds/{fundId}/benchmark-history", h.GetBenchmarkHistory)
+	mux.HandleFunc("GET /api/funds/{fundId}/holdings/series", h.GetHoldingsSeries)
 	mux.HandleFunc("PUT /api/funds/{fundId}", h.UpdateFund)
 	mux.HandleFunc("DELETE /api/funds/{fundId}", h.DeleteFund)
 	mux.HandleFunc("POST /api/funds/{fundId}/backtests", h.SubmitBacktest)
@@ -1882,6 +1919,8 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/abtests/{testId}/promote-learning", h.PromoteABTestLearning)
 	mux.HandleFunc("GET /api/abtests/{testId}/learning-promotions", h.ListABTestLearningPromotions)
 	mux.HandleFunc("POST /api/abtests/{testId}/learning-promotions/{promotionId}/rollback", h.RollbackABTestLearningPromotion)
+	mux.HandleFunc("GET /api/abtests/{testId}/shadow-agents", h.GetABShadowAgents)
+	mux.HandleFunc("GET /api/abtests/{testId}/operational-attribution", h.GetABOperationalAttribution)
 
 	mux.HandleFunc("GET /api/marketplace/listings", h.ListMarketplaceListings)
 	mux.HandleFunc("GET /api/marketplace/my-listings", h.ListMyMarketplaceListings)
@@ -2224,6 +2263,144 @@ func (h *FundHandler) CreateFund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, fund)
+}
+
+// AssistCreateFund is the LLM-backed "describe the fund + team you
+// want, we'll create it for you" entry point.
+//
+// Lifecycle:
+//   - 503 when no FundAssistService is wired (e.g. dev box without
+//     LLM keys).
+//   - 400 on missing prompt.
+//   - 502 when the LLM produced unusable output (no JSON, decode
+//     fail). Distinct from 422 so the frontend can prompt "we
+//     couldn't parse the model's response, please retry" vs
+//     "the plan was valid JSON but failed validation".
+//   - 422 with FundAssistError.Issues + the offending plan when
+//     server-side validation rejects (cross-market team, missing
+//     PM, unsupported market). The UI shows the issues and the
+//     original plan so the user can see what went wrong.
+//   - 200 OK on dryRun=true with the validated + defaulted plan +
+//     any warnings — the user must POST again with dryRun=false to
+//     actually create.
+//   - 201 Created on dryRun=false with the created fund and full
+//     agent list. Partial-failure semantics: if fund creation
+//     succeeds but a later agent insertion fails, we DO leave the
+//     fund (the user can fix up via the team UI) and return 207-
+//     style mixed status — the response includes the fund + the
+//     agents that did succeed, plus a warning describing what fell
+//     through.
+func (h *FundHandler) AssistCreateFund(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireAuthenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+	companyID := pathValue(r, "companyId")
+	if !requireNonEmpty(w, companyID, "companyId") {
+		return
+	}
+
+	if h.fundAssist == nil {
+		writeError(w, http.StatusServiceUnavailable, "assist not configured", "fund assist service is not wired on this deployment")
+		return
+	}
+
+	var req FundAssistRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err.Error())
+		return
+	}
+	if !requireNonEmpty(w, req.Prompt, "prompt") {
+		return
+	}
+
+	plan, warnings, err := computeAssistPlan(r.Context(), h.fundAssist, userID, req)
+	if err != nil {
+		// Distinguish empty-plan (LLM gave us garbage we couldn't
+		// even parse) from validation-failed (plan parsed but had
+		// semantic issues we caught). Both are user-recoverable
+		// but the UI affordance is different.
+		if errors.Is(err, ErrFundAssistEmptyPlan) {
+			writeError(w, http.StatusBadGateway, "llm produced unusable output", "model didn't return a valid JSON plan; please refine your prompt and retry")
+			return
+		}
+		var assistErr *FundAssistError
+		if errors.As(err, &assistErr) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"error":    "plan_rejected",
+				"detail":   "LLM 输出的方案未通过校验，请按 issues 修正提示词后重试",
+				"issues":   assistErr.Issues,
+				"plan":     assistErr.Plan,
+				"warnings": warnings,
+			})
+			return
+		}
+		// Anything else (LLM transport error, prompt empty after
+		// trim, service nil) → 500 with the underlying message.
+		writeError(w, http.StatusInternalServerError, "assist failed", err.Error())
+		return
+	}
+
+	plan = applyAssistDefaults(plan)
+
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, FundAssistResponse{Plan: plan, Warnings: warnings})
+		return
+	}
+
+	// Real execution path: create fund, then iterate agents.
+	fund, err := h.funds.CreateFund(userID, planToCreateInput(companyID, plan))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create fund", err.Error())
+		return
+	}
+
+	createdAgents := make([]Agent, 0, len(plan.Agents))
+	for i, ag := range plan.Agents {
+		role := strings.ToLower(strings.TrimSpace(ag.Role))
+		focus := strings.TrimSpace(ag.Focus)
+		agent, err := h.teams.AddAgent(userID, fund.ID, role, focus)
+		if err != nil {
+			// Fund is already created — surface the partial state
+			// rather than silently swallowing, and tell the UI
+			// which agent fell through. The user can finish setup
+			// in the team editor.
+			warnings = append(warnings, fmt.Sprintf("agents[%d] (%s) 创建失败：%s — 请在团队页面手动补齐", i, role, err.Error()))
+			break
+		}
+		// Best-effort: push systemPrompt + name onto the agent if
+		// the LLM produced one. We don't fail the call if the
+		// update fails — the agent is bound and functional with
+		// its default system prompt; the polish is non-critical.
+		if name := strings.TrimSpace(ag.Name); name != "" || strings.TrimSpace(ag.SystemPrompt) != "" {
+			cfg := AgentConfig{}
+			if sp := strings.TrimSpace(ag.SystemPrompt); sp != "" {
+				cfg.SystemPrompt = &sp
+			}
+			// Skip Name updates: AgentConfig has no Name field,
+			// the seed scripts model "name" via the agent's role
+			// + focus combo. We surface the LLM-written name in
+			// the systemPrompt's first line instead so the user
+			// sees it in the UI.
+			if cfg.SystemPrompt != nil {
+				updated, upErr := h.teams.UpdateAgent(userID, fund.ID, agent.ID, cfg)
+				if upErr != nil {
+					warnings = append(warnings, fmt.Sprintf("agents[%d] systemPrompt 写入失败：%s", i, upErr.Error()))
+				} else {
+					agent = updated
+				}
+			}
+		}
+		createdAgents = append(createdAgents, *agent)
+	}
+
+	writeJSON(w, http.StatusCreated, FundAssistResponse{
+		FundID:   fund.ID,
+		Fund:     fund,
+		Agents:   createdAgents,
+		Plan:     plan,
+		Warnings: warnings,
+	})
 }
 
 func (h *FundHandler) ListFunds(w http.ResponseWriter, r *http.Request) {

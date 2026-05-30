@@ -559,6 +559,7 @@ type Services struct {
 	LessonScoringLoop      *lessonScoringLoop
 	MemoryArchiveLoop      *memoryArchiveLoop
 	MemoryEmbedLoop        *memoryEmbedLoop
+	CorpActionIngestLoop   *corpActionIngestLoop
 	Mailer                 mailer.Mailer
 }
 
@@ -595,6 +596,9 @@ func (s *Services) Stop() {
 	}
 	if s.MemoryEmbedLoop != nil {
 		s.MemoryEmbedLoop.Stop()
+	}
+	if s.CorpActionIngestLoop != nil {
+		s.CorpActionIngestLoop.Stop()
 	}
 	if s.LeaseManager != nil {
 		s.LeaseManager.Stop()
@@ -651,6 +655,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	leaseManager.Register(LessonLineageLeaseName)
 	leaseManager.Register(MemoryArchiveLeaseName)
 	leaseManager.Register(MemoryEmbedLeaseName)
+	leaseManager.Register(CorpActionIngestLeaseName)
 
 	workflowService.scheduler.SetLeaderChecker(leaseManager)
 	workflowService.StartBackgroundScheduler()
@@ -698,6 +703,28 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	}
 	marketplaceAdapter := newMarketplaceServiceAdapter(db, modelConfigService, subscriptionService, llmRuntime)
 	auctionAdapter := newMarketplaceAuctionAdapter(marketplaceAdapter)
+	// Card D: a single abTestServiceAdapter implements three
+	// interfaces — the legacy ABTestService and the two new
+	// shadow-agent / operational-attribution surfaces. Sharing
+	// the instance keeps the auth + db deps in one place.
+	abTestAdapter := newABTestServiceAdapter(db)
+	// Card K-1: if AB_SHADOW_LLM_ENABLED=1, route the AB shadow
+	// B-variant decisions through the real LLM (per-trade veto +
+	// end-of-run learning recap). Falls back to deterministic
+	// when the flag is unset OR the runtime client is missing
+	// (e.g., system has no LLM keys configured). The AB analyze
+	// path is the only consumer of this decider today; wiring
+	// here keeps the rest of the adapter unaware of which path
+	// is active.
+	if envBool("AB_SHADOW_LLM_ENABLED") && llmRuntime != nil && llmRuntime.client != nil {
+		// K-5: pass the serverMetrics so the decider can publish
+		// `fundai_ab_shadow_llm_calls_total{outcome=...}`. Pass
+		// directly — `metrics` is the same struct already wired
+		// into the rest of the server. Nil-safe at the recorder
+		// boundary so a metrics-free build (e.g. integration
+		// harness) still works.
+		abTestAdapter = abTestAdapter.WithLLMShadowDecider(llmRuntime.client, metrics)
+	}
 	services.FundHandler = api.NewFundHandler(
 		newFundServiceAdapter(db, workflowService),
 		newTeamServiceAdapter(db, usageTracker, modelConfigService, subscriptionService, llmRuntime).WithActivityBus(workflowService.activityBus),
@@ -707,12 +734,18 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		newMemoryServiceAdapter(db),
 		newDecisionTraceServiceAdapter(db, marketDataService, llmRuntime),
 		newMarketServiceAdapter(db, marketDataService, llmRuntime),
-		newABTestServiceAdapter(db),
+		abTestAdapter,
 		marketplaceAdapter,
 	).WithReflectionService(newReflectionServiceAdapter(db)).
 		WithAgentSkillService(newAgentSkillServiceAdapter(db)).
 		WithAuctionService(auctionAdapter).
-		WithBacktestService(buildBacktestService(db, llmRuntime))
+		WithBacktestService(buildBacktestService(db, llmRuntime)).
+		WithCorpActionService(newCorpActionServiceAdapter(services)).
+		WithBenchmarkService(newBenchmarkServiceAdapter(services)).
+		WithHoldingsSeriesService(newHoldingsSeriesServiceAdapter(services)).
+		WithABShadowAgentService(abTestAdapter).
+		WithABOperationalAttributionService(abTestAdapter).
+		WithFundAssistService(newFundAssistAdapter(llmRuntime.client))
 	// Phase 3A-5: a SINGLE attribution adapter feeds both the HTTP
 	// surface (GET /api/funds/:id/strategy-attribution) and the
 	// daily-review hook (runDailyAttribution inside the memory
@@ -817,6 +850,23 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		memoryArchive.SetLeaderChecker(leaseManager)
 		memoryArchive.Start()
 		services.MemoryArchiveLoop = memoryArchive
+
+		// P1-1: corp-action daily ingest. Walks every active fund's
+		// open positions twice a day, drives the provider chain
+		// (Eastmoney / Yahoo / ...) to fetch dividends + splits, and
+		// applies them via the same pipeline as the corpactionsync
+		// CLI. Skipped when DB is absent (smoke tests etc.); leader-
+		// gated in multi-replica deployments.
+		corpActionIngest := newCorpActionIngestLoop(db)
+		corpActionIngest.SetLeaderChecker(leaseManager)
+		// Card G: feed the loop's per-tick / per-event observations
+		// into the shared serverMetrics. This is what powers the
+		// "fundai_corp_action_ingest_*" Prometheus series and the
+		// "now - last_success > 7d" alert. nil-safe — the loop
+		// uses a noop recorder if metrics is nil.
+		corpActionIngest.SetMetrics(metrics)
+		corpActionIngest.Start()
+		services.CorpActionIngestLoop = corpActionIngest
 
 		// L3: pgvector backfill + read service. Only spins up when
 		// OPENAI_API_KEY (or an OpenAI-compatible drop-in) is
@@ -2432,6 +2482,74 @@ type serverMetrics struct {
 	decisionCorrelationHighPairs int64
 	decisionCooldownVetos        map[string]int64
 	decisionRiskBudgetThrottled  map[string]int64
+	// Card G — corp-action ingest observability. The 12h ingest
+	// loop has historically been a black box (slog only) and a
+	// silent provider regression — Eastmoney WAF block, Yahoo
+	// schema drift — looks identical to "no events today" until
+	// users complain about a missed split. Surfacing these counters
+	// turns that into a Grafana alert.
+	//
+	//   - corpActionIngestTicks keys by `status=ok|skipped_no_holdings|
+	//     skipped_not_leader`. One increment per runOnce call.
+	//   - corpActionIngestProviderErrors keys by
+	//     `market=a_share|us_equity|hk_equity,outcome=transient|fatal`.
+	//     transient = the retry path classified the err as worth
+	//     retrying (EOF, reset). fatal = immediate up-stack giveup.
+	//   - corpActionIngestRetries keys by the same labels but only
+	//     fires when a retry was issued; outcome=succeeded means the
+	//     retry produced data, exhausted means it didn't.
+	//   - corpActionIngestEvents keys by `action=split|cash_dividend|
+	//     combined,phase=upserted|upsert_error`. Phase is the
+	//     distinguisher (counter, not gauge) so a dashboard can
+	//     compute success rate cheaply.
+	//   - corpActionIngestApply keys by
+	//     `outcome=applied|missing|error`. missing = position
+	//     vanished between collect and apply; error = applier
+	//     returned a non-ErrPositionMissing failure.
+	//   - corpActionIngestLastTickUnix is the Unix seconds of the
+	//     last tick (any leader run, success or skip). A "now -
+	//     last > 24h" alert catches the case where the loop
+	//     goroutine has stopped firing (e.g., panic-recovered into
+	//     a stuck state).
+	//   - corpActionIngestLastSuccessUnix is the Unix seconds of
+	//     the last tick that produced ≥1 ingested event OR
+	//     deliberately skipped because no holdings were active.
+	//     "now - last_success > 7d" catches the slower regression
+	//     where the provider stops returning anything.
+	corpActionIngestTicks            map[string]int64
+	corpActionIngestProviderErrors   map[string]int64
+	corpActionIngestRetries          map[string]int64
+	corpActionIngestEvents           map[string]int64
+	corpActionIngestApply            map[string]int64
+	corpActionIngestLastTickUnix     int64
+	corpActionIngestLastSuccessUnix  int64
+
+	// Card K-5 — AB shadow LLM cost / health.
+	//
+	// `abShadowLLMCalls` is partitioned by `outcome` so we can
+	// see at a glance:
+	//   - "decided_by_llm" / "recap_decided_by_llm"      — happy path,
+	//     used the model's response.
+	//   - "fallback_llm_error" / "recap_fallback_llm_error" — upstream
+	//     timeout/refusal/network error; the synthetic decider
+	//     rescued the run.
+	//   - "fallback_parse_error" / "recap_fallback_parse_error" — the
+	//     model spoke but wasn't a valid JSON shape.
+	//   - "fallback_budget_cap"                          — per-run
+	//     `AB_SHADOW_LLM_MAX_CALLS` was exceeded; we stopped paying
+	//     the model and used the synthetic decider for the rest.
+	//
+	// Two operator-facing numbers fall out of this:
+	//   sum(rate(...{outcome="decided_by_llm"}[5m])) → live LLM
+	//   spend in "calls per second", which combined with model
+	//   pricing tells you the burn.
+	//   sum(...{outcome=~"fallback_.*"}) / sum(...) → fallback rate;
+	//   if it's > 5% the model or budget needs tuning.
+	//
+	// We keep this on `serverMetrics` (not on llmBSideDecider) so
+	// every run shares one counter — the decider is rebuilt per
+	// analyze invocation and would lose state otherwise.
+	abShadowLLMCalls map[string]int64
 }
 
 var httpRequestDurationSecondsBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
@@ -2456,6 +2574,12 @@ func newServerMetrics() *serverMetrics {
 		decisionExposureBreaches:      make(map[string]int64),
 		decisionCooldownVetos:         make(map[string]int64),
 		decisionRiskBudgetThrottled:   make(map[string]int64),
+		corpActionIngestTicks:           make(map[string]int64),
+		corpActionIngestProviderErrors:  make(map[string]int64),
+		corpActionIngestRetries:         make(map[string]int64),
+		corpActionIngestEvents:          make(map[string]int64),
+		corpActionIngestApply:           make(map[string]int64),
+		abShadowLLMCalls:                make(map[string]int64),
 	}
 }
 
@@ -2616,6 +2740,152 @@ func (m *serverMetrics) RecordHardRiskRejection(rule, symbol string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.hardRiskRejections[key]++
+}
+
+// RecordCorpActionTick increments the per-tick run counter. Status
+// is one of:
+//   - "ok"                    — runOnce reached the end of the
+//     fetch+apply path (regardless of how many events flowed —
+//     "no events today" is still ok).
+//   - "skipped_not_leader"    — replica skipped the tick because
+//     the lease is held elsewhere; expected on N-1 of N replicas.
+//   - "skipped_no_holdings"   — no active funds with non-zero
+//     positions, so there's nothing to ask upstream about.
+func (m *serverMetrics) RecordCorpActionTick(status string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(status) == "" {
+		status = "unknown"
+	}
+	now := time.Now().Unix()
+	key := fmt.Sprintf("status=%s", status)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.corpActionIngestTicks[key]++
+	m.corpActionIngestLastTickUnix = now
+	if status == "ok" || status == "skipped_no_holdings" {
+		// "ok" includes the case where we ran but the upstream
+		// returned 0 events (entirely possible — most days have no
+		// splits/dividends). We still treat that as a successful
+		// observation: the loop reached out and got a response.
+		m.corpActionIngestLastSuccessUnix = now
+	}
+}
+
+// RecordCorpActionProviderError counts a failed provider fetch.
+// outcome is "transient" for errors the retry helper considered
+// worth retrying (EOF, connection reset, broken pipe) and "fatal"
+// for everything else (4xx, malformed JSON, etc.). Distinguishing
+// the two on the dashboard lets operators tell "the upstream is
+// flaky" from "we have a real bug".
+func (m *serverMetrics) RecordCorpActionProviderError(market, outcome string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(market) == "" {
+		market = "unknown"
+	}
+	if strings.TrimSpace(outcome) == "" {
+		outcome = "fatal"
+	}
+	key := fmt.Sprintf("market=%s,outcome=%s", market, outcome)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.corpActionIngestProviderErrors[key]++
+}
+
+// RecordCorpActionRetry counts a retry attempt issued by the
+// provider fetch wrapper. outcome is one of:
+//   - "succeeded"  — the retry returned data.
+//   - "exhausted"  — the retry budget ran out (1 attempt for now,
+//     so this just means "retried once and it still failed").
+// market labels which provider lane the retry happened on so a
+// "Yahoo flaky / Eastmoney solid" pattern is visible in Grafana.
+func (m *serverMetrics) RecordCorpActionRetry(market, outcome string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(market) == "" {
+		market = "unknown"
+	}
+	if strings.TrimSpace(outcome) == "" {
+		outcome = "unknown"
+	}
+	key := fmt.Sprintf("market=%s,outcome=%s", market, outcome)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.corpActionIngestRetries[key]++
+}
+
+// RecordCorpActionEvent counts an event-level ingest result. action
+// is the corporate-action type (split / cash_dividend / combined /
+// other vendor-specific tags); phase is "upserted" or "upsert_error".
+// One call per event per tick.
+func (m *serverMetrics) RecordCorpActionEvent(action, phase string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(action) == "" {
+		action = "unknown"
+	}
+	if strings.TrimSpace(phase) == "" {
+		phase = "unknown"
+	}
+	key := fmt.Sprintf("action=%s,phase=%s", action, phase)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.corpActionIngestEvents[key]++
+}
+
+// RecordCorpActionApply counts how a single (event, fund) apply
+// attempt resolved. outcome is "applied" / "missing" / "error".
+// missing covers the corpaction.ErrPositionMissing race (position
+// zeroed between collect and apply) which is silent in logs;
+// surfacing it as a counter lets dashboards spot rates without
+// log-grepping.
+func (m *serverMetrics) RecordCorpActionApply(outcome string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(outcome) == "" {
+		outcome = "unknown"
+	}
+	key := fmt.Sprintf("outcome=%s", outcome)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.corpActionIngestApply[key]++
+}
+
+// RecordABShadowLLMCall (Card K-5) increments the per-outcome
+// counter that operators watch when AB_SHADOW_LLM_ENABLED=1 is
+// turned on in production. The decider calls this exactly once
+// per LLM attempt (whether the LLM was actually contacted or
+// the request was short-circuited by the budget cap), so the
+// `outcome` label tells the full story:
+//
+//   - "decided_by_llm" / "recap_decided_by_llm" — happy path.
+//   - "fallback_llm_error" / "recap_fallback_llm_error" — the
+//     model errored, network/timeout/refusal; synthetic rescue
+//     kept the run alive.
+//   - "fallback_parse_error" / "recap_fallback_parse_error" —
+//     model spoke but the JSON shape was off.
+//   - "fallback_budget_cap" — exceeded `AB_SHADOW_LLM_MAX_CALLS`
+//     for this analyze run; we stopped paying for the rest.
+//
+// Nil-safe so the deterministic path in tests can call it
+// without wiring a real metrics struct.
+func (m *serverMetrics) RecordABShadowLLMCall(outcome string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(outcome) == "" {
+		outcome = "unknown"
+	}
+	key := fmt.Sprintf("outcome=%s", outcome)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.abShadowLLMCalls[key]++
 }
 
 // RecordLotLedgerFailure increments the lot-ledger drift counter
@@ -2788,6 +3058,63 @@ func (m *serverMetrics) ExportPrometheus() string {
 		"# TYPE fundai_marketdata_position_refresh_duration_ms_total counter",
 		fmt.Sprintf("fundai_marketdata_position_refresh_duration_ms_total %d", m.positionRefreshDurationMS),
 	)
+	// Card G — corp-action ingest health. These counters/gauges
+	// power the "is the daily ingest still running?" alerting on
+	// the operator dashboard. See docs/PROMETHEUS_QUERIES.md for
+	// the canonical alert expressions.
+	lines = append(lines,
+		"# HELP fundai_corp_action_ingest_ticks_total Total runs of the 12h corp-action ingest loop, partitioned by status (ok / skipped_not_leader / skipped_no_holdings).",
+		"# TYPE fundai_corp_action_ingest_ticks_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.corpActionIngestTicks) {
+		lines = append(lines, fmt.Sprintf("fundai_corp_action_ingest_ticks_total{%s} %d", prometheusLabels(key), m.corpActionIngestTicks[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_corp_action_ingest_provider_errors_total Provider fetch failures during corp-action ingest by market and outcome (transient / fatal).",
+		"# TYPE fundai_corp_action_ingest_provider_errors_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.corpActionIngestProviderErrors) {
+		lines = append(lines, fmt.Sprintf("fundai_corp_action_ingest_provider_errors_total{%s} %d", prometheusLabels(key), m.corpActionIngestProviderErrors[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_corp_action_ingest_retries_total Provider fetch retries issued during corp-action ingest by market and outcome (succeeded / exhausted).",
+		"# TYPE fundai_corp_action_ingest_retries_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.corpActionIngestRetries) {
+		lines = append(lines, fmt.Sprintf("fundai_corp_action_ingest_retries_total{%s} %d", prometheusLabels(key), m.corpActionIngestRetries[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_corp_action_ingest_events_total Per-event corp-action ingest results by action type and phase (upserted / upsert_error).",
+		"# TYPE fundai_corp_action_ingest_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.corpActionIngestEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_corp_action_ingest_events_total{%s} %d", prometheusLabels(key), m.corpActionIngestEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_corp_action_ingest_apply_total Per-(event,fund) apply outcomes during corp-action ingest (applied / missing / error).",
+		"# TYPE fundai_corp_action_ingest_apply_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.corpActionIngestApply) {
+		lines = append(lines, fmt.Sprintf("fundai_corp_action_ingest_apply_total{%s} %d", prometheusLabels(key), m.corpActionIngestApply[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_corp_action_ingest_last_tick_unix Unix seconds of the most recent corp-action ingest tick (any outcome). 0 = the loop has not run yet.",
+		"# TYPE fundai_corp_action_ingest_last_tick_unix gauge",
+		fmt.Sprintf("fundai_corp_action_ingest_last_tick_unix %d", m.corpActionIngestLastTickUnix),
+		"# HELP fundai_corp_action_ingest_last_success_unix Unix seconds of the most recent successful corp-action ingest tick (ok or skipped_no_holdings). 0 = no successful run yet.",
+		"# TYPE fundai_corp_action_ingest_last_success_unix gauge",
+		fmt.Sprintf("fundai_corp_action_ingest_last_success_unix %d", m.corpActionIngestLastSuccessUnix),
+	)
+	// Card K-5 — AB shadow LLM call accounting. Single counter,
+	// partitioned by outcome so operators can build a "burn vs
+	// fallback rate" panel from one metric.
+	lines = append(lines,
+		"# HELP fundai_ab_shadow_llm_calls_total LLM-shadow B-side decision attempts during AB analyze, partitioned by outcome (decided_by_llm / fallback_llm_error / fallback_parse_error / fallback_budget_cap / recap_decided_by_llm / recap_fallback_llm_error / recap_fallback_parse_error). Each AnalyzeTest run with AB_SHADOW_LLM_ENABLED=1 will increment this counter once per trade and once for the recap; the per-trade outcomes drive cost and the fallback_* outcomes drive reliability alerts.",
+		"# TYPE fundai_ab_shadow_llm_calls_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.abShadowLLMCalls) {
+		lines = append(lines, fmt.Sprintf("fundai_ab_shadow_llm_calls_total{%s} %d", prometheusLabels(key), m.abShadowLLMCalls[key]))
+	}
 	return strings.Join(append(lines, ""), "\n")
 }
 

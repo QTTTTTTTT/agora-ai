@@ -1,0 +1,79 @@
+<!--
+  Card I 小程序基准走势组件 wxml。
+
+  - 不强制宽度：父容器决定 width，组件按宽度放大画布。
+  - 顶部一行图例 + 一个 holding-overlap hint（可选），下方 canvas。
+  - 加载 / 空 / 错误三态各一行 helper UI；走势成功时不渲染。
+-->
+<view class="bm-card">
+  <view class="bm-header">
+    <view class="bm-title-wrap">
+      <text class="bm-title">基金 vs 大盘</text>
+      <text class="bm-subtitle">{{rangeLabel}}</text>
+    </view>
+    <view class="bm-range-row">
+      <view
+        class="bm-range-pill {{rangeId === item.id ? 'bm-range-pill--active' : ''}}"
+        wx:for="{{rangeOptions}}"
+        wx:key="id"
+        bindtap="onSelectRange"
+        data-id="{{item.id}}"
+      >
+        <text>{{item.label}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{loading}}" class="bm-state bm-state--loading">
+    <text>加载中…</text>
+  </view>
+  <view wx:elif="{{errorMessage}}" class="bm-state bm-state--error">
+    <text>{{errorMessage}}</text>
+    <view class="bm-retry" bindtap="reload">
+      <text>重试</text>
+    </view>
+  </view>
+  <view wx:elif="{{!hasData}}" class="bm-state bm-state--empty">
+    <text>暂无走势数据</text>
+  </view>
+  <view wx:else class="bm-body">
+    <!--
+      Holding-overlap 提示：与 web/Android 行为一致。当 fund 重仓
+      与基准本身高度重合时（如期货 fund 100% 持有 BTC，基准就是
+      btc_usdt），叠加图意义不大，提示用户 alpha 视图（小程序
+      暂未做 alpha 视图，仅展示文案，不让用户真切到 alpha 防迷
+      失）。
+    -->
+    <view
+      wx:if="{{holdingOverlap && holdingOverlap.overlapStrength}}"
+      class="bm-overlap bm-overlap--{{holdingOverlap.overlapStrength}}"
+    >
+      <text class="bm-overlap-title">{{overlapTitle}}</text>
+      <text class="bm-overlap-body">{{overlapBody}}</text>
+    </view>
+
+    <view class="bm-legend">
+      <view class="bm-legend-item">
+        <view class="bm-legend-swatch bm-legend-swatch--fund"></view>
+        <text class="bm-legend-label">{{fundLabel}}</text>
+      </view>
+      <view wx:if="{{benchmarkLabel}}" class="bm-legend-item">
+        <view class="bm-legend-swatch bm-legend-swatch--bench"></view>
+        <text class="bm-legend-label">{{benchmarkLabel}}</text>
+      </view>
+    </view>
+
+    <view class="bm-canvas-wrap" style="height: {{canvasHeight}}px;">
+      <canvas
+        id="benchmarkCanvas"
+        type="2d"
+        class="bm-canvas"
+        style="width: {{canvasWidth}}px; height: {{canvasHeight}}px;"
+      ></canvas>
+    </view>
+
+    <text wx:if="{{partialFailureToast}}" class="bm-partial-failure">
+      {{partialFailureToast}}
+    </text>
+  </view>
+</view>

@@ -1,0 +1,54 @@
+<!--
+  Card I 小程序公司行动（拆股 / 派息）时间线组件 wxml。
+
+  - 收起状态默认折叠（首页空间紧张）；点击 header 展开。
+  - 服务端 503 时显示降级文案，不让用户看到红色错误。
+  - 每行：日期 + action badge + 摘要（"+87 股拆股"/"派息 ¥47.40"）+
+    持仓数量变化。
+-->
+<view class="ca-card">
+  <view class="ca-header" bindtap="toggleOpen">
+    <view class="ca-title-wrap">
+      <text class="ca-title">公司行动</text>
+      <text class="ca-subtitle">{{subtitle}}</text>
+    </view>
+    <view class="ca-toggle">
+      <text>{{open ? '收起' : '展开'}}</text>
+    </view>
+  </view>
+
+  <view wx:if="{{open}}" class="ca-body">
+    <view wx:if="{{loading}}" class="ca-state">
+      <text>加载中…</text>
+    </view>
+    <view wx:elif="{{errorMessage}}" class="ca-state ca-state--error">
+      <text>{{errorMessage}}</text>
+      <view class="ca-retry" bindtap="reload" catch:tap="reload">
+        <text>重试</text>
+      </view>
+    </view>
+    <view wx:elif="{{items.length === 0}}" class="ca-state ca-state--empty">
+      <text>近 90 天没有公司行动</text>
+    </view>
+    <view wx:else class="ca-list">
+      <view class="ca-row" wx:for="{{items}}" wx:key="rowKey">
+        <view class="ca-row-left">
+          <text class="ca-date">{{item.exDateLabel}}</text>
+          <text class="ca-instrument">{{item.instrumentLabel}}</text>
+        </view>
+        <view class="ca-row-right">
+          <view class="ca-badge ca-badge--{{item.actionType}}">
+            <text>{{item.typeLabel}}</text>
+          </view>
+          <text class="ca-summary">{{item.summary}}</text>
+          <text wx:if="{{item.shareDeltaLabel}}" class="ca-share-delta {{item.shareDeltaUp ? 'ca-share-delta--up' : 'ca-share-delta--down'}}">
+            {{item.shareDeltaLabel}}
+          </text>
+          <text wx:if="{{item.cashCreditLabel}}" class="ca-cash-credit">
+            {{item.cashCreditLabel}}
+          </text>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

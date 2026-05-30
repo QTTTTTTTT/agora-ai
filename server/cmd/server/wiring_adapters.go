@@ -1947,14 +1947,28 @@ func buildOHLCFetcherFromEnv() ohlc.Fetcher {
 		return nil
 	}
 	reg := ohlc.NewRegistry()
+	// Registration order matters: Registry.Fetch walks providers
+	// in order and only falls through on ErrNoData. Akshare goes
+	// FIRST when configured so A-share stock data routes through
+	// the dedicated MCP (better A-share stock coverage than
+	// Yahoo); EastMoney goes second to handle A-share INDICES
+	// reliably (Yahoo only has 1d/5d depth for csi500/chinext/
+	// star50 — see internal/ohlc/provider_eastmoney.go for the
+	// detailed rationale). Yahoo handles US/HK + the rest of the
+	// global coverage as a fallback. Operators can disable the
+	// East Money lane via EASTMONEY_OHLC_DISABLED=1 (e.g., when
+	// running in environments where the upstream is unreachable).
+	if akURL := strings.TrimSpace(os.Getenv("AKSHARE_OHLC_URL")); akURL != "" {
+		reg.Register(&ohlc.AkshareProvider{BaseURL: akURL})
+	}
+	if !envBool("EASTMONEY_OHLC_DISABLED") {
+		reg.Register(&ohlc.EastmoneyProvider{BaseURL: strings.TrimSpace(os.Getenv("EASTMONEY_OHLC_URL"))})
+	}
 	if !envBool("YAHOO_OHLC_DISABLED") {
 		reg.Register(&ohlc.YahooProvider{})
 	}
 	if !envBool("BINANCE_OHLC_DISABLED") {
 		reg.Register(&ohlc.BinanceProvider{BaseURL: strings.TrimSpace(os.Getenv("BINANCE_OHLC_URL"))})
-	}
-	if akURL := strings.TrimSpace(os.Getenv("AKSHARE_OHLC_URL")); akURL != "" {
-		reg.Register(&ohlc.AkshareProvider{BaseURL: akURL})
 	}
 	ttl := 15 * time.Minute
 	if raw := strings.TrimSpace(os.Getenv("OHLC_CACHE_TTL")); raw != "" {
@@ -7758,6 +7772,13 @@ type abTestServiceAdapter struct {
 	tests     *repository.ABTestRepo
 	trades    *repository.TradeRepo
 	navs      *repository.NavSnapshotRepo
+
+	// Card K-1: pluggable B-side decider for `strategy_compare`
+	// AB tests. nil-safe — falls back to deterministic in
+	// ensureABShadowExecution when unset (e.g. legacy callers
+	// that built the adapter through newABTestServiceAdapter
+	// without wiring an LLM client).
+	bSideDecider abShadowBSideDecider
 }
 
 const (
@@ -7770,13 +7791,42 @@ const (
 
 func newABTestServiceAdapter(db *sql.DB) *abTestServiceAdapter {
 	return &abTestServiceAdapter{
-		db:        db,
-		funds:     repository.NewFundRepo(db),
-		companies: repository.NewFundCompanyRepo(db),
-		tests:     repository.NewABTestRepo(db),
-		trades:    repository.NewTradeRepo(db),
-		navs:      repository.NewNavSnapshotRepo(db),
+		db:           db,
+		funds:        repository.NewFundRepo(db),
+		companies:    repository.NewFundCompanyRepo(db),
+		tests:        repository.NewABTestRepo(db),
+		trades:       repository.NewTradeRepo(db),
+		navs:         repository.NewNavSnapshotRepo(db),
+		bSideDecider: deterministicBSideDecider{},
 	}
+}
+
+// WithLLMShadowDecider opts the AB shadow execution path into the
+// real-LLM mode (Card K-1). nil-safe — passing nil leaves the
+// existing deterministic decider in place. Operators control the
+// switch via env in main.go (AB_SHADOW_LLM_ENABLED=1).
+//
+// We accept the narrow llm.LLMClient surface instead of the full
+// *llmRuntime so this adapter stays unit-testable: a stub
+// LLMClient is enough to drive the LLM path in tests.
+//
+// Card K-5: an optional `metrics` recorder lets the LLM decider
+// publish per-outcome counters to Prometheus
+// (`fundai_ab_shadow_llm_calls_total`). Passing nil keeps the
+// noop recorder so unit tests don't have to wire metrics.
+func (s *abTestServiceAdapter) WithLLMShadowDecider(client llm.LLMClient, metrics abShadowMetricsRecorder) *abTestServiceAdapter {
+	if s == nil || client == nil {
+		return s
+	}
+	d, err := newLLMBSideDecider(client)
+	if err != nil || d == nil {
+		// Misconfigured — log? Not worth a hard error: the
+		// shadow path simply continues with the deterministic
+		// fallback, which is better than refusing to start.
+		return s
+	}
+	s.bSideDecider = d.WithMetrics(metrics)
+	return s
 }
 
 func (s *abTestServiceAdapter) ListTests(userID, fundID string) ([]api.ABTest, error) {
@@ -8971,25 +9021,101 @@ func (s *abTestServiceAdapter) writeABSyntheticShadowRun(ctx context.Context, te
 	if err := writeABSyntheticNAVs(ctx, tx, test.ID, variantA, navs, 1); err != nil {
 		return err
 	}
-	bias := abStrategyReturnBias(variantB.StrategyConfig)
-	if err := writeABSyntheticNAVs(ctx, tx, test.ID, variantB, navs, bias); err != nil {
+	decider := s.bSideDecider
+	if decider == nil {
+		decider = deterministicBSideDecider{}
+	}
+	// K-2: build the grounding context once per run so per-trade
+	// and recap prompts share the same NAV / aggregate stats.
+	// Empty when there's no NAV history; the prompt builders
+	// degrade gracefully in that case.
+	from, to := abTestDateRange(test)
+	bsideCtx := abBSideContextBuild(navs, trades, from, to)
+	// K-3: B's starting capital anchors to A's NAV[0].TotalAssets
+	// so day-1 NAV index lands at the same baseline as A. After
+	// that B diverges based on its own lot ledger.
+	initialCash := 0.0
+	if len(navs) > 0 {
+		initialCash = navs[0].TotalAssets
+	}
+	bLedger, priceTL, err := writeABSyntheticTradesAndDiffs(ctx, tx, test.ID, variantA, variantB, trades, decider, bsideCtx, initialCash)
+	if err != nil {
 		return err
 	}
-	tradeScale := abStrategyTradeScale(variantB.StrategyConfig)
-	if err := writeABSyntheticTradesAndDiffs(ctx, tx, test.ID, variantA, variantB, trades, tradeScale); err != nil {
-		return err
+	// K-3: B's NAV series is now recomputed from the ledger
+	// instead of `A.NAV × bias`. The legacy bias scaler is left
+	// in place for variants whose strategy_config has no real
+	// trade impact yet (synthetic deterministic decider with no
+	// SideOverride), but only as a fallback when there are no
+	// trades at all to mark on.
+	if len(trades) > 0 {
+		if err := writeBSideNAVsFromLedger(ctx, tx, test.ID, variantB, navs, bLedger, priceTL); err != nil {
+			return err
+		}
+	} else {
+		// No trades → no ledger → fall back to the bias scaler
+		// so the AB chart still has *something* to draw. This is
+		// the only path where `A.NAV × bias` lives; flag it in
+		// the slog so an operator can see when it triggered.
+		bias := abStrategyReturnBias(variantB.StrategyConfig)
+		if err := writeABSyntheticNAVs(ctx, tx, test.ID, variantB, navs, bias); err != nil {
+			return err
+		}
+		slog.Info("ab shadow B NAV: ledger empty, used bias fallback",
+			"testID", test.ID,
+			"variantID", variantB.ID,
+			"bias", bias,
+		)
 	}
 	latestDate := latestABShadowLearningDate(navs, trades)
 	if latestDate.IsZero() {
 		latestDate = time.Now().UTC()
 	}
-	if err := writeABSyntheticLearningEvents(ctx, tx, test.ID, variantA, latestDate, false); err != nil {
+	if err := writeABSyntheticLearningEvents(ctx, tx, test.ID, variantA, latestDate, false, decider, trades, bsideCtx); err != nil {
 		return err
 	}
-	if err := writeABSyntheticLearningEvents(ctx, tx, test.ID, variantB, latestDate, true); err != nil {
+	if err := writeABSyntheticLearningEvents(ctx, tx, test.ID, variantB, latestDate, true, decider, trades, bsideCtx); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// writeBSideNAVsFromLedger (Card K-3) replaces the legacy
+// `A.NAV × bias` shortcut. Walks A's NAV dates and emits one
+// `ab_test_variant_nav` row per date for B, sourced from:
+//
+//   - the ledger's trade history (B's actual decisions, not
+//     A's scaled by a constant)
+//   - the price timeline built from A's trade stream (so we use
+//     real prices A executed at)
+//   - A's NAV[0].TotalAssets as the starting capital (B starts
+//     identical to A, then diverges)
+//
+// Idempotent via `ON CONFLICT (variant_id, trading_date)` — same
+// shape as the writeABSyntheticNAVs path it replaces.
+func writeBSideNAVsFromLedger(ctx context.Context, tx *sql.Tx, testID string, variant abShadowVariantRuntime, aNavs []repository.NavSnapshot, ledger *bSideLotLedger, priceTL *priceTimeline) error {
+	if ledger == nil || len(aNavs) == 0 {
+		return nil
+	}
+	rows := computeBSideNAVRows(ledger.History(), aNavs, priceTL, ledger.InitialCash())
+	for _, r := range rows {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO ab_test_variant_nav (test_id, variant_id, trading_date, nav, total_assets, cash, daily_return, cumulative_return, drawdown)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (variant_id, trading_date) DO UPDATE SET
+			  nav = EXCLUDED.nav,
+			  total_assets = EXCLUDED.total_assets,
+			  cash = EXCLUDED.cash,
+			  daily_return = EXCLUDED.daily_return,
+			  cumulative_return = EXCLUDED.cumulative_return,
+			  drawdown = EXCLUDED.drawdown`,
+			testID, variant.ID, r.TradingDate, r.NAV, r.TotalAssets, r.Cash, r.DailyReturn, r.CumulativeReturn, r.Drawdown,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeABSyntheticNAVs(ctx context.Context, tx *sql.Tx, testID string, variant abShadowVariantRuntime, navs []repository.NavSnapshot, returnBias float64) error {
@@ -9039,7 +9165,23 @@ func writeABSyntheticNAVs(ctx context.Context, tx *sql.Tx, testID string, varian
 	return nil
 }
 
-func writeABSyntheticTradesAndDiffs(ctx context.Context, tx *sql.Tx, testID string, variantA, variantB abShadowVariantRuntime, trades []repository.TradeExecution, scale float64) error {
+// writeABSyntheticTradesAndDiffs writes the per-trade rows for
+// both A and B variants AND constructs a B-side lot ledger that
+// the caller can use to recompute B's NAV from real positions
+// rather than the legacy `A.NAV × bias` shortcut (Card K-3).
+//
+// Returns (ledger, priceTimeline, error). The ledger is non-nil
+// even on early return so the caller can safely chain into the
+// NAV writer without nil-checking. The price timeline carries
+// every (symbol, date, price) observation from A's trade stream
+// so the NAV writer can mark-to-market each B holding using the
+// same prices A actually executed at.
+func writeABSyntheticTradesAndDiffs(ctx context.Context, tx *sql.Tx, testID string, variantA, variantB abShadowVariantRuntime, trades []repository.TradeExecution, decider abShadowBSideDecider, bsideCtx abBSideContext, initialCash float64) (*bSideLotLedger, *priceTimeline, error) {
+	if decider == nil {
+		decider = deterministicBSideDecider{}
+	}
+	bLedger := newBSideLotLedger(initialCash)
+	priceTL := newPriceTimeline()
 	for _, trade := range trades {
 		tradingDate := trade.CreatedAt
 		if trade.ExecutedAt.Valid {
@@ -9048,29 +9190,87 @@ func writeABSyntheticTradesAndDiffs(ctx context.Context, tx *sql.Tx, testID stri
 		price := abTradePrice(trade)
 		notional := abTradeNotional(trade, price)
 		realized := abTradeRealizedPnL(trade)
+		// Feed every A trade into the price timeline so B's
+		// MTM uses the same prices A executed at.
+		priceTL.Add(trade.Symbol, tradingDate, price)
 		reasonA := "[auto-shadow] A 组沿用当前基金真实决策作为基线影子交易。"
-		reasonB := fmt.Sprintf("[auto-shadow] B 组根据策略参数进行影子执行，交易规模系数 %.2f。", scale)
+		// A side is always the mirror of the real fund's trade.
 		if err := insertABShadowTrade(ctx, tx, testID, variantA.ID, tradingDate, trade.Symbol, trade.Side, trade.Quantity, price, notional, realized, reasonA); err != nil {
-			return err
+			return bLedger, priceTL, err
 		}
-		bQty := trade.Quantity * scale
-		bNotional := notional * scale
-		bRealized := realized * scale
-		if err := insertABShadowTrade(ctx, tx, testID, variantB.ID, tradingDate, trade.Symbol, trade.Side, bQty, price, bNotional, bRealized, reasonB); err != nil {
-			return err
+		// B side goes through the decider. Errors fall back to
+		// deterministic inside the decider impl, so we just need
+		// to handle a clean error from the call itself.
+		decision, err := decider.DecideTrade(ctx, variantB, trade, bsideCtx)
+		if err != nil {
+			// Defensive fallback in case a custom decider returns
+			// an error: synthesize a deterministic decision so
+			// AnalyzeTest still completes.
+			decision, err = (deterministicBSideDecider{}).DecideTrade(ctx, variantB, trade, bsideCtx)
+			if err != nil {
+				return bLedger, priceTL, err
+			}
+		}
+		// Skip = B chose not to trade. Record a decision diff
+		// (so the dashboard can show "B passed on this signal")
+		// but no row in ab_test_variant_trades AND no ledger
+		// mutation — B's positions / cash stay where they were.
+		if decision.Skip {
+			_, derr := tx.ExecContext(ctx, `
+				INSERT INTO ab_test_decision_diffs (test_id, trading_date, symbol, variant_a_action, variant_b_action, return_impact, explanation)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`, testID, tradingDate, trade.Symbol, strings.ToUpper(trade.Side), "SKIP", -realized/math.Max(math.Abs(notional), 1)*100, "[auto-shadow] B 组本次未参与该笔交易："+decision.Reasoning)
+			if derr != nil {
+				return bLedger, priceTL, derr
+			}
+			continue
+		}
+		// Transform A trade × decision → B trade. Drop the
+		// trade entirely if the transformation came back !ok
+		// (e.g., side override produced an unknown side, or
+		// scale × qty went to zero).
+		bQty, bPrice, bSide, ok := applyBSideDecision(trade.Side, trade.Quantity, price, decision)
+		if !ok {
+			continue
+		}
+		// Apply to ledger — this is the source of truth for
+		// B's realized PnL. We use the ledger's PnL on the
+		// trade row instead of the old `realized * scale` proxy
+		// because the ledger reflects FIFO matching against
+		// B's actual lots, not just A's outcome scaled by qty.
+		applyResult := bLedger.Apply(tradingDate, trade.Symbol, bSide, bQty, bPrice)
+		bRealized := applyResult.RealizedPnL
+		bNotional := math.Abs(applyResult.Applied * bPrice)
+		// If the LLM tried to flip A's side and the override was
+		// dropped by applyBSideDecision (already handled above),
+		// or applyResult.Applied is zero (ledger no-op'd it,
+		// e.g., naked SELL with no inventory), skip the trade
+		// row but still record a decision diff so the dashboard
+		// can show what B intended.
+		if applyResult.Applied <= 0 {
+			impactNote := "[auto-shadow] B 组决策被账本拒绝（如无库存可卖）："
+			_, derr := tx.ExecContext(ctx, `
+				INSERT INTO ab_test_decision_diffs (test_id, trading_date, symbol, variant_a_action, variant_b_action, return_impact, explanation)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`, testID, tradingDate, trade.Symbol, strings.ToUpper(trade.Side), "REJECT", 0.0, impactNote+decision.Reasoning)
+			if derr != nil {
+				return bLedger, priceTL, derr
+			}
+			continue
+		}
+		if err := insertABShadowTrade(ctx, tx, testID, variantB.ID, tradingDate, trade.Symbol, bSide, applyResult.Applied, bPrice, bNotional, bRealized, decision.Reasoning); err != nil {
+			return bLedger, priceTL, err
 		}
 		impact := 0.0
 		if math.Abs(notional) > 0 {
 			impact = (bRealized - realized) / math.Abs(notional) * 100
 		}
-		_, err := tx.ExecContext(ctx, `
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO ab_test_decision_diffs (test_id, trading_date, symbol, variant_a_action, variant_b_action, return_impact, explanation)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`, testID, tradingDate, trade.Symbol, strings.ToUpper(trade.Side), fmt.Sprintf("%s x%.2f", strings.ToUpper(trade.Side), scale), impact, fmt.Sprintf("[auto-shadow] B 组相对 A 组调整 %s 的交易规模，用于评估策略参数变化的收益影响。", trade.Symbol))
+			VALUES ($1, $2, $3, $4, $5, $6, $7)`, testID, tradingDate, trade.Symbol, strings.ToUpper(trade.Side), fmt.Sprintf("%s x%.2f", bSide, decision.QuantityScale), impact, decision.Reasoning)
 		if err != nil {
-			return err
+			return bLedger, priceTL, err
 		}
 	}
-	return nil
+	return bLedger, priceTL, nil
 }
 
 func insertABShadowTrade(ctx context.Context, tx *sql.Tx, testID, variantID string, tradingDate time.Time, symbol, side string, qty, price, notional, realized float64, reasoning string) error {
@@ -9080,36 +9280,85 @@ func insertABShadowTrade(ctx context.Context, tx *sql.Tx, testID, variantID stri
 	return err
 }
 
-func writeABSyntheticLearningEvents(ctx context.Context, tx *sql.Tx, testID string, variant abShadowVariantRuntime, tradingDate time.Time, treatment bool) error {
+func writeABSyntheticLearningEvents(ctx context.Context, tx *sql.Tx, testID string, variant abShadowVariantRuntime, tradingDate time.Time, treatment bool, decider abShadowBSideDecider, controlTrades []repository.TradeExecution, bsideCtx abBSideContext) error {
 	if len(variant.TeamSnapshot.Members) == 0 {
 		return nil
 	}
-	lessons := []string{"复盘影子交易结果，比较收益、回撤与换手差异"}
-	adjustments := []string{"继续观察样本充分性后再决定是否提升到真实 agent"}
-	if treatment {
-		lessons = append(lessons, "实验策略在影子环境中形成独立学习结果，不污染真实 agent")
-		adjustments = append(adjustments, "若置信度充足，可通过 promotion 将学习结果合并或覆盖到真实 agent")
-	}
-	lessonsJSON, _ := json.Marshal(lessons)
-	adjustmentsJSON, _ := json.Marshal(adjustments)
-	proposed, _ := json.Marshal(compactConfigMap(map[string]any{
-		"recentLessons":              lessons,
-		"lastRecommendedAdjustments": adjustments,
+	// Card K-1: when this is the treatment (B) variant and a
+	// non-deterministic decider is wired (LLM mode), we ask it
+	// to summarize the run end-to-end. The control (A) variant
+	// always uses the canned copy because A is a no-op replay
+	// of the real fund — there's nothing to "learn" beyond the
+	// baseline.
+	var lessons []string
+	var adjustments []string
+	var summaryText string
+	specialization := "{}"
+	proposedMap := map[string]any{
+		"recentLessons":              []string{},
+		"lastRecommendedAdjustments": []string{},
 		"shadowVariantKey":           variant.Key,
 		"shadowLearningMode":         abLearningModeShadowEphemeral,
-	}))
+	}
+
+	if treatment && decider != nil {
+		recap, recapErr := decider.SummarizeBLearning(ctx, variant, controlTrades, bsideCtx)
+		if recapErr == nil && (len(recap.Lessons) > 0 || len(recap.Adjustments) > 0 || strings.TrimSpace(recap.Summary) != "") {
+			lessons = recap.Lessons
+			adjustments = recap.Adjustments
+			summaryText = recap.Summary
+			if strings.TrimSpace(recap.SpecializationLearning) != "" {
+				if encoded, jerr := json.Marshal(map[string]string{"summary": recap.SpecializationLearning}); jerr == nil {
+					specialization = string(encoded)
+				}
+			}
+			proposedMap["recentLessons"] = recap.Lessons
+			proposedMap["lastRecommendedAdjustments"] = recap.Adjustments
+			if recap.ProposedEvolutionConfig != nil {
+				for k, v := range recap.ProposedEvolutionConfig {
+					proposedMap[k] = v
+				}
+			}
+		}
+	}
+	if len(lessons) == 0 {
+		lessons = []string{"复盘影子交易结果，比较收益、回撤与换手差异"}
+		if treatment {
+			lessons = append(lessons, "实验策略在影子环境中形成独立学习结果，不污染真实 agent")
+		}
+	}
+	if len(adjustments) == 0 {
+		adjustments = []string{"继续观察样本充分性后再决定是否提升到真实 agent"}
+		if treatment {
+			adjustments = append(adjustments, "若置信度充足，可通过 promotion 将学习结果合并或覆盖到真实 agent")
+		}
+	}
+	if strings.TrimSpace(summaryText) == "" {
+		summaryText = fmt.Sprintf("[auto-shadow] %s 组影子学习事件：%s", variant.Key, variant.Name)
+	}
+	// Re-fold the latest lessons/adjustments into the proposed
+	// config so a downstream "show me what would change in
+	// evolution_config" diff has a stable shape regardless of
+	// which decider produced the recap.
+	proposedMap["recentLessons"] = lessons
+	proposedMap["lastRecommendedAdjustments"] = adjustments
+	lessonsJSON, _ := json.Marshal(lessons)
+	adjustmentsJSON, _ := json.Marshal(adjustments)
+	proposed, _ := json.Marshal(compactConfigMap(proposedMap))
+
 	for _, member := range variant.TeamSnapshot.Members {
 		if strings.TrimSpace(member.AgentID) == "" {
 			continue
 		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO ab_test_agent_learning_events (test_id, variant_id, agent_id, trading_date, summary, lessons, adjustments, specialization_learning, proposed_evolution_config)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (variant_id, agent_id, trading_date) DO UPDATE SET
 			  summary = EXCLUDED.summary,
 			  lessons = EXCLUDED.lessons,
 			  adjustments = EXCLUDED.adjustments,
-			  proposed_evolution_config = EXCLUDED.proposed_evolution_config`, testID, variant.ID, member.AgentID, tradingDate, fmt.Sprintf("[auto-shadow] %s 组影子学习事件：%s", variant.Key, variant.Name), lessonsJSON, adjustmentsJSON, proposed)
+			  specialization_learning = EXCLUDED.specialization_learning,
+			  proposed_evolution_config = EXCLUDED.proposed_evolution_config`, testID, variant.ID, member.AgentID, tradingDate, summaryText, lessonsJSON, adjustmentsJSON, specialization, proposed)
 		if err != nil {
 			return err
 		}

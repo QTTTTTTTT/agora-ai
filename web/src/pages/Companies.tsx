@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { apiGet, apiPost, formatApiError, getStoredSession, logoutSession } from "../lib/api";
 import { formatMoneyForDisplay, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
 import { AutoExecuteInlineToggle, type AutoExecuteConfig } from "../components/AutoExecuteControls";
+import { FundAssistDialog } from "../components/FundAssistDialog";
 
 interface Company {
   id: string;
@@ -854,6 +855,7 @@ const Companies: React.FC = () => {
   const [fundForm, setFundForm] = useState<CreateFundFormData>(INITIAL_FUND_FORM);
   const [fundSaving, setFundSaving] = useState(false);
   const [fundError, setFundError] = useState<string | null>(null);
+  const [assistTargetCompany, setAssistTargetCompany] = useState<Company | null>(null);
   const currentSession = getStoredSession();
 
   const copy = useMemo(
@@ -1260,6 +1262,12 @@ const Companies: React.FC = () => {
                         >
                           {copy.createFirstFund}
                         </button>
+                        <button
+                          onClick={() => setAssistTargetCompany(company)}
+                          className="mt-4 ml-2 rounded-lg border border-indigo-300 bg-white px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-50"
+                        >
+                          AI 辅助创建
+                        </button>
                       </div>
                     ) : (
                       <div className="mt-6 space-y-3">
@@ -1315,6 +1323,13 @@ const Companies: React.FC = () => {
                         >
                           + {copy.addFund}
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => setAssistTargetCompany(company)}
+                          className="ml-2 rounded-lg border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
+                        >
+                          AI 辅助创建
+                        </button>
                       </div>
                     ) : null}
                   </div>
@@ -1344,6 +1359,28 @@ const Companies: React.FC = () => {
         onClose={closeCreateFundModal}
         onChange={updateFundForm}
         onSubmit={handleCreateFund}
+      />
+
+      <FundAssistDialog
+        open={assistTargetCompany !== null}
+        companyId={assistTargetCompany?.id ?? ""}
+        companyName={assistTargetCompany?.name ?? ""}
+        onClose={() => setAssistTargetCompany(null)}
+        onCreated={(resp) => {
+          setAssistTargetCompany(null);
+          // After successful AI-assisted creation, the parent
+          // typically wants to refresh the company list (so the
+          // new fund + agents appear) and surface a toast / nav.
+          // We chose nav-to-fund because that's where the user
+          // gets immediate value (dashboard, team, decision
+          // center) and the empty-state of /funds/{id} renders
+          // helpful next-step nudges. The list refresh happens
+          // automatically the next time the user hits the
+          // companies page since useEffect refetches on mount.
+          if (resp.fundId) {
+            navigate(`/funds/${resp.fundId}`);
+          }
+        }}
       />
     </>
   );

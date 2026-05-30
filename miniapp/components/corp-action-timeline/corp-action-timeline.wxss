@@ -1,0 +1,166 @@
+.ca-card {
+  background: #ffffff;
+  border-radius: 16rpx;
+  padding: 0;
+  margin: 0 16rpx 16rpx;
+  border: 1rpx solid #eef0f5;
+  overflow: hidden;
+}
+
+.ca-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 24rpx;
+}
+
+.ca-title-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.ca-title {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #1f2937;
+  letter-spacing: 1rpx;
+}
+
+.ca-subtitle {
+  font-size: 22rpx;
+  color: #9ca3af;
+  margin-top: 4rpx;
+}
+
+.ca-toggle {
+  font-size: 24rpx;
+  color: #4f46e5;
+  font-weight: 500;
+}
+
+.ca-body {
+  padding: 0 24rpx 24rpx;
+}
+
+.ca-state {
+  padding: 40rpx 0;
+  text-align: center;
+  color: #6b7280;
+  font-size: 24rpx;
+}
+
+.ca-state--error {
+  color: #b91c1c;
+}
+
+.ca-state--empty {
+  color: #9ca3af;
+}
+
+.ca-retry {
+  display: inline-block;
+  margin-top: 12rpx;
+  padding: 8rpx 24rpx;
+  background: #dc2626;
+  color: #fff;
+  border-radius: 8rpx;
+  font-size: 22rpx;
+}
+
+.ca-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.ca-row {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 14rpx 0;
+  border-bottom: 1rpx solid #f3f4f6;
+}
+
+.ca-row:last-child {
+  border-bottom: none;
+}
+
+.ca-row-left {
+  flex: 0 0 auto;
+  width: 180rpx;
+  display: flex;
+  flex-direction: column;
+}
+
+.ca-date {
+  font-size: 24rpx;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.ca-instrument {
+  font-size: 20rpx;
+  color: #9ca3af;
+  margin-top: 4rpx;
+  line-height: 1.4;
+}
+
+.ca-row-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4rpx;
+}
+
+.ca-badge {
+  font-size: 18rpx;
+  padding: 4rpx 12rpx;
+  border-radius: 999rpx;
+  line-height: 1;
+}
+
+.ca-badge--split {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.ca-badge--cash_dividend {
+  background: #d1fae5;
+  color: #047857;
+}
+
+.ca-badge--combined {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.ca-badge--reverse_split {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.ca-summary {
+  font-size: 22rpx;
+  color: #374151;
+}
+
+.ca-share-delta {
+  font-size: 20rpx;
+  font-weight: 600;
+}
+
+.ca-share-delta--up {
+  color: #059669;
+}
+
+.ca-share-delta--down {
+  color: #dc2626;
+}
+
+.ca-cash-credit {
+  font-size: 20rpx;
+  color: #047857;
+  font-weight: 500;
+}

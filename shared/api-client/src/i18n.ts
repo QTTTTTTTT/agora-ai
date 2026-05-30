@@ -133,6 +133,117 @@ export interface Messages {
     sectionDanger: string;
     recentEvents: string;
   };
+  corpActions: {
+    title: string;
+    subtitle: string;
+    expand: string;
+    collapse: string;
+    loading: string;
+    error: string;
+    retry: string;
+    empty: string;
+    typeSplit: string;
+    typeCashDividend: string;
+    typeStockDividend: string;
+    typeCombined: string;
+    sharesLabel: string;
+    costLabel: string;
+    cashLabel: string;
+    exDateLabel: string;
+  };
+  benchmark: {
+    title: string;
+    subtitle: string;
+    fund: string;
+    days7: string;
+    days30: string;
+    days90: string;
+    days180: string;
+    days365: string;
+    expand: string;
+    collapse: string;
+    loading: string;
+    empty: string;
+    error: string;
+    retry: string;
+    seriesPicker: string;
+    addSeries: string;
+    partialFailureToast: string;
+    legendStart: string;
+    holdingOverlapDominantTitle: string;
+    holdingOverlapDominantBody: string;
+    holdingOverlapPartialTitle: string;
+    holdingOverlapPartialBody: string;
+    holdingOverlapSwitchToAlpha: string;
+  };
+  holdingsSeries: {
+    title: string;
+    subtitle: string;
+    expand: string;
+    collapse: string;
+    loading: string;
+    error: string;
+    retry: string;
+    empty: string;
+    vsEntry: string;
+    vsStart: string;
+    partialFailureToast: string;
+    days30: string;
+    days90: string;
+    days180: string;
+  };
+  abShadow: {
+    sectionTitle: string;
+    sectionSubtitle: string;
+    expand: string;
+    collapse: string;
+    loading: string;
+    error: string;
+    retry: string;
+    empty: string;
+    notAnalyzedYet: string;
+    columnA: string;
+    columnB: string;
+    eventCount: string;
+    latestDate: string;
+    lessons: string;
+    adjustments: string;
+    summaries: string;
+    timeline: string;
+    memories: string;
+    proposedDiff: string;
+    diffAdded: string;
+    diffChanged: string;
+    diffRemoved: string;
+    noDiff: string;
+    deterministicShadowBanner: string;
+  };
+  abAttribution: {
+    sectionTitle: string;
+    sectionSubtitle: string;
+    expand: string;
+    collapse: string;
+    loading: string;
+    error: string;
+    retry: string;
+    empty: string;
+    columnSymbol: string;
+    columnTradesA: string;
+    columnTradesB: string;
+    columnPnLA: string;
+    columnPnLB: string;
+    columnTurnoverA: string;
+    columnTurnoverB: string;
+    columnGap: string;
+    columnGapPct: string;
+    columnWinner: string;
+    winnerA: string;
+    winnerB: string;
+    winnerTie: string;
+    totalsTitle: string;
+    avgPnL: string;
+    winRate: string;
+  };
 }
 
 export const messages: Record<LocaleId, Messages> = {
@@ -248,6 +359,117 @@ export const messages: Record<LocaleId, Messages> = {
       sectionDanger: '会话',
       recentEvents: '最近事件',
     },
+    corpActions: {
+      title: '分红 · 拆股 · 配股记录',
+      subtitle: '近期发生在持仓上的公司行动事件',
+      expand: '展开',
+      collapse: '收起',
+      loading: '加载中…',
+      error: '加载失败',
+      retry: '重试',
+      empty: '近期无公司行动事件',
+      typeSplit: '拆股 / 送股',
+      typeCashDividend: '现金分红',
+      typeStockDividend: '送股转增',
+      typeCombined: '派股 + 派现',
+      sharesLabel: '份额',
+      costLabel: '成本',
+      cashLabel: '现金到账',
+      exDateLabel: '除权日',
+    },
+    benchmark: {
+      title: '基金 vs 大盘',
+      subtitle: '净值与基准指数同起点归一化（起始 = 100）',
+      fund: '本基金',
+      days7: '7 天',
+      days30: '30 天',
+      days90: '90 天',
+      days180: '180 天',
+      days365: '1 年',
+      expand: '展开',
+      collapse: '收起',
+      loading: '加载中…',
+      empty: '暂无可对比的净值数据',
+      error: '基准加载失败',
+      retry: '重试',
+      seriesPicker: '基准指数',
+      addSeries: '添加基准',
+      partialFailureToast: '部分基准未能加载，已跳过',
+      legendStart: '起始 = 100',
+      holdingOverlapDominantTitle: '本基金主仓 ≈ 大盘',
+      holdingOverlapDominantBody: '基金主要持仓与所选基准为同一标的，"对比"模式下两条曲线会高度重合；建议切换到 Alpha 视图查看相对超额收益。',
+      holdingOverlapPartialTitle: '部分持仓与基准重叠',
+      holdingOverlapPartialBody: '基金部分持仓与所选基准为同一标的，"对比"视图可能不直观，可切到 Alpha 视图观察相对走势。',
+      holdingOverlapSwitchToAlpha: '切换到 Alpha 视图',
+    },
+    holdingsSeries: {
+      title: '持仓走势',
+      subtitle: '每只持仓在该窗口内的归一化股价（起始 = 100）',
+      expand: '展开',
+      collapse: '收起',
+      loading: '加载中…',
+      error: '走势加载失败',
+      retry: '重试',
+      empty: '暂无可绘制的持仓',
+      vsEntry: '相对成本',
+      vsStart: '相对窗口起点',
+      partialFailureToast: '以下持仓未能加载',
+      days30: '30 天',
+      days90: '90 天',
+      days180: '180 天',
+    },
+    abShadow: {
+      sectionTitle: '影子 Agent 对比',
+      sectionSubtitle: '查看 A 组与 B 组每位 agent 在影子运行中学到的内容、调整建议与提议的演化配置差异',
+      expand: '展开',
+      collapse: '收起',
+      loading: '加载影子 agent 数据…',
+      error: '加载影子 agent 数据失败',
+      retry: '重试',
+      empty: '该测试暂无影子 agent 学习数据',
+      notAnalyzedYet: '完成"生成分析"后即可查看 A vs B 影子 agent 学习对比',
+      columnA: 'A 组',
+      columnB: 'B 组',
+      eventCount: '学习事件数',
+      latestDate: '最新事件日期',
+      lessons: '关键经验',
+      adjustments: '建议调整',
+      summaries: '近期总结',
+      timeline: '逐日时间线',
+      memories: '影子记忆',
+      proposedDiff: '提议的 evolution_config 变更',
+      diffAdded: '新增',
+      diffChanged: '变更（旧 → 新）',
+      diffRemoved: '移除',
+      noDiff: '与当前 evolution_config 一致，无需变更',
+      deterministicShadowBanner: '当前 B 组采用确定性影子执行策略，数据用于策略参数 sanity check；后续 Card K 将引入真实 LLM 影子运行。',
+    },
+    abAttribution: {
+      sectionTitle: '按标的归因',
+      sectionSubtitle: '比较 A vs B 在每只标的上的成交、成本与盈亏差异',
+      expand: '展开',
+      collapse: '收起',
+      loading: '加载归因数据…',
+      error: '加载归因数据失败',
+      retry: '重试',
+      empty: '该测试暂无影子交易归因数据',
+      columnSymbol: '标的',
+      columnTradesA: 'A 笔数',
+      columnTradesB: 'B 笔数',
+      columnPnLA: 'A 已实现盈亏',
+      columnPnLB: 'B 已实现盈亏',
+      columnTurnoverA: 'A 成交额',
+      columnTurnoverB: 'B 成交额',
+      columnGap: '差额（B − A）',
+      columnGapPct: '差额占成交额',
+      columnWinner: '胜出版本',
+      winnerA: 'A',
+      winnerB: 'B',
+      winnerTie: '持平',
+      totalsTitle: '总览',
+      avgPnL: '平均盈亏',
+      winRate: '盈利交易占比',
+    },
   },
   'en-US': {
     auth: {
@@ -360,6 +582,117 @@ export const messages: Record<LocaleId, Messages> = {
       sectionLanguage: 'Language',
       sectionDanger: 'Session',
       recentEvents: 'Recent events',
+    },
+    corpActions: {
+      title: 'Dividends · Splits · Rights Issues',
+      subtitle: 'Recent corporate actions applied to this fund',
+      expand: 'Show',
+      collapse: 'Hide',
+      loading: 'Loading…',
+      error: 'Failed to load',
+      retry: 'Retry',
+      empty: 'No recent corporate actions',
+      typeSplit: 'Split / Stock div.',
+      typeCashDividend: 'Cash dividend',
+      typeStockDividend: 'Stock dividend',
+      typeCombined: 'Stock + cash',
+      sharesLabel: 'Shares',
+      costLabel: 'Cost',
+      cashLabel: 'Cash credit',
+      exDateLabel: 'Ex-date',
+    },
+    benchmark: {
+      title: 'Fund vs Market',
+      subtitle: 'Fund NAV and benchmarks rebased to 100 at start',
+      fund: 'This fund',
+      days7: '7d',
+      days30: '30d',
+      days90: '90d',
+      days180: '180d',
+      days365: '1y',
+      expand: 'Show',
+      collapse: 'Hide',
+      loading: 'Loading…',
+      empty: 'No NAV history yet',
+      error: 'Failed to load benchmarks',
+      retry: 'Retry',
+      seriesPicker: 'Benchmarks',
+      addSeries: 'Add benchmark',
+      partialFailureToast: 'Some benchmarks could not be loaded',
+      legendStart: 'start = 100',
+      holdingOverlapDominantTitle: 'Your fund ≈ this benchmark',
+      holdingOverlapDominantBody: 'The fund\'s largest position is the same instrument as the selected benchmark, so the two lines in Compare mode track each other closely. Switch to the Alpha view to see relative outperformance.',
+      holdingOverlapPartialTitle: 'Holdings overlap the benchmark',
+      holdingOverlapPartialBody: 'Some of the fund\'s holdings overlap the selected benchmark, which can make the Compare view harder to read. Switch to Alpha for relative performance.',
+      holdingOverlapSwitchToAlpha: 'Switch to Alpha view',
+    },
+    holdingsSeries: {
+      title: 'Holdings trends',
+      subtitle: 'Per-holding normalized price (start = 100)',
+      expand: 'Show',
+      collapse: 'Hide',
+      loading: 'Loading…',
+      error: 'Failed to load trends',
+      retry: 'Retry',
+      empty: 'No holdings to plot',
+      vsEntry: 'vs entry',
+      vsStart: 'vs window start',
+      partialFailureToast: 'Holdings that couldn\'t be loaded',
+      days30: '30d',
+      days90: '90d',
+      days180: '180d',
+    },
+    abShadow: {
+      sectionTitle: 'Shadow agent comparison',
+      sectionSubtitle: 'See what each variant\u2019s agents learned during shadow execution \u2014 lessons, adjustments, and proposed evolution-config changes.',
+      expand: 'Show',
+      collapse: 'Hide',
+      loading: 'Loading shadow agents\u2026',
+      error: 'Failed to load shadow agents',
+      retry: 'Retry',
+      empty: 'No shadow learning data for this test yet',
+      notAnalyzedYet: 'Run \u201cGenerate analysis\u201d first to compare A vs B shadow agent learning.',
+      columnA: 'Variant A',
+      columnB: 'Variant B',
+      eventCount: 'Learning events',
+      latestDate: 'Latest event',
+      lessons: 'Lessons',
+      adjustments: 'Adjustments',
+      summaries: 'Recent summaries',
+      timeline: 'Daily timeline',
+      memories: 'Shadow memories',
+      proposedDiff: 'Proposed evolution_config change',
+      diffAdded: 'Added',
+      diffChanged: 'Changed (prev \u2192 new)',
+      diffRemoved: 'Removed',
+      noDiff: 'No change vs current evolution_config',
+      deterministicShadowBanner: 'Variant B currently uses deterministic shadow execution; numbers are sanity-check only. Card K will introduce real LLM shadow runs.',
+    },
+    abAttribution: {
+      sectionTitle: 'Per-symbol attribution',
+      sectionSubtitle: 'Compare A vs B trade count, turnover, and realized P&L per symbol.',
+      expand: 'Show',
+      collapse: 'Hide',
+      loading: 'Loading attribution\u2026',
+      error: 'Failed to load attribution',
+      retry: 'Retry',
+      empty: 'No shadow trade attribution for this test yet',
+      columnSymbol: 'Symbol',
+      columnTradesA: 'A trades',
+      columnTradesB: 'B trades',
+      columnPnLA: 'A realized P&L',
+      columnPnLB: 'B realized P&L',
+      columnTurnoverA: 'A turnover',
+      columnTurnoverB: 'B turnover',
+      columnGap: 'Gap (B \u2212 A)',
+      columnGapPct: 'Gap % of turnover',
+      columnWinner: 'Winner',
+      winnerA: 'A',
+      winnerB: 'B',
+      winnerTie: 'Tie',
+      totalsTitle: 'Totals',
+      avgPnL: 'Avg P&L',
+      winRate: 'Winning trade rate',
     },
   },
 };

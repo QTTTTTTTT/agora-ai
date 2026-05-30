@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { apiGet, apiPost, formatApiError } from "../lib/api";
+import { ABShadowAgentPanel } from "../components/ABShadowAgentPanel";
+import { ABOperationalAttributionTable } from "../components/ABOperationalAttributionTable";
 import {
   formatDateForLanguage,
   formatMoneyForDisplay,
@@ -1547,6 +1549,34 @@ const ABTestCompare: React.FC = () => {
                     </div>
                   </div>
                 )}
+
+                {/* Card D — Per-symbol attribution + shadow agent panels.
+                    Render OUTSIDE the `selected.results` block so users
+                    on `running` / `completed` tests can still see what
+                    the shadow run already produced (learning events
+                    are written even before `analyze` finalises results).
+                    Each panel is collapsible + lazy; the analyzed=false
+                    branch shows a friendly hint instead of a 500 spam.
+                    The feature is fund-agnostic — it works for every
+                    strategy_compare test regardless of which company /
+                    fund created it. */}
+                {selected.status !== "draft" ? (
+                  <>
+                    <ABOperationalAttributionTable
+                      testId={selected.id}
+                      analyzed={selected.status !== "draft"}
+                      language={language}
+                    />
+
+                    {selected.variableType === "strategy_compare" ? (
+                      <ABShadowAgentPanel
+                        testId={selected.id}
+                        analyzed={selected.status !== "draft"}
+                        language={language}
+                      />
+                    ) : null}
+                  </>
+                ) : null}
               </>
             )}
           </section>
