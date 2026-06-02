@@ -1355,6 +1355,95 @@ export interface LockupRecord {
   status: LockupStatus;
 }
 
+// ---------------------------------------------------------------------------
+// S7 / P3-1 — Factor exposure
+// ---------------------------------------------------------------------------
+
+// Factor enumerates the six canonical factor names the backend
+// understands. The string values match `internal/factorexposure.Factor`
+// and the CHECK constraint on `instrument_factor_loadings.factor`.
+export type Factor =
+  | "size"
+  | "value"
+  | "momentum"
+  | "quality"
+  | "lowvol"
+  | "market_beta";
+
+// All six factors in the canonical render order used by both the
+// engine and the admin UI. Exported as a tuple so callers can
+// switch on it without leaking magic strings.
+export const ALL_FACTORS: readonly Factor[] = [
+  "size",
+  "value",
+  "momentum",
+  "quality",
+  "lowvol",
+  "market_beta",
+] as const;
+
+// LoadingSource enumerates the upstream that wrote a loading row;
+// mirrors the CHECK constraint and the backend `LoadingSource`.
+export type LoadingSource =
+  | "manual"
+  | "eastmoney"
+  | "msci"
+  | "computed"
+  | "override";
+
+// InstrumentFactorLoading is one row of `instrument_factor_loadings`.
+// asof is the calibration vintage (YYYY-MM-DD); updated_at the
+// write timestamp in RFC3339Nano UTC.
+export interface InstrumentFactorLoading {
+  instrument_key: string;
+  factor: Factor;
+  asof: string;
+  loading: number;
+  source: LoadingSource;
+  note?: string;
+  updated_at: string;
+}
+
+// FactorExposureRow is one row of a portfolio-level snapshot.
+// loadings_asof is the most-recent calibration date among the
+// loadings that contributed; absent when no holding had a
+// loading for this factor.
+export interface FactorExposureRow {
+  factor: Factor;
+  net_exposure: number;
+  gross_exposure: number;
+  capital_pct: number;
+  holding_count: number;
+  loadings_asof?: string;
+}
+
+// FactorExposureSnapshot is the live read response. NAV is the
+// gross MV (sum of |market_value|). holdings_total / _covered
+// surface "this read covered X of Y holdings"; the UI shows a
+// coverage warning when covered < total.
+export interface FactorExposureSnapshot {
+  fund_id: string;
+  generated_at: string;
+  nav: number;
+  holdings_total: number;
+  holdings_covered: number;
+  oldest_loading_asof?: string;
+  exposures: FactorExposureRow[];
+}
+
+// FactorExposureTrendPoint is one historical snapshot row used by
+// the trend chart. Same shape as a FactorExposureRow but with the
+// calculation timestamp prepended.
+export interface FactorExposureTrendPoint {
+  calculated_at: string;
+  factor: Factor;
+  net_exposure: number;
+  gross_exposure: number;
+  capital_pct: number;
+  holding_count: number;
+  loadings_asof: string;
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

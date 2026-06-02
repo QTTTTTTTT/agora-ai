@@ -2146,6 +2146,114 @@ export async function reconcileAdminWSFeed(): Promise<{ ok: boolean }> {
 }
 
 // ---------------------------------------------------------------------------
+// Factor exposure (S7 / P3-1)
+// ---------------------------------------------------------------------------
+
+export type {
+  Factor,
+  LoadingSource as FactorLoadingSource,
+  InstrumentFactorLoading,
+  FactorExposureRow,
+  FactorExposureSnapshot,
+  FactorExposureTrendPoint,
+} from "@fundai/api-client";
+export { ALL_FACTORS } from "@fundai/api-client";
+
+export interface ListAdminFactorLoadingsResponse {
+  loadings: import("@fundai/api-client").InstrumentFactorLoading[];
+  factors: import("@fundai/api-client").Factor[];
+  row_count: number;
+}
+
+export interface UpsertFactorLoadingInput {
+  instrument_key: string;
+  factor: import("@fundai/api-client").Factor;
+  asof: string;
+  loading: number;
+  source?: import("@fundai/api-client").LoadingSource;
+  note?: string;
+}
+
+// listAdminFactorLoadings supports filtering by factor or
+// instrument_key; default limit on the server is 200, max 1000.
+export async function listAdminFactorLoadings(opts: {
+  factor?: import("@fundai/api-client").Factor;
+  instrumentKey?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ListAdminFactorLoadingsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.factor) qs.set("factor", opts.factor);
+  if (opts.instrumentKey) qs.set("instrument_key", opts.instrumentKey);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListAdminFactorLoadingsResponse>(
+    `/api/admin/factor-loadings${tail}`,
+  );
+}
+
+export async function upsertAdminFactorLoading(
+  input: UpsertFactorLoadingInput,
+): Promise<{ loading: import("@fundai/api-client").InstrumentFactorLoading }> {
+  return apiPost<{ loading: import("@fundai/api-client").InstrumentFactorLoading }>(
+    `/api/admin/factor-loadings`,
+    input,
+  );
+}
+
+export async function deleteAdminFactorLoading(opts: {
+  instrumentKey: string;
+  factor: import("@fundai/api-client").Factor;
+  asof: string;
+}): Promise<{ deleted: boolean }> {
+  const qs = new URLSearchParams({
+    instrument_key: opts.instrumentKey,
+    factor: opts.factor,
+    asof: opts.asof,
+  });
+  return apiDelete<{ deleted: boolean }>(
+    `/api/admin/factor-loadings?${qs.toString()}`,
+  );
+}
+
+// fetchFactorExposureSnapshot returns the live factor-exposure
+// view for a fund; pass persist=true to archive the snapshot in
+// the same round trip.
+export async function fetchFactorExposureSnapshot(
+  fundId: string,
+  opts: { persist?: boolean } = {},
+): Promise<{
+  snapshot: import("@fundai/api-client").FactorExposureSnapshot;
+  factors: import("@fundai/api-client").Factor[];
+  persist_error?: string;
+}> {
+  const qs = opts.persist ? "?persist=1" : "";
+  return apiGet<{
+    snapshot: import("@fundai/api-client").FactorExposureSnapshot;
+    factors: import("@fundai/api-client").Factor[];
+    persist_error?: string;
+  }>(`/api/funds/${encodeURIComponent(fundId)}/risk/factor-exposure${qs}`);
+}
+
+export async function fetchFactorExposureTrend(
+  fundId: string,
+  opts: { factor?: import("@fundai/api-client").Factor; limit?: number } = {},
+): Promise<{
+  points: import("@fundai/api-client").FactorExposureTrendPoint[];
+  factors: import("@fundai/api-client").Factor[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.factor) qs.set("factor", opts.factor);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    points: import("@fundai/api-client").FactorExposureTrendPoint[];
+    factors: import("@fundai/api-client").Factor[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/risk/factor-exposure/trend${tail}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

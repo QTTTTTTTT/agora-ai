@@ -22,6 +22,7 @@ import AdminReconSection from "../components/AdminReconSection";
 import AdminSurveillanceSection from "../components/AdminSurveillanceSection";
 import AdminBorrowSection from "../components/AdminBorrowSection";
 import AdminDrawdownSection from "../components/AdminDrawdownSection";
+import AdminFactorExposureSection from "../components/AdminFactorExposureSection";
 import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
@@ -1204,6 +1205,8 @@ const Admin: React.FC = () => {
           <AdminLockupSection language={language} />
 
           <AdminBorrowSection language={language} />
+
+          <AdminFactorExposureSection language={language} />
 
           <AdminWSFeedSection language={language} />
 

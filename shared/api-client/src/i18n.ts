@@ -738,6 +738,52 @@ export interface Messages {
     evictCacheAllButton: string;
     error: string;
   };
+  factorExposure: {
+    panelTitle: string;
+    panelSubtitle: string;
+    refresh: string;
+    loading: string;
+    empty: string;
+    error: string;
+    navLabel: string;
+    holdingsLabel: string;
+    coverageLabel: string;
+    loadingsAsOfLabel: string;
+    loadingsAsOfStale: string;
+    factorSize: string;
+    factorValue: string;
+    factorMomentum: string;
+    factorQuality: string;
+    factorLowVol: string;
+    factorMarketBeta: string;
+    netExposureLabel: string;
+    grossExposureLabel: string;
+    holdingCountLabel: string;
+    trendTitle: string;
+    trendEmpty: string;
+    adminPanelTitle: string;
+    adminPanelSubtitle: string;
+    adminListTitle: string;
+    adminListEmpty: string;
+    adminInstrumentKey: string;
+    adminFactorLabel: string;
+    adminAsOfLabel: string;
+    adminLoadingLabel: string;
+    adminSourceLabel: string;
+    adminNoteLabel: string;
+    adminUpdatedAtLabel: string;
+    adminFactorAll: string;
+    adminUpsertTitle: string;
+    adminUpsertSubmit: string;
+    adminUpsertSubmitting: string;
+    adminDeleteButton: string;
+    adminDeleteConfirm: string;
+    sourceManual: string;
+    sourceEastMoney: string;
+    sourceMSCI: string;
+    sourceComputed: string;
+    sourceOverride: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -1567,6 +1613,52 @@ export const messages: Record<LocaleId, Messages> = {
       evictCacheButton: '清理本行',
       evictCacheAllButton: '清空缓存',
       error: '加载失败',
+    },
+    factorExposure: {
+      panelTitle: '因子敞口',
+      panelSubtitle: '当前持仓在 size / value / momentum / quality / lowvol / market_beta 六个标准因子上的净敞口与总敞口，以及调用时的覆盖率。',
+      refresh: '刷新',
+      loading: '计算中…',
+      empty: '当前无持仓',
+      error: '加载失败',
+      navLabel: '总市值',
+      holdingsLabel: '持仓数',
+      coverageLabel: '覆盖率',
+      loadingsAsOfLabel: '校准日',
+      loadingsAsOfStale: '校准已过期',
+      factorSize: 'Size',
+      factorValue: 'Value',
+      factorMomentum: 'Momentum',
+      factorQuality: 'Quality',
+      factorLowVol: 'Low Vol',
+      factorMarketBeta: 'Market β',
+      netExposureLabel: '净敞口',
+      grossExposureLabel: '总敞口',
+      holdingCountLabel: '贡献持仓',
+      trendTitle: '30 天趋势',
+      trendEmpty: '尚无历史快照',
+      adminPanelTitle: '因子载荷管理',
+      adminPanelSubtitle: '维护 instrument_factor_loadings 表。校准来源 manual / msci / eastmoney / computed / override 分别对应人工录入、第三方供应、Quant Lab 计算与紧急覆写。',
+      adminListTitle: '当前校准记录',
+      adminListEmpty: '暂无校准记录',
+      adminInstrumentKey: '标的 Key',
+      adminFactorLabel: '因子',
+      adminAsOfLabel: '校准日',
+      adminLoadingLabel: '载荷',
+      adminSourceLabel: '来源',
+      adminNoteLabel: '备注',
+      adminUpdatedAtLabel: '更新时间',
+      adminFactorAll: '全部因子',
+      adminUpsertTitle: '新增 / 更新载荷',
+      adminUpsertSubmit: '保存',
+      adminUpsertSubmitting: '保存中…',
+      adminDeleteButton: '删除',
+      adminDeleteConfirm: '确认删除这条载荷记录？',
+      sourceManual: '人工',
+      sourceEastMoney: '东方财富',
+      sourceMSCI: 'MSCI',
+      sourceComputed: 'Quant Lab',
+      sourceOverride: '紧急覆写',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -2406,6 +2498,52 @@ export const messages: Record<LocaleId, Messages> = {
       evictCacheButton: 'Evict row',
       evictCacheAllButton: 'Evict all',
       error: 'Failed to load',
+    },
+    factorExposure: {
+      panelTitle: 'Factor exposure',
+      panelSubtitle: 'Net and gross exposure of the current portfolio across the six canonical factors (size / value / momentum / quality / lowvol / market_beta), with coverage of the holdings the read was based on.',
+      refresh: 'Refresh',
+      loading: 'Computing…',
+      empty: 'No active holdings',
+      error: 'Failed to load',
+      navLabel: 'Gross MV',
+      holdingsLabel: 'Holdings',
+      coverageLabel: 'Coverage',
+      loadingsAsOfLabel: 'Loadings as of',
+      loadingsAsOfStale: 'Stale calibration',
+      factorSize: 'Size',
+      factorValue: 'Value',
+      factorMomentum: 'Momentum',
+      factorQuality: 'Quality',
+      factorLowVol: 'Low Vol',
+      factorMarketBeta: 'Market β',
+      netExposureLabel: 'Net',
+      grossExposureLabel: 'Gross',
+      holdingCountLabel: 'Contributing holdings',
+      trendTitle: '30-day trend',
+      trendEmpty: 'No historical snapshot yet',
+      adminPanelTitle: 'Factor loading store',
+      adminPanelSubtitle: 'Manage the instrument_factor_loadings table. Sources manual / msci / eastmoney / computed / override correspond to manual entry, third-party vendor data, Quant Lab batch output, and emergency overrides.',
+      adminListTitle: 'Current calibrations',
+      adminListEmpty: 'No calibrations on file',
+      adminInstrumentKey: 'Instrument key',
+      adminFactorLabel: 'Factor',
+      adminAsOfLabel: 'Asof',
+      adminLoadingLabel: 'Loading',
+      adminSourceLabel: 'Source',
+      adminNoteLabel: 'Note',
+      adminUpdatedAtLabel: 'Updated',
+      adminFactorAll: 'All factors',
+      adminUpsertTitle: 'Add / update loading',
+      adminUpsertSubmit: 'Save',
+      adminUpsertSubmitting: 'Saving…',
+      adminDeleteButton: 'Delete',
+      adminDeleteConfirm: 'Delete this calibration row?',
+      sourceManual: 'Manual',
+      sourceEastMoney: 'EastMoney',
+      sourceMSCI: 'MSCI',
+      sourceComputed: 'Quant Lab',
+      sourceOverride: 'Override',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',

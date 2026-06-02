@@ -34,6 +34,7 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/broker"
+	"github.com/fundai/server/internal/factorexposure"
 	"github.com/fundai/server/internal/fx"
 	"github.com/fundai/server/internal/lotbackfill"
 	"github.com/fundai/server/internal/mailer"
@@ -572,6 +573,10 @@ type Services struct {
 	LockupRepo             *lockup.Repo
 	BorrowRepo             *securitiesborrow.Repo
 	BorrowCache            *securitiesborrow.Cache
+	// FactorExposureRepo is the S7 / P3-1 instrument factor
+	// loading store. nil-safe: admin endpoints short-circuit to
+	// 503 when unwired (e.g. tests).
+	FactorExposureRepo     *factorexposure.Repo
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -809,6 +814,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		LockupRepo:          lockupRepo,
 		BorrowRepo:          borrowRepo,
 		BorrowCache:         borrowCache,
+		FactorExposureRepo:  factorexposure.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
 		WSFeedCache:         wsFeedCache,
@@ -1191,6 +1197,12 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// keep ballooning a single file.
 	if fs := newFundSettingsHandler(svc); fs != nil {
 		fs.RegisterRoutes(mux)
+	}
+	// S7 / P3-1 — per-fund factor-exposure read + trend.
+	// Computes the six canonical factor exposures from current
+	// holdings on demand; archives a snapshot when ?persist=1.
+	if feh := newFactorExposureHandler(svc); feh != nil {
+		feh.RegisterRoutes(mux)
 	}
 
 	// ---- SPA fallback: serve React static files ----

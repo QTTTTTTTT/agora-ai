@@ -14,6 +14,7 @@ import (
 
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
+	"github.com/fundai/server/internal/factorexposure"
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketimpact"
 	"github.com/fundai/server/internal/lockup"
@@ -84,6 +85,11 @@ type adminHandler struct {
 	// nil → endpoints return 503.
 	borrowRepo  *securitiesborrow.Repo
 	borrowCache *securitiesborrow.Cache
+
+	// factorExposureRepo backs the S7 / P3-1 instrument factor
+	// loading admin endpoints (calibration CRUD). nil → endpoints
+	// return 503 via the registration short-circuit.
+	factorExposureRepo *factorexposure.Repo
 
 	// wsFeedManager / wsFeedCache / wsFeedBridge back the S6.5
 	// WebSocket-real-time market-data admin endpoints
@@ -234,6 +240,8 @@ func newAdminHandler(svc *Services) *adminHandler {
 		borrowRepo:  svc.BorrowRepo,
 		borrowCache: svc.BorrowCache,
 
+		factorExposureRepo: svc.FactorExposureRepo,
+
 		wsFeedManager: svc.WSFeedManager,
 		wsFeedCache:   svc.WSFeedCache,
 		wsFeedBridge:  svc.WSFeedBridge,
@@ -301,6 +309,8 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerLockupAdminRoutes(mux)
 	h.registerBorrowAdminRoutes(mux)
 	h.registerWSFeedAdminRoutes(mux)
+	// S7 / P3-1 — instrument factor-loading calibration store.
+	h.registerFactorExposureAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

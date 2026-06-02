@@ -28,6 +28,7 @@ import {
   useAppPreferences,
   type AppLanguage,
 } from "../lib/preferences";
+import FactorExposurePanel from "../components/FactorExposurePanel";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
 
 // PR-3A9: a dedicated /funds/:id/performance route that compresses
@@ -751,6 +752,12 @@ const FundPerformance: React.FC = () => {
           it has its own refresh affordance and is independent of the
           window picker above. */}
       <StrategyAttributionPanel fundId={fundId} language={language} />
+
+      {/* S7 / P3-1 — factor-exposure dashboard. Six canonical
+          factors (size / value / momentum / quality / lowvol /
+          market_beta) computed from current holdings against the
+          instrument_factor_loadings calibration table. */}
+      <FactorExposurePanel fundId={fundId} language={language} />
     </div>
   );
 };
