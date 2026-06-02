@@ -2793,6 +2793,73 @@ export type {
 } from "@fundai/api-client";
 
 // ---------------------------------------------------------------------------
+// Model A/B experiments (S10.3 / S10.4)
+// ---------------------------------------------------------------------------
+
+export async function listModelABExperiments(opts: {
+  status?: string;
+} = {}): Promise<import("@fundai/api-client").ListModelABExperimentsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.status) qs.set("status", opts.status);
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<import("@fundai/api-client").ListModelABExperimentsResponse>(
+    `/api/admin/model-ab/experiments${tail}`,
+  );
+}
+
+export async function getModelABExperiment(
+  id: string,
+): Promise<import("@fundai/api-client").ModelABExperiment> {
+  return apiGet<import("@fundai/api-client").ModelABExperiment>(
+    `/api/admin/model-ab/experiments/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function getModelABReport(
+  id: string,
+  opts: { from?: string; to?: string } = {},
+): Promise<import("@fundai/api-client").ModelABReport> {
+  const qs = new URLSearchParams();
+  if (opts.from) qs.set("from", opts.from);
+  if (opts.to) qs.set("to", opts.to);
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<import("@fundai/api-client").ModelABReport>(
+    `/api/admin/model-ab/experiments/${encodeURIComponent(id)}/report${tail}`,
+  );
+}
+
+export async function createModelABExperiment(
+  body: import("@fundai/api-client").CreateModelABExperimentRequest,
+): Promise<import("@fundai/api-client").ModelABExperiment> {
+  return apiPost<import("@fundai/api-client").ModelABExperiment>(
+    `/api/admin/model-ab/experiments`,
+    body,
+  );
+}
+
+export async function setModelABExperimentStatus(
+  id: string,
+  body: import("@fundai/api-client").SetModelABStatusRequest,
+): Promise<import("@fundai/api-client").ModelABExperiment> {
+  return apiPatch<import("@fundai/api-client").ModelABExperiment>(
+    `/api/admin/model-ab/experiments/${encodeURIComponent(id)}/status`,
+    body,
+  );
+}
+
+export type {
+  ModelABArm,
+  ModelABExperiment,
+  ModelABExperimentStatus,
+  ModelABScope,
+  ListModelABExperimentsResponse,
+  CreateModelABExperimentRequest,
+  SetModelABStatusRequest,
+  ModelABReport,
+  ModelABArmMetric,
+} from "@fundai/api-client";
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

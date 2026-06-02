@@ -2012,6 +2012,101 @@ export interface ResumeWorkflowCheckpointResponse {
   status: string;
 }
 
+// ---------------------------------------------------------------------------
+// Model A/B experiments (S10.3 / S10.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * 模型 A/B 实验的一条 arm 配置。镜像 server/internal/modelab/types.go
+ * 的 ArmConfig。API Key NOT included — the server resolves system keys
+ * at hook time.
+ */
+export interface ModelABArm {
+  name: string;
+  provider: string;
+  model_name: string;
+  base_url?: string;
+  model_tier?: string;
+  temperature?: number;
+  max_tokens?: number;
+}
+
+export type ModelABExperimentStatus =
+  | "draft"
+  | "running"
+  | "paused"
+  | "completed"
+  | "archived";
+
+export type ModelABScope = "global" | "fund" | "agent_role" | "agent_id";
+
+export interface ModelABExperiment {
+  id: string;
+  name: string;
+  description?: string;
+  scope: ModelABScope;
+  scope_target?: string;
+  step_filter: string[];
+  arms: ModelABArm[];
+  traffic_split: number[];
+  status: ModelABExperimentStatus;
+  start_at?: string;
+  end_at?: string;
+  max_total_tokens?: number;
+  tokens_used: number;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListModelABExperimentsResponse {
+  experiments: ModelABExperiment[];
+}
+
+export interface CreateModelABExperimentRequest {
+  name: string;
+  description?: string;
+  scope: ModelABScope;
+  scope_target?: string;
+  step_filter?: string[];
+  arms: ModelABArm[];
+  traffic_split: number[];
+  max_total_tokens?: number;
+  start_immediate?: boolean;
+}
+
+export interface SetModelABStatusRequest {
+  status: ModelABExperimentStatus;
+}
+
+export interface ModelABReport {
+  experiment: {
+    id: string;
+    name: string;
+    scope: string;
+    scope_target?: string;
+    status: string;
+    started_at?: string;
+    ended_at?: string;
+  };
+  window: { from?: string; to?: string };
+  arms: ModelABArmMetric[];
+}
+
+export interface ModelABArmMetric {
+  arm_index: number;
+  arm_name: string;
+  arm_label: string;
+  primary_count: number;
+  shadow_count: number;
+  error_count: number;
+  avg_latency_ms: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_micro: number;
+  agreement_with_primary_pct: number; // -1 if not computed
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

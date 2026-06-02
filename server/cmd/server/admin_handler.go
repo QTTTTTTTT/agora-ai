@@ -21,6 +21,7 @@ import (
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketimpact"
 	"github.com/fundai/server/internal/lockup"
+	"github.com/fundai/server/internal/modelab"
 	"github.com/fundai/server/internal/securitiesborrow"
 	"github.com/fundai/server/internal/quota"
 	"github.com/fundai/server/internal/quotecache"
@@ -129,6 +130,15 @@ type adminHandler struct {
 	wsFeedManager *wsfeed.Manager
 	wsFeedCache   *quotecache.Cache
 	wsFeedBridge  *wsFeedSubscriptionBridge
+
+	// modelABRepo + modelABReporter + modelABResolver back the
+	// Sprint 10.3 / 10.4 admin endpoints (list, get, report,
+	// create, set-status). All nil-safe; when unwired the
+	// modelab routes simply stay unregistered, mirroring the
+	// pattern used by other admin sub-modules.
+	modelABRepo     *modelab.Repo
+	modelABReporter *modelab.Reporter
+	modelABResolver *modelab.Resolver
 }
 
 // adminSuperAdminChecker implements audit.SuperAdminChecker by reading
@@ -283,6 +293,12 @@ func newAdminHandler(svc *Services) *adminHandler {
 		wsFeedManager: svc.WSFeedManager,
 		wsFeedCache:   svc.WSFeedCache,
 		wsFeedBridge:  svc.WSFeedBridge,
+
+		modelABRepo:     svc.ModelABRepo,
+		modelABReporter: svc.ModelABReporter,
+	}
+	if svc.LLMRuntime != nil {
+		h.modelABResolver = svc.LLMRuntime.ModelABResolver()
 	}
 	if svc.WorkflowService != nil {
 		if svc.WorkflowService.scheduler != nil {
@@ -371,6 +387,8 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerAgentReputationAdminRoutes(mux)
 	// S9.2 — per-step workflow checkpoint timeline + resume.
 	h.registerWorkflowCheckpointAdminRoutes(mux)
+	// S10.3 / 10.4 — model A/B experiment list / report / CRUD.
+	h.registerModelABAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

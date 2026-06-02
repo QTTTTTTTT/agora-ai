@@ -27,6 +27,7 @@ import AdminStressScenariosSection from "../components/AdminStressScenariosSecti
 import AdminBrinsonCompositionsSection from "../components/AdminBrinsonCompositionsSection";
 import AdminAgentReputationSection from "../components/AdminAgentReputationSection";
 import { AdminWorkflowCheckpointsSection } from "../components/AdminWorkflowCheckpointsSection";
+import { AdminModelABSection } from "../components/AdminModelABSection";
 import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
@@ -1222,6 +1223,9 @@ const Admin: React.FC = () => {
 
           {/* S9.2 — per-step workflow checkpoint timeline + resume. */}
           <AdminWorkflowCheckpointsSection language={language} />
+
+          {/* S10.3 / S10.4 — model A/B experiments (list, report, CRUD). */}
+          <AdminModelABSection language={language} />
 
           <AdminWSFeedSection language={language} />
 

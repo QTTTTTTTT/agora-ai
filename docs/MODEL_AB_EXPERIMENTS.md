@@ -121,12 +121,46 @@ arms you need their outputs side-by-side. The `ShadowDispatcher`
 sees the wrapped client transparently. Production code does not need to
 change.
 
+## Sprint 10.3 — Metrics aggregator + admin endpoints (delivered)
+
+`internal/modelab/report.go` adds a `Reporter` that joins
+`model_ab_assignments` (primary counts) with `model_ab_shadow_responses`
+(shadow latency / tokens / cost / errors) into a per-arm metric
+roll-up — `Report{ Experiment, Window, Arms[] }`. Empty-arm rows still
+appear in the report so operators can tell which arms are getting zero
+traffic vs which are misconfigured.
+
+REST endpoints (`server/cmd/server/admin_model_ab.go`):
+
+```
+GET    /api/admin/model-ab/experiments          list + status filter
+GET    /api/admin/model-ab/experiments/{id}     one experiment + arms
+GET    /api/admin/model-ab/experiments/{id}/report?from=…&to=…
+POST   /api/admin/model-ab/experiments          create (validates arms + sum)
+PATCH  /api/admin/model-ab/experiments/{id}/status flip lifecycle
+```
+
+All mutating endpoints write an `audit.MutationEvent` row. Status flips
+also invalidate the in-process resolver cache so a "pause" takes effect
+within the next call (instead of after the 30s cache TTL).
+
+Web UI:
+`web/src/components/AdminModelABSection.tsx` is mounted under the Admin
+page, between the workflow-checkpoint section and the WS-feed section.
+It renders three blocks: experiment list (with status filter), per-arm
+report table for the selected experiment, and a create-experiment form
+(arms + traffic split JSON, scope picker, optional max-token cap).
+
+The shared API client (`@fundai/api-client`) exports the new types
+(`ModelABExperiment`, `ModelABArm`, `ModelABReport`, etc.) and
+`web/src/lib/api.ts` exposes them via typed `apiGet` / `apiPost` /
+`apiPatch` helpers — same pattern as workflow-checkpoints.
+
 ## What's still missing (later sprints)
 
-- **S10.3** — aggregator + REST API + React report page that shows
-  decision agreement, latency, cost, and downstream α per arm.
-- **S10.4** — admin CRUD UI on top of the REST API so operators don't
-  have to write SQL.
+- **S10.4** — extra admin niceties (clone existing experiment, edit
+  arms / traffic split on a draft, archive bulk). The current CRUD is
+  enough to run a productive A/B; S10.4 adds operator ergonomics.
 - **S11** — orthogonal: surface LLM-failure-fallback as a first-class
   `decision_source` marker so users can see which calls were actually
   LLM-generated vs rule-based fallback.
@@ -147,7 +181,12 @@ revisions.
 - `server/internal/modelab/resolver.go` — cached experiment lookup + sticky-arm upsert
 - `server/internal/modelab/hook.go` — `BuildLLMConfig` + `Resolver.AsLLMHook`
 - `server/internal/modelab/dispatcher.go` — `ShadowDispatcher` + `ConfigChatClient`
+- `server/internal/modelab/report.go` — `Reporter` + windowed list helpers
 - `server/internal/llm/model_ab_hook.go` — typed hook interface installed on `ModelRouter`
 - `server/internal/llm/client.go` — `MultiProviderClient.ChatWithConfig`
 - `server/cmd/server/wiring_adapters.go` — `llmRuntime.AttachModelABResolver`
+- `server/cmd/server/admin_model_ab.go` — admin REST handlers (list / report / create / set-status)
 - `server/cmd/server/main.go` — `modelab.NewRepo(db)` + attach call
+- `shared/api-client/src/index.ts` — TypeScript types
+- `web/src/lib/api.ts` — client wrappers
+- `web/src/components/AdminModelABSection.tsx` — Admin UI

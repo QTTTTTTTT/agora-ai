@@ -623,6 +623,14 @@ type Services struct {
 	// orchestrator silently skips persistence and the admin
 	// endpoints return empty lists.
 	WorkflowCheckpointRepo *repository.WorkflowCheckpointRepo
+
+	// ModelABRepo + ModelABReporter back the Sprint 10 model A/B
+	// admin endpoints (S10.3 reports + S10.4 CRUD). Both are
+	// nil-safe — when unwired the admin endpoints return 503.
+	// The router and shadow dispatcher use ModelABRepo
+	// independently via llmRuntime.AttachModelABResolver.
+	ModelABRepo     *modelab.Repo
+	ModelABReporter *modelab.Reporter
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -733,6 +741,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// and the runtime behaves exactly as before.
 	modelABRepo := modelab.NewRepo(db)
 	modelABResolver := modelab.NewResolver(modelABRepo)
+	modelABReporter := modelab.NewReporter(modelABRepo)
 	llmRuntime.SetModelABRepo(modelABRepo)
 	llmRuntime.AttachModelABResolver(modelABResolver)
 
@@ -1024,6 +1033,14 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	workflowCheckpointRepo := repository.NewWorkflowCheckpointRepo(db)
 	workflowService = workflowService.WithWorkflowCheckpointRepo(workflowCheckpointRepo)
 	services.WorkflowCheckpointRepo = workflowCheckpointRepo
+
+	// Sprint 10.3 — expose modelab repo + reporter to the admin
+	// handler so the report / CRUD endpoints can read and mutate
+	// experiments. Both are nil-safe; when the modelab tables
+	// are unmigrated the endpoints surface 5xx from the repo
+	// layer, which the admin UI degrades on.
+	services.ModelABRepo = modelABRepo
+	services.ModelABReporter = modelABReporter
 
 	// Sprint 9.3 — social sentiment ingestion. The registry
 	// reads per-platform env flags; when no provider is enabled
