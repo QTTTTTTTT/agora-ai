@@ -533,6 +533,19 @@ type DecisionInput struct {
 	// outcome has crossed the alpha threshold yet).
 	AgentTrackRecord string
 
+	// Sprint 9.4 — three-stage decision pipeline. When the
+	// ThreeStageEngine is wired (instead of the legacy
+	// LLMDecisionEngine), it runs a trader-proposal stage and a
+	// risk-assessment stage UPSTREAM of the PM final call and
+	// renders both as small markdown blocks here. The legacy
+	// single-shot engine simply omits these fields from the JSON
+	// payload (omitempty), so callers that opt out see identical
+	// behaviour to pre-9.4. The PM-final prompt cites the
+	// proposal + assessment as additional priors when present;
+	// the rules section explains how to weigh them.
+	TraderProposal string
+	RiskAssessment string
+
 	// IntradaySnapshots is the Sprint 3 / L1 soft signal block — one
 	// row per symbol in the candidate universe. Trend direction +
 	// vol-z + vol-ratio per symbol; the PM reasons about timing while

@@ -202,6 +202,13 @@ Adhere to these rules without exception:
        - Tags carrying symbols / sectors should be cross-referenced against today's candidate list — a precedent that mentions a current candidate is worth more than one that doesn't, even at the same similarity.
        - Similarity below 0.6 is weak signal; cite only if the snippet itself is unusually specific to today's plan.
        - When the block is absent treat it as "no semantically-similar precedent indexed yet" (e.g. embedding backfill not run). Do NOT infer novelty from absence.
+   - When input.traderProposal AND input.riskAssessment are present (Sprint 9.4 three-stage decision pipeline): the desk has already run a TRADER stage (you see a candidate action plan with sides, sizes and urgency) and a RISK OFFICER stage (you see a verdict + per-action concerns + suggested mitigations). YOU ARE THE PM in the final stage; the desk expects you to honour the chain:
+       - When riskAssessment.verdict = "veto" on a specific action, the default is to drop that action OR demote it to "watch" / "hold". Override the veto only when you can articulate WHY the risk officer is wrong, and cite the specific signal block (correlations, exposure, riskBudget, etc.) that justifies overriding.
+       - When a concern has severity = "block", treat the proposed action as veto'd at the per-action level even if the plan-level verdict is "approve_with_mitigations". A "block" concern on AAPL means AAPL action gets dropped/demoted; other actions remain on the table.
+       - When a concern has severity = "warn", apply the suggested mitigation if possible (e.g. "size down by half") and cite the mitigation in reasoning. If applying the mitigation is impossible (no smaller size below lot floor) prefer "watch" over "buy" for that line.
+       - When a concern has severity = "info", you may still take the proposed action; surface the concern in reasoning so the audit trail captures that you considered it.
+       - The traderProposal stance + reasoning is a soft prior on the OVERALL plan shape. If you disagree with the proposed stance, you may emit a different action mix, but explain the divergence in reasoning ("trader proposed net long defensive; PM downgrades to flat given the riskBudget drawdown scalar < 0.5").
+       - When BOTH blocks are absent, the three-stage pipeline isn't wired for this fund — fall back to the standard single-shot reasoning. Do NOT invent a proposal/assessment in their absence.
 
 5. Locale: write reasoning text in the same language the input MacroBriefing / RoundtableConsensus uses (Chinese ⇄ English). If the input is empty or mixed, default to Chinese.
 
@@ -235,6 +242,8 @@ func userPrompt(input DecisionInput) string {
 		SleeveScorecard     string                       `json:"sleeveScorecard,omitempty"`
 		LessonReplay        string                       `json:"lessonReplay,omitempty"`
 		AgentTrackRecord    string                       `json:"agentTrackRecord,omitempty"`
+		TraderProposal      string                       `json:"traderProposal,omitempty"`
+		RiskAssessment      string                       `json:"riskAssessment,omitempty"`
 		QuantSnapshots      []quantSnapshotPromptItem    `json:"quantSnapshots,omitempty"`
 		UniverseRanking     []universeRankingPromptItem  `json:"universeRanking,omitempty"`
 		QualityScores       []qualityScorePromptItem     `json:"qualityScores,omitempty"`
@@ -277,6 +286,8 @@ func userPrompt(input DecisionInput) string {
 		SleeveScorecard:     strings.TrimSpace(input.SleeveScorecard),
 		LessonReplay:        strings.TrimSpace(input.LessonReplay),
 		AgentTrackRecord:    strings.TrimSpace(input.AgentTrackRecord),
+		TraderProposal:      strings.TrimSpace(input.TraderProposal),
+		RiskAssessment:      strings.TrimSpace(input.RiskAssessment),
 		QuantSnapshots:      buildQuantSnapshotPromptItems(input.QuantSnapshots),
 		UniverseRanking:     buildUniverseRankingPromptItems(input.UniverseRanking),
 		QualityScores:       buildQualityScorePromptItems(input.QualityScores),

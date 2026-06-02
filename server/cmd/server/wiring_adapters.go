@@ -14705,11 +14705,52 @@ func buildLLMDecisionEngine(runtime *llmRuntime, fundID string) decision.Decisio
 	if client == nil {
 		return nil
 	}
-	return &decision.LLMDecisionEngine{
+	inner := &decision.LLMDecisionEngine{
 		Client:    client,
 		ModelTier: llm.TierCritical,
 		StepName:  "pm_decision",
 		FundID:    fundID,
+	}
+	// Sprint 9.4 — opt-in three-stage pipeline. When the env flag
+	// is set, wrap the legacy single-shot engine with
+	// Trader.Propose → Risk.Assess → PM.FinalApprove. The wrapper
+	// satisfies the same DecisionEngine interface so downstream
+	// callers (workflowRuntime, fallback gates) need no changes.
+	// The trader + risk stages route to TierStandard by default —
+	// the PM final stage stays on TierCritical via the inner
+	// engine — to keep cost amortised. Operators can override
+	// with PM_THREE_STAGE_PROPOSAL_TIER / _ASSESSMENT_TIER if
+	// they want a different cost/quality tradeoff.
+	if envFlagEnabled("PM_THREE_STAGE_DECISION") {
+		return &decision.ThreeStageEngine{
+			Inner:          inner,
+			Client:         client,
+			ProposalTier:   llmTierFromEnv("PM_THREE_STAGE_PROPOSAL_TIER", llm.TierStandard),
+			AssessmentTier: llmTierFromEnv("PM_THREE_STAGE_ASSESSMENT_TIER", llm.TierStandard),
+			StepName:       "pm_decision",
+			FundID:         fundID,
+			StageTimeout:   60 * time.Second,
+		}
+	}
+	return inner
+}
+
+// llmTierFromEnv reads an env var and returns the requested LLM
+// tier. Unset / unknown values fall back to the provided default
+// so a typo doesn't silently route to the wrong cost bucket.
+func llmTierFromEnv(name string, fallback llm.ModelTier) llm.ModelTier {
+	v := strings.TrimSpace(os.Getenv(name))
+	switch strings.ToLower(v) {
+	case "":
+		return fallback
+	case "simple", "fast":
+		return llm.TierSimple
+	case "standard":
+		return llm.TierStandard
+	case "critical":
+		return llm.TierCritical
+	default:
+		return fallback
 	}
 }
 
