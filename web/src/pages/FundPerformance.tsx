@@ -32,6 +32,7 @@ import FactorExposurePanel from "../components/FactorExposurePanel";
 import VaRPanel from "../components/VaRPanel";
 import StressTestPanel from "../components/StressTestPanel";
 import BrinsonAttributionPanel from "../components/BrinsonAttributionPanel";
+import AgentReputationSection from "../components/AgentReputationSection";
 import AnalystPanelSection from "../components/AnalystPanelSection";
 import BullBearDebateSection from "../components/BullBearDebateSection";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
@@ -790,6 +791,12 @@ const FundPerformance: React.FC = () => {
           the S8.1 panel: each round Bull and Bear argue against
           each other, neither allowed to settle on neutral. */}
       <BullBearDebateSection fundId={fundId} language={language} />
+
+      {/* S8.4 — per-agent reputation ledger. Each analyst /
+          advocate / PM's historical calls are scored against
+          realised forward returns so the PM can up- or
+          down-weight them going forward. */}
+      <AgentReputationSection fundId={fundId} language={language} />
     </div>
   );
 };

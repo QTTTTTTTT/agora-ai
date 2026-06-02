@@ -2680,6 +2680,83 @@ export async function getFundDebate(
 }
 
 // ---------------------------------------------------------------------------
+// S8.4 — Agent reputation ledger
+// ---------------------------------------------------------------------------
+
+export type {
+  AgentReputationKind,
+  AgentReputationStats,
+  AgentReputationOutcome,
+  AgentReputationRebuildRequest,
+  AgentReputationRebuildResponse,
+} from "@fundai/api-client";
+export { ALL_AGENT_REPUTATION_KINDS } from "@fundai/api-client";
+
+export async function listFundAgentReputationStats(
+  fundId: string,
+  opts: {
+    kind?: import("@fundai/api-client").AgentReputationKind;
+    limit?: number;
+  } = {},
+): Promise<{
+  stats: import("@fundai/api-client").AgentReputationStats[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.kind) qs.set("kind", opts.kind);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    stats: import("@fundai/api-client").AgentReputationStats[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/agent-reputation/stats${tail}`);
+}
+
+export async function listFundAgentReputationOutcomes(
+  fundId: string,
+  opts: {
+    agentId?: string;
+    symbol?: string;
+    limit?: number;
+  } = {},
+): Promise<{
+  outcomes: import("@fundai/api-client").AgentReputationOutcome[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.agentId) qs.set("agent_id", opts.agentId);
+  if (opts.symbol) qs.set("symbol", opts.symbol);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    outcomes: import("@fundai/api-client").AgentReputationOutcome[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/agent-reputation/outcomes${tail}`);
+}
+
+export async function listAdminAgentReputationStats(opts: {
+  fundId?: string;
+  kind?: import("@fundai/api-client").AgentReputationKind;
+  limit?: number;
+} = {}): Promise<{
+  stats: import("@fundai/api-client").AgentReputationStats[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.kind) qs.set("kind", opts.kind);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    stats: import("@fundai/api-client").AgentReputationStats[];
+  }>(`/api/admin/agent-reputation/stats${tail}`);
+}
+
+export async function rebuildAgentReputation(
+  body: import("@fundai/api-client").AgentReputationRebuildRequest = {},
+): Promise<import("@fundai/api-client").AgentReputationRebuildResponse> {
+  return apiPost<import("@fundai/api-client").AgentReputationRebuildResponse>(
+    `/api/admin/agent-reputation/rebuild`,
+    body,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

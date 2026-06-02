@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fundai/server/internal/agentreputation"
 	"github.com/fundai/server/internal/analystreport"
 	"github.com/fundai/server/internal/debaterepo"
 	"github.com/fundai/server/internal/api"
@@ -601,6 +602,15 @@ type Services struct {
 	// DebateProvider returns the configured Bull/Bear debate
 	// orchestrator for a fund. nil → /api/funds/{fundId}/debates/run replies 503.
 	DebateProvider         DebateProvider
+	// AgentReputationRepo backs the S8.4 per-agent reputation
+	// ledger (agentreputation.Repo). nil-safe.
+	AgentReputationRepo    *agentreputation.Repo
+	// AgentReputationLoop is the background backfill driver
+	// that turns analyst panels + debate transcripts into
+	// realised-alpha outcomes. nil → admin rebuild endpoint
+	// returns 503; the read endpoints continue to serve
+	// whatever is in the table.
+	AgentReputationLoop    *agentReputationLoop
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -843,6 +853,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		BrinsonRepo:         brinson.NewRepo(db),
 		AnalystReportRepo:   analystreport.NewRepo(db),
 		DebateRepo:          debaterepo.NewRepo(db),
+		AgentReputationRepo: agentreputation.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
 		WSFeedCache:         wsFeedCache,
@@ -874,6 +885,35 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// Uses the same nil-LLM path as the panel in S8.1 so the
 	// advocates fall back to their deterministic skeletons.
 	services.DebateProvider = newDefaultDebateProvider(services)
+
+	// S8.4 — install the agent reputation backfill loop. The
+	// realised-return function defaults to a no-op (every fund
+	// produces zero outcomes until a real price source is
+	// wired) so the loop can run safely on every deployment;
+	// the reputation tables stay queryable in the read API.
+	if services.AgentReputationRepo != nil && db != nil {
+		repFundRepo := repository.NewFundRepo(db)
+		fundLister := func(ctx context.Context) ([]string, error) {
+			funds, err := repFundRepo.ListActive(ctx)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]string, 0, len(funds))
+			for _, f := range funds {
+				ids = append(ids, f.ID)
+			}
+			return ids, nil
+		}
+		services.AgentReputationLoop = newAgentReputationLoop(
+			services.AgentReputationRepo,
+			newAnalystPanelSource(services.AnalystReportRepo),
+			newDebateTranscriptSource(services.DebateRepo),
+			nullRealisedReturn,
+			agentReputationLoopOptions{
+				FundLister: fundLister,
+			},
+		)
+	}
 
 	// P1-5: order replay. Re-seed the simulator from open trade rows
 	// persisted before the last shutdown. Runs synchronously so the
@@ -1285,6 +1325,13 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// Services is the dependency-injection seam.
 	if dh := newDebateHandler(svc); dh != nil {
 		dh.RegisterRoutes(mux, svc.AnalystPanelProvider, svc.DebateProvider)
+	}
+
+	// S8.4 — per-agent reputation ledger. Read-only fund routes
+	// for the dashboard; admin routes (cross-fund view + rebuild
+	// trigger) live on *adminHandler.
+	if rh := newAgentReputationHandler(svc); rh != nil {
+		rh.RegisterRoutes(mux)
 	}
 
 	// ---- SPA fallback: serve React static files ----
@@ -4454,6 +4501,15 @@ func main() {
 		})
 		go func() {
 			reconLoopHandle.Run(context.Background())
+		}()
+	}
+
+	// S8.4 — kick off the per-agent reputation backfill loop.
+	// Runs once per 24h on every active fund. No-op when the
+	// repo / loop weren't wired (e.g. tests).
+	if svc.AgentReputationLoop != nil {
+		go func() {
+			svc.AgentReputationLoop.Run(context.Background())
 		}()
 	}
 

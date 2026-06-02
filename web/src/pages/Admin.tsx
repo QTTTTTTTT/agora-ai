@@ -25,6 +25,7 @@ import AdminDrawdownSection from "../components/AdminDrawdownSection";
 import AdminFactorExposureSection from "../components/AdminFactorExposureSection";
 import AdminStressScenariosSection from "../components/AdminStressScenariosSection";
 import AdminBrinsonCompositionsSection from "../components/AdminBrinsonCompositionsSection";
+import AdminAgentReputationSection from "../components/AdminAgentReputationSection";
 import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
@@ -1213,6 +1214,10 @@ const Admin: React.FC = () => {
           <AdminStressScenariosSection language={language} />
 
           <AdminBrinsonCompositionsSection language={language} />
+
+          {/* S8.4 — per-agent reputation ledger (cross-fund view +
+              rebuild trigger). */}
+          <AdminAgentReputationSection language={language} />
 
           <AdminWSFeedSection language={language} />
 

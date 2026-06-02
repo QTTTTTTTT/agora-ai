@@ -1902,6 +1902,73 @@ export interface DebateRunRequest extends AnalystRunRequest {
   rounds?: number;
 }
 
+// ---------------------------------------------------------------------------
+// S8.4 — Agent reputation ledger
+// ---------------------------------------------------------------------------
+//
+// The reputation ledger keeps a rolling per-agent realised-alpha
+// record. The backfill driver (server) reads each analyst-panel
+// and debate-transcript, multiplies the agent's direction by
+// the symbol's forward return, and writes one outcome per
+// (agent, symbol, asof, horizon). The aggregate stats table
+// (decisions, hits, avg_alpha, hit_rate) is then recomputed.
+
+export type AgentReputationKind = "analyst" | "advocate" | "pm" | "researcher";
+
+export const ALL_AGENT_REPUTATION_KINDS: readonly AgentReputationKind[] = [
+  "analyst",
+  "advocate",
+  "pm",
+  "researcher",
+];
+
+export interface AgentReputationStats {
+  fund_id: string;
+  agent_id: string;
+  agent_name: string;
+  agent_kind: AgentReputationKind;
+  category: string;
+  decisions_count: number;
+  hits_count: number;
+  misses_count: number;
+  hit_rate: number; // 0..1
+  avg_alpha: number; // realised - benchmark, averaged
+  sum_alpha: number;
+  avg_confidence: number; // 0..100
+  last_decision_at?: string;
+  updated_at: string;
+}
+
+export interface AgentReputationOutcome {
+  id: string;
+  fund_id: string;
+  agent_id: string;
+  agent_name: string;
+  agent_kind: AgentReputationKind;
+  category: string;
+  symbol: string;
+  asof: string;
+  direction: AnalystDirection;
+  confidence: number; // 0..100
+  realised_return: number; // forward window return fraction
+  benchmark_return: number;
+  alpha: number; // realised - benchmark
+  horizon_days: number;
+  source_panel_id?: string;
+  source_debate_id?: string;
+  note?: string;
+  created_at: string;
+}
+
+export interface AgentReputationRebuildRequest {
+  fund_id?: string; // empty = all funds
+}
+
+export interface AgentReputationRebuildResponse {
+  outcomes_written: number;
+  status: string;
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

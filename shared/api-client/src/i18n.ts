@@ -996,6 +996,43 @@ export interface Messages {
     llmModelFallback: string;
     llmModelLLM: string;
   };
+  agentReputation: {
+    title: string;
+    subtitle: string;
+    loading: string;
+    error: string;
+    retry: string;
+    empty: string;
+    kindFilter: string;
+    kindAll: string;
+    kindAnalyst: string;
+    kindAdvocate: string;
+    kindPM: string;
+    kindResearcher: string;
+    agentColumn: string;
+    kindColumn: string;
+    categoryColumn: string;
+    decisionsColumn: string;
+    hitRateColumn: string;
+    avgAlphaColumn: string;
+    avgConfidenceColumn: string;
+    lastDecisionColumn: string;
+    outcomesTitle: string;
+    outcomesEmpty: string;
+    outcomeSymbol: string;
+    outcomeHorizon: string;
+    outcomeDirection: string;
+    outcomeAlpha: string;
+    outcomeRealised: string;
+    outcomeBenchmark: string;
+    outcomeAsOf: string;
+    rebuildButton: string;
+    rebuildAllButton: string;
+    rebuildRunning: string;
+    rebuildSuccess: string;
+    rebuildError: string;
+    horizonDays: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -2083,6 +2120,43 @@ export const messages: Record<LocaleId, Messages> = {
       confidenceLabel: '置信度 {value}%',
       llmModelFallback: '规则回退',
       llmModelLLM: 'LLM',
+    },
+    agentReputation: {
+      title: '智能体声望榜',
+      subtitle: '每位分析师 / 多空研究员 / PM 在历史上对每只股票的看多看空判断，是否真的跑赢了基准？后台 backfill 把每次发声折算成 1d / 5d / 21d 的 realised alpha，下表按平均 alpha 从高到低排序，可作为后续 PM 加权与奖惩的依据。',
+      loading: '加载中…',
+      error: '加载失败',
+      retry: '重试',
+      empty: '暂无声望数据',
+      kindFilter: '角色',
+      kindAll: '全部',
+      kindAnalyst: '分析师',
+      kindAdvocate: '多空研究员',
+      kindPM: 'PM',
+      kindResearcher: '通用研究员',
+      agentColumn: '智能体',
+      kindColumn: '角色',
+      categoryColumn: '类别',
+      decisionsColumn: '决策次数',
+      hitRateColumn: '命中率',
+      avgAlphaColumn: '平均 Alpha',
+      avgConfidenceColumn: '平均置信度',
+      lastDecisionColumn: '最近一次发声',
+      outcomesTitle: '近期单笔结算',
+      outcomesEmpty: '暂无单笔结算记录',
+      outcomeSymbol: '标的',
+      outcomeHorizon: '持仓窗口',
+      outcomeDirection: '方向',
+      outcomeAlpha: 'Alpha',
+      outcomeRealised: '实际收益',
+      outcomeBenchmark: '基准收益',
+      outcomeAsOf: '发声日期',
+      rebuildButton: '重算本基金声望',
+      rebuildAllButton: '重算全部基金',
+      rebuildRunning: '正在重算…',
+      rebuildSuccess: '完成：写入 {n} 条结算',
+      rebuildError: '重算失败',
+      horizonDays: '{n} 天',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -3180,6 +3254,43 @@ export const messages: Record<LocaleId, Messages> = {
       confidenceLabel: 'confidence {value}%',
       llmModelFallback: 'rule fallback',
       llmModelLLM: 'LLM',
+    },
+    agentReputation: {
+      title: 'Agent reputation ledger',
+      subtitle: 'Did each analyst / advocate / PM\'s historical calls actually beat the benchmark? A nightly backfill turns every panel + debate into 1d / 5d / 21d realised-alpha outcomes. The table below is sorted by average alpha — the PM uses this signal to up- or down-weight agents going forward.',
+      loading: 'Loading…',
+      error: 'Failed to load',
+      retry: 'Retry',
+      empty: 'No reputation data yet',
+      kindFilter: 'Role',
+      kindAll: 'All',
+      kindAnalyst: 'Analyst',
+      kindAdvocate: 'Advocate',
+      kindPM: 'PM',
+      kindResearcher: 'Researcher',
+      agentColumn: 'Agent',
+      kindColumn: 'Role',
+      categoryColumn: 'Category',
+      decisionsColumn: 'Decisions',
+      hitRateColumn: 'Hit rate',
+      avgAlphaColumn: 'Avg α',
+      avgConfidenceColumn: 'Avg confidence',
+      lastDecisionColumn: 'Last call',
+      outcomesTitle: 'Recent settled outcomes',
+      outcomesEmpty: 'No settled outcomes yet',
+      outcomeSymbol: 'Symbol',
+      outcomeHorizon: 'Horizon',
+      outcomeDirection: 'Direction',
+      outcomeAlpha: 'Alpha',
+      outcomeRealised: 'Realised return',
+      outcomeBenchmark: 'Benchmark return',
+      outcomeAsOf: 'Call date',
+      rebuildButton: 'Rebuild this fund',
+      rebuildAllButton: 'Rebuild all funds',
+      rebuildRunning: 'Rebuilding…',
+      rebuildSuccess: 'Done: wrote {n} outcomes',
+      rebuildError: 'Rebuild failed',
+      horizonDays: '{n}d',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',

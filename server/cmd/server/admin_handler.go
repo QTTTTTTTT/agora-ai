@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fundai/server/internal/agentreputation"
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/brinson"
@@ -102,6 +103,16 @@ type adminHandler struct {
 	// composition library. nil → registration short-circuits and
 	// the admin / per-fund Brinson endpoints respond 503.
 	brinsonRepo *brinson.Repo
+
+	// agentReputationRepo backs the S8.4 per-agent reputation
+	// ledger. nil → admin endpoints short-circuit and the
+	// per-fund handler returns 503.
+	agentReputationRepo *agentreputation.Repo
+
+	// agentReputationRebuildSink is the rebuild trigger the
+	// admin POST endpoint calls. Typically *agentReputationLoop;
+	// tests can plug a stub. nil → rebuild returns 503.
+	agentReputationRebuildSink agentReputationRebuildSink
 
 	// wsFeedManager / wsFeedCache / wsFeedBridge back the S6.5
 	// WebSocket-real-time market-data admin endpoints
@@ -258,6 +269,8 @@ func newAdminHandler(svc *Services) *adminHandler {
 
 		brinsonRepo: svc.BrinsonRepo,
 
+		agentReputationRepo: svc.AgentReputationRepo,
+
 		wsFeedManager: svc.WSFeedManager,
 		wsFeedCache:   svc.WSFeedCache,
 		wsFeedBridge:  svc.WSFeedBridge,
@@ -267,6 +280,12 @@ func newAdminHandler(svc *Services) *adminHandler {
 			h.scheduler = svc.WorkflowService.scheduler
 		}
 		h.workflowService = svc.WorkflowService
+	}
+	// S8.4 — typed-nil safe wiring for the rebuild sink. The
+	// interface field stays a true Go nil when the loop is
+	// absent, so the 503 fast-path in the admin handler works.
+	if svc.AgentReputationLoop != nil {
+		h.agentReputationRebuildSink = svc.AgentReputationLoop
 	}
 	// Wire Sprint 3 / M5 skill inbox if both DB and mailer are
 	// configured. Without mailer we still expose list + shadow-eval;
@@ -331,6 +350,8 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerStressAdminRoutes(mux)
 	// S7 / P3-4 — Brinson benchmark composition library.
 	h.registerBrinsonAdminRoutes(mux)
+	// S8.4 — per-agent reputation ledger admin view + rebuild.
+	h.registerAgentReputationAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.
