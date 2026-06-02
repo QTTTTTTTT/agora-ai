@@ -15,6 +15,7 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/factorexposure"
+	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketimpact"
 	"github.com/fundai/server/internal/lockup"
@@ -90,6 +91,11 @@ type adminHandler struct {
 	// loading admin endpoints (calibration CRUD). nil → endpoints
 	// return 503 via the registration short-circuit.
 	factorExposureRepo *factorexposure.Repo
+
+	// stressRepo backs the S7 / P3-3 admin-managed stress
+	// scenarios library. nil → registration short-circuits and
+	// the admin / per-fund stress endpoints respond 503.
+	stressRepo *stress.Repo
 
 	// wsFeedManager / wsFeedCache / wsFeedBridge back the S6.5
 	// WebSocket-real-time market-data admin endpoints
@@ -242,6 +248,8 @@ func newAdminHandler(svc *Services) *adminHandler {
 
 		factorExposureRepo: svc.FactorExposureRepo,
 
+		stressRepo: svc.StressRepo,
+
 		wsFeedManager: svc.WSFeedManager,
 		wsFeedCache:   svc.WSFeedCache,
 		wsFeedBridge:  svc.WSFeedBridge,
@@ -311,6 +319,8 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerWSFeedAdminRoutes(mux)
 	// S7 / P3-1 — instrument factor-loading calibration store.
 	h.registerFactorExposureAdminRoutes(mux)
+	// S7 / P3-3 — admin-managed stress scenarios library.
+	h.registerStressAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

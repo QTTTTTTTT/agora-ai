@@ -30,6 +30,7 @@ import {
 } from "../lib/preferences";
 import FactorExposurePanel from "../components/FactorExposurePanel";
 import VaRPanel from "../components/VaRPanel";
+import StressTestPanel from "../components/StressTestPanel";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
 
 // PR-3A9: a dedicated /funds/:id/performance route that compresses
@@ -766,6 +767,11 @@ const FundPerformance: React.FC = () => {
           nav_snapshots.daily_return. The spread across methods
           surfaces fat-tail risk that parametric alone hides. */}
       <VaRPanel fundId={fundId} language={language} />
+
+      {/* S7 / P3-3 — Stress-scenario runner. Pick a named
+          scenario (historical / hypothetical / regulatory) and
+          project its shocks onto the current portfolio. */}
+      <StressTestPanel fundId={fundId} language={language} />
     </div>
   );
 };

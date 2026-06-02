@@ -35,6 +35,7 @@ import (
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/broker"
 	"github.com/fundai/server/internal/factorexposure"
+	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/fx"
 	"github.com/fundai/server/internal/lotbackfill"
 	"github.com/fundai/server/internal/mailer"
@@ -577,6 +578,9 @@ type Services struct {
 	// loading store. nil-safe: admin endpoints short-circuit to
 	// 503 when unwired (e.g. tests).
 	FactorExposureRepo     *factorexposure.Repo
+	// StressRepo backs S7 / P3-3 stress-scenario CRUD and the
+	// per-fund stress runner. nil-safe.
+	StressRepo             *stress.Repo
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -815,6 +819,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		BorrowRepo:          borrowRepo,
 		BorrowCache:         borrowCache,
 		FactorExposureRepo:  factorexposure.NewRepo(db),
+		StressRepo:          stress.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
 		WSFeedCache:         wsFeedCache,
@@ -1211,6 +1216,14 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// archives a snapshot when ?persist=1.
 	if vh := newVaRHandler(svc); vh != nil {
 		vh.RegisterRoutes(mux)
+	}
+
+	// S7 / P3-3 — per-fund stress-scenario runner. Applies a
+	// named scenario (asset-class / market / instrument / factor
+	// shocks) to current holdings and returns the projected
+	// P&L plus per-holding contributions.
+	if sh := newStressHandler(svc); sh != nil {
+		sh.RegisterRoutes(mux)
 	}
 
 	// ---- SPA fallback: serve React static files ----

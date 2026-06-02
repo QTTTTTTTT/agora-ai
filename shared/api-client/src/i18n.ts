@@ -817,6 +817,57 @@ export interface Messages {
     varInterpretation: string;
     cvarInterpretation: string;
   };
+  stressTest: {
+    panelTitle: string;
+    panelSubtitle: string;
+    runButton: string;
+    running: string;
+    refresh: string;
+    empty: string;
+    error: string;
+    scenarioLabel: string;
+    scenarioPlaceholder: string;
+    categoryLabel: string;
+    descriptionLabel: string;
+    shockCountLabel: string;
+    navBeforeLabel: string;
+    navAfterLabel: string;
+    pnlTotalLabel: string;
+    pnlPctLabel: string;
+    holdingsLabel: string;
+    shockedLabel: string;
+    impactsTitle: string;
+    impactsEmpty: string;
+    impactSymbol: string;
+    impactBefore: string;
+    impactAfter: string;
+    impactPnL: string;
+    impactReturn: string;
+    impactShock: string;
+    categoryHistorical: string;
+    categoryHypothetical: string;
+    categoryRegulatory: string;
+    adminPanelTitle: string;
+    adminPanelSubtitle: string;
+    adminListTitle: string;
+    adminListEmpty: string;
+    adminScenarioName: string;
+    adminScenarioCategory: string;
+    adminScenarioDescription: string;
+    adminScenarioShocks: string;
+    adminScenarioCreatedBy: string;
+    adminScenarioUpdatedAt: string;
+    adminUpsertTitle: string;
+    adminUpsertSubmit: string;
+    adminUpsertSubmitting: string;
+    adminDeleteButton: string;
+    adminDeleteConfirm: string;
+    targetInstrument: string;
+    targetMarket: string;
+    targetAssetClass: string;
+    targetFactor: string;
+    targetWildcard: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -1725,6 +1776,57 @@ export const messages: Record<LocaleId, Messages> = {
       confidence99Label: '99%',
       varInterpretation: '在该置信度下，下一个持有期内损失大概率不超过此值',
       cvarInterpretation: '在 VaR 被突破的情况下，预期损失的平均值（尾部期望）',
+    },
+    stressTest: {
+      panelTitle: '压力测试',
+      panelSubtitle: '从管理员维护的场景库中选择一个（历史复刻 / 假设情景 / 监管标准），把对应的冲击应用到当前持仓上，看 NAV 在该情景下的预计变动。',
+      runButton: '运行场景',
+      running: '运行中…',
+      refresh: '刷新',
+      empty: '请选择一个场景以查看影响',
+      error: '运行失败',
+      scenarioLabel: '场景',
+      scenarioPlaceholder: '选择压力情景…',
+      categoryLabel: '类别',
+      descriptionLabel: '说明',
+      shockCountLabel: '冲击数',
+      navBeforeLabel: '冲击前 NAV',
+      navAfterLabel: '冲击后 NAV',
+      pnlTotalLabel: '损益合计',
+      pnlPctLabel: '损益占比',
+      holdingsLabel: '持仓数',
+      shockedLabel: '受冲击持仓',
+      impactsTitle: '持仓级影响',
+      impactsEmpty: '暂无持仓影响',
+      impactSymbol: '代码',
+      impactBefore: '冲击前',
+      impactAfter: '冲击后',
+      impactPnL: '损益',
+      impactReturn: '冲击收益率',
+      impactShock: '匹配冲击',
+      categoryHistorical: '历史复刻',
+      categoryHypothetical: '假设情景',
+      categoryRegulatory: '监管标准',
+      adminPanelTitle: '压力情景库',
+      adminPanelSubtitle: '维护 stress_scenarios 表。情景定义里的 shock 数组按 instrument > market > asset_class > factor > wildcard 的特异性匹配持仓；factor 类冲击会与 instrument_factor_loadings 复合相加。',
+      adminListTitle: '当前情景',
+      adminListEmpty: '暂无情景，请新增',
+      adminScenarioName: '名称',
+      adminScenarioCategory: '类别',
+      adminScenarioDescription: '说明',
+      adminScenarioShocks: '冲击列表',
+      adminScenarioCreatedBy: '创建人',
+      adminScenarioUpdatedAt: '更新时间',
+      adminUpsertTitle: '新增 / 更新场景',
+      adminUpsertSubmit: '保存',
+      adminUpsertSubmitting: '保存中…',
+      adminDeleteButton: '删除',
+      adminDeleteConfirm: '确认删除该场景？删除会级联清理历史 stress 结果。',
+      targetInstrument: '标的级',
+      targetMarket: '市场级',
+      targetAssetClass: '资产类别级',
+      targetFactor: '因子级',
+      targetWildcard: '通配（全部持仓）',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -2643,6 +2745,57 @@ export const messages: Record<LocaleId, Messages> = {
       confidence99Label: '99%',
       varInterpretation: 'Loss is expected to stay above this number with the given confidence over one horizon',
       cvarInterpretation: 'Expected loss conditional on VaR being breached (tail expectation)',
+    },
+    stressTest: {
+      panelTitle: 'Stress test',
+      panelSubtitle: 'Pick a scenario from the admin-curated library (historical / hypothetical / regulatory) and project its shocks against the current portfolio. NAV impact appears below.',
+      runButton: 'Run scenario',
+      running: 'Running…',
+      refresh: 'Refresh',
+      empty: 'Pick a scenario to see its impact',
+      error: 'Run failed',
+      scenarioLabel: 'Scenario',
+      scenarioPlaceholder: 'Choose a stress scenario…',
+      categoryLabel: 'Category',
+      descriptionLabel: 'Description',
+      shockCountLabel: 'Shocks',
+      navBeforeLabel: 'NAV before',
+      navAfterLabel: 'NAV after',
+      pnlTotalLabel: 'PnL',
+      pnlPctLabel: 'PnL %',
+      holdingsLabel: 'Holdings',
+      shockedLabel: 'Shocked holdings',
+      impactsTitle: 'Per-holding impact',
+      impactsEmpty: 'No holding-level impact yet',
+      impactSymbol: 'Symbol',
+      impactBefore: 'Before',
+      impactAfter: 'After',
+      impactPnL: 'PnL',
+      impactReturn: 'Applied return',
+      impactShock: 'Matched shock',
+      categoryHistorical: 'Historical',
+      categoryHypothetical: 'Hypothetical',
+      categoryRegulatory: 'Regulatory',
+      adminPanelTitle: 'Stress scenario library',
+      adminPanelSubtitle: 'Maintain the stress_scenarios table. Shocks match holdings by specificity (instrument > market > asset_class > factor > wildcard); factor shocks combine additively with instrument_factor_loadings.',
+      adminListTitle: 'Current scenarios',
+      adminListEmpty: 'No scenarios on file — add the first one',
+      adminScenarioName: 'Name',
+      adminScenarioCategory: 'Category',
+      adminScenarioDescription: 'Description',
+      adminScenarioShocks: 'Shocks',
+      adminScenarioCreatedBy: 'Author',
+      adminScenarioUpdatedAt: 'Updated',
+      adminUpsertTitle: 'Add / update scenario',
+      adminUpsertSubmit: 'Save',
+      adminUpsertSubmitting: 'Saving…',
+      adminDeleteButton: 'Delete',
+      adminDeleteConfirm: 'Delete this scenario? Historical stress results will be cascade-deleted.',
+      targetInstrument: 'Instrument',
+      targetMarket: 'Market',
+      targetAssetClass: 'Asset class',
+      targetFactor: 'Factor',
+      targetWildcard: 'Wildcard (all holdings)',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',

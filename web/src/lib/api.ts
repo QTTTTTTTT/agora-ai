@@ -2321,6 +2321,107 @@ export async function fetchVaRTrend(
 }
 
 // ---------------------------------------------------------------------------
+// Stress scenarios + per-fund runs (S7 / P3-3)
+// ---------------------------------------------------------------------------
+
+export type {
+  StressCategory,
+  StressShockTargetType,
+  StressShock,
+  StressScenario,
+  StressImpact,
+  StressResult,
+} from "@fundai/api-client";
+export {
+  ALL_STRESS_CATEGORIES,
+  ALL_STRESS_TARGET_TYPES,
+} from "@fundai/api-client";
+
+// Admin: list scenarios with optional category filter.
+export async function listAdminStressScenarios(opts: {
+  category?: import("@fundai/api-client").StressCategory;
+} = {}): Promise<{
+  scenarios: import("@fundai/api-client").StressScenario[];
+  categories: import("@fundai/api-client").StressCategory[];
+}> {
+  const qs = opts.category ? `?category=${encodeURIComponent(opts.category)}` : "";
+  return apiGet<{
+    scenarios: import("@fundai/api-client").StressScenario[];
+    categories: import("@fundai/api-client").StressCategory[];
+  }>(`/api/admin/stress-scenarios${qs}`);
+}
+
+export interface UpsertStressScenarioInput {
+  name: string;
+  category: import("@fundai/api-client").StressCategory;
+  description?: string;
+  shocks: import("@fundai/api-client").StressShock[];
+}
+
+export async function upsertAdminStressScenario(
+  input: UpsertStressScenarioInput,
+): Promise<{ scenario: import("@fundai/api-client").StressScenario }> {
+  return apiPost<{ scenario: import("@fundai/api-client").StressScenario }>(
+    `/api/admin/stress-scenarios`,
+    input,
+  );
+}
+
+export async function deleteAdminStressScenario(
+  id: string,
+): Promise<{ deleted: boolean }> {
+  return apiDelete<{ deleted: boolean }>(
+    `/api/admin/stress-scenarios/${encodeURIComponent(id)}`,
+  );
+}
+
+// Per-fund stress run. POST so it's never cached.
+// Note: the api-contract validator's inferMethod only scans the
+// 2 lines above each URL literal, so we keep apiPost< T > and
+// the URL on adjacent lines here.
+export interface StressRunResponse {
+  result: import("@fundai/api-client").StressResult;
+  scenario: import("@fundai/api-client").StressScenario;
+  persist_error?: string;
+}
+export async function runFundStressScenario(
+  fundId: string,
+  opts: { scenarioId: string; persist?: boolean },
+): Promise<StressRunResponse> {
+  return apiPost<StressRunResponse>(`/api/funds/${encodeURIComponent(fundId)}/risk/stress`,
+    { scenario_id: opts.scenarioId, persist: !!opts.persist });
+}
+
+export async function fetchFundStressHistory(
+  fundId: string,
+  opts: { scenarioId?: string; limit?: number } = {},
+): Promise<{
+  results: import("@fundai/api-client").StressResult[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.scenarioId) qs.set("scenarioId", opts.scenarioId);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    results: import("@fundai/api-client").StressResult[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/risk/stress/history${tail}`);
+}
+
+// Public list of scenarios for the fund-level dropdown. Backed
+// by the GET /api/risk/stress-scenarios route which is open to
+// every authenticated user — mutations remain admin-only.
+export async function listStressScenariosForFund(opts: {
+  category?: import("@fundai/api-client").StressCategory;
+} = {}): Promise<{
+  scenarios: import("@fundai/api-client").StressScenario[];
+}> {
+  const qs = opts.category ? `?category=${encodeURIComponent(opts.category)}` : "";
+  return apiGet<{
+    scenarios: import("@fundai/api-client").StressScenario[];
+  }>(`/api/risk/stress-scenarios${qs}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

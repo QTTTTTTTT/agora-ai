@@ -1514,6 +1514,92 @@ export interface VaRTrendPoint {
   lookback_days: number;
 }
 
+// =====================================================================
+// S7 / P3-3 — Stress scenarios.
+// =====================================================================
+
+// StressCategory enumerates the canonical buckets the admin UI
+// groups scenarios under. Matches the CHECK constraint on
+// stress_scenarios.category.
+export type StressCategory = "historical" | "hypothetical" | "regulatory";
+
+export const ALL_STRESS_CATEGORIES: readonly StressCategory[] = [
+  "historical",
+  "hypothetical",
+  "regulatory",
+] as const;
+
+// StressShockTargetType picks how a shock matches holdings.
+// Priority (highest to lowest): instrument > market > asset_class
+// > factor > wildcard.
+export type StressShockTargetType =
+  | "instrument"
+  | "market"
+  | "asset_class"
+  | "factor"
+  | "wildcard";
+
+export const ALL_STRESS_TARGET_TYPES: readonly StressShockTargetType[] = [
+  "instrument",
+  "market",
+  "asset_class",
+  "factor",
+  "wildcard",
+] as const;
+
+// StressShock is one element of a scenario's shock list.
+// `value` is a signed decimal fraction (-0.20 = "-20% return");
+// for factor shocks the applied return per holding is
+// value * loading, capped by the engine if |applied| > 1.
+export interface StressShock {
+  target_type: StressShockTargetType;
+  target_key: string;
+  value: number;
+}
+
+// StressScenario is the admin-managed library row.
+export interface StressScenario {
+  id: string;
+  name: string;
+  category: StressCategory;
+  description: string;
+  shocks: StressShock[];
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// StressImpact is one row of the per-holding drill-down. PnL
+// signed (negative = loss). applied_shock_* are empty when the
+// holding didn't match any shock.
+export interface StressImpact {
+  instrument_key: string;
+  symbol: string;
+  asset_class?: string;
+  market_value_before: number;
+  market_value_after: number;
+  pnl: number;
+  applied_return: number;
+  applied_shock_type?: string;
+  applied_shock_key?: string;
+}
+
+// StressResult is the engine's output for one (fund, scenario)
+// run. nav_* are gross MV (sum of |market_value|); pnl_total
+// is signed; pnl_pct is the signed fraction of nav_before.
+export interface StressResult {
+  fund_id: string;
+  scenario_id: string;
+  calculated_at: string;
+  nav_before: number;
+  nav_after: number;
+  pnl_total: number;
+  pnl_pct: number;
+  holding_count: number;
+  shocked_count: number;
+  impacts: StressImpact[];
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard
