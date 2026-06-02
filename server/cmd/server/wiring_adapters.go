@@ -61,6 +61,7 @@ import (
 	"github.com/fundai/server/internal/sectorflow"
 	"github.com/fundai/server/internal/sentiment"
 	"github.com/fundai/server/internal/sizing"
+	"github.com/fundai/server/internal/social"
 	"github.com/fundai/server/internal/subscription"
 	"github.com/fundai/server/internal/value"
 	"github.com/fundai/server/internal/workflow"
@@ -1112,6 +1113,13 @@ type workflowServiceAdapter struct {
 	// KeywordScorer). nil = the workflow falls back to passing raw
 	// headlines through to the LLM agents without scoring.
 	sentimentScorer    sentiment.Scorer
+	// socialRegistry is the Sprint 9.3 retail-mood feed (Xueqiu /
+	// StockTwits / Reddit-WSB). Wired alongside sentimentScorer so
+	// the macro / debate sentiment paths see SOCIAL POSTS as
+	// additional sentiment.Item rows on top of the news flow. Nil
+	// (or empty registry) = feature off and the workflow falls
+	// back to news-only sentiment, matching pre-9.3 behaviour.
+	socialRegistry     *social.Registry
 	// attribution is the Phase 3A-5 closed-lot attribution
 	// service. Optional — when nil the daily review hook
 	// silently skips the attribution pass. Wired by main.go
@@ -1276,6 +1284,21 @@ func (s *workflowServiceAdapter) WithSentimentScorer(scorer sentiment.Scorer) *w
 	return s
 }
 
+// WithSocialRegistry wires the Sprint 9.3 retail-social provider
+// registry. Nil (or empty registry) disables the social ingestion
+// path; the workflow then sees news-only sentiment items, which
+// matches pre-9.3 behaviour.
+//
+// Idempotent so main.go can call it unconditionally and still let
+// staging override with a different registry. Tests typically pass
+// a Registry built from stub Providers via NewRegistry.
+func (s *workflowServiceAdapter) WithSocialRegistry(reg *social.Registry) *workflowServiceAdapter {
+	if s != nil {
+		s.socialRegistry = reg
+	}
+	return s
+}
+
 // resolveSentimentScorer returns the configured scorer, falling
 // back to an env-driven default that pairs the shared LLM runtime
 // (when wired) with the keyword fallback. Callers receive nil only
@@ -1353,6 +1376,15 @@ type runtimeResearcherPool struct {
 	// than rummaging through raw headlines. Nil-safe: when unset
 	// the pool falls back to passing raw headlines as before.
 	sentimentScorer sentiment.Scorer
+	// socialRegistry (Sprint 9.3) supplies retail social posts
+	// (Xueqiu / StockTwits / Reddit-WSB) per symbol so the
+	// sentiment scorer can see RETAIL MOOD on top of wire-news.
+	// Nil-safe: when unset (or HasProviders is false) the pool
+	// behaves exactly as before, news-only. When set, the macro
+	// sentiment block and the per-symbol debate block both call
+	// FetchPosts and concatenate the resulting items into the
+	// scorer batch.
+	socialRegistry *social.Registry
 	// llmRuntime is the Sprint 1 / S3 hook for true LLM-driven
 	// research summarisation. When non-nil, MacroBrief / RunAll /
 	// QuantSignals run the raw provider-text content through a
@@ -6020,6 +6052,7 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			fundamentalFetcher: s.fundamentalFetcher,
 			sectorFlowFetcher:  s.sectorFlowFetcher,
 			sentimentScorer:    buildSentimentScorerFromRuntime(s.runtime, fund.ID, ownerUserID),
+			socialRegistry:     s.socialRegistry,
 			llmRuntime:         s.runtime,
 		},
 		func() *runtimePMAgent {
@@ -12338,10 +12371,16 @@ func (p runtimeResearcherPool) collectSentimentDebateBlock(ctx context.Context, 
 			}
 		}
 	}
-	if len(collected) == 0 {
+	items := newsItemsToSentiment(collected)
+	// Sprint 9.3: enrich with retail social posts (Xueqiu /
+	// StockTwits / Reddit-WSB) before scoring. The scorer sees the
+	// extra rows transparently and the per-symbol aggregator picks
+	// up the broader sample. Capped per symbol to keep the prompt
+	// budget bounded.
+	items = append(items, p.collectSocialItems(ctx, queries, 5)...)
+	if len(items) == 0 {
 		return ""
 	}
-	items := newsItemsToSentiment(collected)
 	scores, err := p.sentimentScorer.Score(ctx, items)
 	if err != nil {
 		slog.Debug("debate sentiment scorer failed", "err", err, "items", len(items))
@@ -12493,10 +12532,17 @@ func (p runtimeResearcherPool) macroSentimentBlock(ctx context.Context, fund *re
 			}
 		}
 	}
-	if len(collected) == 0 {
+	items := newsItemsToSentiment(collected)
+	// Sprint 9.3: enrich the macro brief with retail social posts.
+	// Same dispatching pattern as the debate block — best-effort,
+	// nil-safe, dedup'd by item.ID. We keep the per-symbol cap a
+	// little higher (8 vs 5) because the macro brief is the
+	// "wide-angle" read and benefits from broader retail mood
+	// coverage; the debate block above prefers tight focus.
+	items = append(items, p.collectSocialItems(ctx, queries, 8)...)
+	if len(items) == 0 {
 		return ""
 	}
-	items := newsItemsToSentiment(collected)
 	scores, err := p.sentimentScorer.Score(ctx, items)
 	if err != nil {
 		slog.Debug("sentiment scorer failed", "err", err, "items", len(items))
@@ -12512,6 +12558,58 @@ func (p runtimeResearcherPool) macroSentimentBlock(ctx context.Context, fund *re
 		header = "News sentiment"
 	}
 	return header + "\n" + body
+}
+
+// collectSocialItems pulls retail social posts for the supplied
+// instrument refs via the configured social.Registry (Sprint 9.3).
+//
+// Best-effort: returns an empty slice when the registry isn't
+// wired or every per-symbol fetch errors out. The caller appends
+// the returned items to its news-derived []sentiment.Item before
+// invoking the scorer, so social posts and news are scored and
+// aggregated identically downstream — the only externally visible
+// difference is the Item.Source value (`xueqiu` / `stocktwits` /
+// `reddit_wsb` vs the news outlet name).
+//
+// We cap perSymbolLimit because the daily macro brief already pays
+// for N news items per symbol; doubling that with social would
+// blow the LLM scorer's prompt budget and dilute the news signal.
+func (p runtimeResearcherPool) collectSocialItems(ctx context.Context, instruments []marketdata.InstrumentRef, perSymbolLimit int) []sentiment.Item {
+	if p.socialRegistry == nil || !p.socialRegistry.HasProviders() || len(instruments) == 0 {
+		return nil
+	}
+	if perSymbolLimit <= 0 {
+		perSymbolLimit = 10
+	}
+	seen := make(map[string]struct{}, len(instruments)*perSymbolLimit)
+	out := make([]sentiment.Item, 0, len(instruments)*perSymbolLimit)
+	for _, ref := range instruments {
+		sym := strings.TrimSpace(ref.Symbol)
+		if sym == "" || !marketdata.IsTickerLikeSymbol(sym) {
+			continue
+		}
+		posts, err := p.socialRegistry.FetchPosts(ctx, social.Request{
+			Symbol: sym,
+			Market: ref.Market,
+			Limit:  perSymbolLimit,
+		})
+		if err != nil {
+			slog.Debug("social registry fetch failed",
+				"symbol", sym, "market", ref.Market, "err", err)
+			continue
+		}
+		for _, item := range posts {
+			if item.ID == "" {
+				continue
+			}
+			if _, ok := seen[item.ID]; ok {
+				continue
+			}
+			seen[item.ID] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // newsItemsToSentiment is the small adapter between the marketdata

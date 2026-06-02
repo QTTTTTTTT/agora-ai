@@ -1011,6 +1011,14 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	workflowService = workflowService.WithWorkflowCheckpointRepo(workflowCheckpointRepo)
 	services.WorkflowCheckpointRepo = workflowCheckpointRepo
 
+	// Sprint 9.3 — social sentiment ingestion. The registry
+	// reads per-platform env flags; when no provider is enabled
+	// the call returns nil and the workflow's sentiment block
+	// stays news-only, matching pre-9.3 behaviour.
+	if socialRegistry := buildSocialRegistryFromEnv(slog.Default()); socialRegistry != nil {
+		workflowService = workflowService.WithSocialRegistry(socialRegistry)
+	}
+
 	// Phase 2J/K/L: strategy promotion lifecycle.
 	// The promotion adapter is wired only when persistence is
 	// available — without a DB there's no meaningful baseline /
