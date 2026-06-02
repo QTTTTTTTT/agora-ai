@@ -20,14 +20,22 @@ import (
 // r2-bull, r2-bear) and a 20s per-argument timeout so a hung LLM
 // can't stall the whole debate. These knobs become per-fund
 // configurable in S8.4 alongside the reputation surface.
+//
+// LLM client selection (S8.3):
+//   - When svc.LLMRuntime.client is available, both Bull and
+//     Bear share a SchemaLLMClient-capable adapter and route
+//     through CompleteWithSchema → AdvocateArgumentJSONSchema
+//     so the providers (OpenAI / Gemini in particular) produce
+//     strict bull-or-bear, support_points + rebuttals JSON.
+//   - When no LLM is configured, the adapter is nil and both
+//     advocates fall back to their deterministic skeletons.
 func newDefaultDebateProvider(svc *Services) DebateProvider {
-	_ = svc
 	return func(fundID string) *agent.Debate {
-		var llm agent.LLMClient // nil → fallback path. S8.3 swaps this.
+		llmClient := agentLLMForFund(svc, fundID, "bullbear_debate")
 		bull := agent.NewBullResearcher(
 			"bull@"+fundID,
 			"Bull Researcher",
-			fundID, llm,
+			fundID, llmClient,
 			agent.WithAdvocatePersona(
 				"a contrarian-optimist who finds the strongest reason to buy "+
 					"even when the panel leans bearish; refuses to settle for neutral."),
@@ -35,7 +43,7 @@ func newDefaultDebateProvider(svc *Services) DebateProvider {
 		bear := agent.NewBearResearcher(
 			"bear@"+fundID,
 			"Bear Researcher",
-			fundID, llm,
+			fundID, llmClient,
 			agent.WithAdvocatePersona(
 				"a risk-first sceptic who finds the strongest reason to sell "+
 					"or avoid even when the panel leans bullish; refuses to settle for neutral."),

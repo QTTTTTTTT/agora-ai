@@ -237,6 +237,24 @@ type LLMClient interface {
 	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
 }
 
+// SchemaLLMClient is the S8.3 extension that asks providers
+// for native structured output (Anthropic tool-use, OpenAI
+// response_format=json_schema, Gemini responseSchema, …).
+//
+// schema is a JSON Schema document the model must satisfy.
+// Implementations SHOULD send the schema natively when the
+// provider supports it; otherwise they should fall back to
+// freeform Complete and rely on the tolerant parsers already
+// in analyst.go / bullbear.go.
+//
+// The returned string is always a JSON object that matches
+// schema (or as close to it as the provider produced) — callers
+// then unmarshal into their concrete shape.
+type SchemaLLMClient interface {
+	LLMClient
+	CompleteWithSchema(ctx context.Context, systemPrompt, userPrompt string, schema []byte) (string, error)
+}
+
 // ---------------------------------------------------------------------------
 // PMAgent
 // ---------------------------------------------------------------------------

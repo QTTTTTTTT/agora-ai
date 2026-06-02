@@ -483,11 +483,27 @@ type llmJSONReport struct {
 // parses it tolerantly: we accept markdown fences, leading prose,
 // and trailing commentary. Errors are bubbled up so the caller
 // can fall back to the deterministic path.
+//
+// S8.3: when the underlying LLM client implements
+// SchemaLLMClient (i.e. supports native structured output),
+// we route through CompleteWithSchema with the canonical
+// AnalystReportJSONSchema so providers like OpenAI / Gemini
+// produce strict, schema-conformant JSON. The tolerant
+// post-parse stays in place so a non-strict provider's
+// freeform JSON still round-trips.
 func (b *analystBase) callLLMForReport(ctx context.Context, sys, user string) (llmJSONReport, error) {
 	if b.llm == nil {
 		return llmJSONReport{}, errors.New("analyst: no LLM configured")
 	}
-	raw, err := b.llm.Complete(ctx, sys, user)
+	var (
+		raw string
+		err error
+	)
+	if schemaClient, ok := b.llm.(SchemaLLMClient); ok {
+		raw, err = schemaClient.CompleteWithSchema(ctx, sys, user, AnalystReportJSONSchema)
+	} else {
+		raw, err = b.llm.Complete(ctx, sys, user)
+	}
 	if err != nil {
 		return llmJSONReport{}, fmt.Errorf("analyst: llm call: %w", err)
 	}

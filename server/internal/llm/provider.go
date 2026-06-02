@@ -122,6 +122,27 @@ type ChatRequest struct {
 	// 此时 OwnerID 是策略所有者，配额、熔断、自带 Key 都按 OwnerID 隔离，
 	// 避免一个所有者把另一个的配额打爆。为空时回退到 UserID。
 	OwnerID string `json:"owner_id"`
+
+	// ResponseFormat is the S8.3 hook for native structured output.
+	//
+	//   ""             — provider returns freeform text (legacy behaviour).
+	//   "json_object"  — provider must return a JSON object (any shape).
+	//                    OpenAI / DeepSeek / Qwen / Custom set
+	//                    response_format: {"type":"json_object"}; Gemini
+	//                    sets responseMimeType=application/json; Claude
+	//                    appends an instruction to the system prompt.
+	//   "json_schema"  — provider must return JSON that matches
+	//                    ResponseSchema. OpenAI uses
+	//                    response_format: {"type":"json_schema", strict:true};
+	//                    Gemini uses responseSchema; Claude / DeepSeek /
+	//                    Qwen / Custom fall back to json_object plus a
+	//                    schema-quoted system prompt.
+	ResponseFormat string `json:"response_format,omitempty"`
+
+	// ResponseSchema is the JSON Schema (as raw bytes) the provider
+	// should enforce when ResponseFormat == "json_schema". Ignored
+	// otherwise. Owned by the caller; never modified.
+	ResponseSchema []byte `json:"response_schema,omitempty"`
 }
 
 // EffectiveOwner 返回承担成本的用户 ID。

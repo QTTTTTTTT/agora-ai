@@ -562,6 +562,27 @@ type openAIRequest struct {
 	MaxTokens   int             `json:"max_tokens,omitempty"`
 	Temperature float64         `json:"temperature,omitempty"`
 	Stream      bool            `json:"stream"`
+
+	// ResponseFormat is OpenAI's native structured-output knob.
+	// Two shapes are accepted:
+	//   {"type":"json_object"}
+	//   {"type":"json_schema","json_schema":{"name":"out","strict":true,"schema":{...}}}
+	// Wired by callOpenAI() from ChatRequest.ResponseFormat /
+	// ChatRequest.ResponseSchema. DeepSeek / Qwen / Custom share
+	// this path (UsesOpenAIChatCompletions). Providers that don't
+	// understand the field generally ignore it.
+	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
+}
+
+type openAIResponseFormat struct {
+	Type       string                  `json:"type"`
+	JSONSchema *openAIResponseFormatJS `json:"json_schema,omitempty"`
+}
+
+type openAIResponseFormatJS struct {
+	Name   string          `json:"name"`
+	Strict bool            `json:"strict"`
+	Schema json.RawMessage `json:"schema"`
 }
 
 type openAIMessage struct {
@@ -638,6 +659,27 @@ func (c *MultiProviderClient) callOpenAI(ctx context.Context, config *ModelConfi
 		MaxTokens:   config.MaxTokens,
 		Temperature: config.Temperature,
 		Stream:      false,
+	}
+
+	// S8.3 — wire structured output. We treat "json_schema" with
+	// a non-empty schema as the strict variant; everything else
+	// falls back to the looser "json_object" mode (any JSON shape).
+	switch strings.ToLower(strings.TrimSpace(req.ResponseFormat)) {
+	case "json_schema":
+		if len(req.ResponseSchema) > 0 {
+			body.ResponseFormat = &openAIResponseFormat{
+				Type: "json_schema",
+				JSONSchema: &openAIResponseFormatJS{
+					Name:   "out",
+					Strict: true,
+					Schema: append(json.RawMessage(nil), req.ResponseSchema...),
+				},
+			}
+		} else {
+			body.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
+		}
+	case "json_object":
+		body.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
 	}
 
 	bodyBytes, err := json.Marshal(body)
@@ -748,6 +790,37 @@ func (c *MultiProviderClient) callClaude(ctx context.Context, config *ModelConfi
 		return nil, fmt.Errorf("llm: claude requires at least one user message")
 	}
 
+	// S8.3 — Claude Messages API has no response_format field; the
+	// idiomatic structured-output path is tool_use, which is a much
+	// larger refactor (multiple response shapes). For the
+	// ResponseFormat hook we instead pre-pend a strict instruction
+	// to the system prompt — this is the same trick Anthropic
+	// recommends in the prompt engineering guide when tool_use is
+	// not desired. The downstream tolerant parser in
+	// agent/analyst.go already strips ```json fences.
+	switch strings.ToLower(strings.TrimSpace(req.ResponseFormat)) {
+	case "json_schema":
+		if len(req.ResponseSchema) > 0 {
+			schemaText := strings.TrimSpace(string(req.ResponseSchema))
+			schemaLine := "Return ONLY a JSON object matching this JSON Schema, no prose, no markdown fences:\n" + schemaText
+			if systemPrompt == "" {
+				systemPrompt = schemaLine
+			} else {
+				systemPrompt = systemPrompt + "\n\n" + schemaLine
+			}
+		} else if systemPrompt == "" {
+			systemPrompt = "Return ONLY a JSON object, no prose, no markdown fences."
+		} else {
+			systemPrompt += "\n\nReturn ONLY a JSON object, no prose, no markdown fences."
+		}
+	case "json_object":
+		if systemPrompt == "" {
+			systemPrompt = "Return ONLY a JSON object, no prose, no markdown fences."
+		} else {
+			systemPrompt += "\n\nReturn ONLY a JSON object, no prose, no markdown fences."
+		}
+	}
+
 	body := claudeRequest{Model: config.ModelName, MaxTokens: config.MaxTokens, System: systemPrompt, Messages: messages}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -824,6 +897,12 @@ type geminiPart struct {
 type geminiGenerationConfig struct {
 	Temperature     float64 `json:"temperature,omitempty"`
 	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+
+	// S8.3 — native structured output. responseMimeType must be
+	// "application/json" for json_object / json_schema modes;
+	// responseSchema, when set, makes Gemini enforce the schema.
+	ResponseMimeType string          `json:"responseMimeType,omitempty"`
+	ResponseSchema   json.RawMessage `json:"responseSchema,omitempty"`
 }
 
 type geminiResponse struct {
@@ -874,13 +953,23 @@ func (c *MultiProviderClient) callGemini(ctx context.Context, config *ModelConfi
 	if strings.TrimSpace(systemPrompt) != "" {
 		body.SystemInstruction = &geminiInstruction{Parts: []geminiPart{{Text: systemPrompt}}}
 	}
-	if config.MaxTokens > 0 || config.Temperature > 0 {
+	// S8.3 — Gemini structured output.
+	wantsJSONObject := strings.EqualFold(strings.TrimSpace(req.ResponseFormat), "json_object")
+	wantsJSONSchema := strings.EqualFold(strings.TrimSpace(req.ResponseFormat), "json_schema")
+	needGenCfg := config.MaxTokens > 0 || config.Temperature > 0 || wantsJSONObject || wantsJSONSchema
+	if needGenCfg {
 		body.GenerationConfig = &geminiGenerationConfig{}
 		if config.MaxTokens > 0 {
 			body.GenerationConfig.MaxOutputTokens = config.MaxTokens
 		}
 		if config.Temperature > 0 {
 			body.GenerationConfig.Temperature = config.Temperature
+		}
+		if wantsJSONObject || wantsJSONSchema {
+			body.GenerationConfig.ResponseMimeType = "application/json"
+		}
+		if wantsJSONSchema && len(req.ResponseSchema) > 0 {
+			body.GenerationConfig.ResponseSchema = append(json.RawMessage(nil), req.ResponseSchema...)
 		}
 	}
 

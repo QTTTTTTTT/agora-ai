@@ -17,61 +17,73 @@
 package main
 
 import (
-	"context"
-
 	"github.com/fundai/server/internal/agent"
+	"github.com/fundai/server/internal/llm"
 )
 
-// nilLLMClient is the no-op LLM used by the S8.1 default panel.
-// agent.LLMClient is the freeform-Complete interface; returning
-// a synthetic error here keeps the analysts on their
-// deterministic fallback paths until S8.3 wires a real client.
-type nilLLMClient struct{}
-
-func (nilLLMClient) Complete(_ context.Context, _ string, _ string) (string, error) {
-	return "", nil
+// agentLLMForFund returns the LLM client the analyst /
+// advocate agents should use for a given fund, or nil if no
+// LLM is configured at this deployment.
+//
+// S8.3: when llmRuntime is wired with a real client, we wrap
+// it in an agent.LLMAdapter that exposes CompleteWithSchema
+// so analysts and Bull/Bear go through provider-native
+// structured output. Otherwise we keep the legacy nil-LLM
+// fallback path that S8.1 / S8.2 already validate.
+func agentLLMForFund(svc *Services, fundID, stepName string) agent.LLMClient {
+	if svc == nil || svc.LLMRuntime == nil || svc.LLMRuntime.client == nil {
+		return nil
+	}
+	return agent.NewLLMAdapter(svc.LLMRuntime.client, fundID,
+		agent.WithLLMAdapterStep(stepName),
+		agent.WithLLMAdapterTier(llm.TierStandard),
+	)
 }
 
 // newDefaultAnalystPanelProvider builds the provider closure
-// installed on Services.AnalystPanelProvider at startup. It is
-// safe to call with any *Services value (including one missing
-// AnalystReportRepo) since the closure does not deref svc.
+// installed on Services.AnalystPanelProvider at startup.
 //
 // The closure returns a fresh AnalystPanel per call so that
 // per-fund clocks / loggers / personas can vary without sharing
 // state. The 4 analyst instances inside the panel are cheap to
 // build (no I/O at construction time).
+//
+// LLM client selection (S8.3):
+//   - When svc.LLMRuntime.client is available, all 4 analysts
+//     share a SchemaLLMClient-capable adapter and route through
+//     CompleteWithSchema → AnalystReportJSONSchema.
+//   - When no LLM is configured, the adapter is nil and the
+//     analysts fall back to their deterministic rule paths.
 func newDefaultAnalystPanelProvider(svc *Services) AnalystPanelProvider {
-	_ = svc
 	return func(fundID string) *agent.AnalystPanel {
-		var llm agent.LLMClient // nil → fallback path. S8.3 swaps this.
+		llmClient := agentLLMForFund(svc, fundID, "analyst_panel")
 
 		analysts := []agent.AnalystAgent{
 			agent.NewFundamentalsAnalyst(
 				"fundamentals@"+fundID,
 				"Fundamentals Analyst",
-				fundID, llm,
+				fundID, llmClient,
 				agent.WithAnalystPersona(
 					"a value-investing veteran who anchors on reported financials "+
 						"and is sceptical of multiple expansion without earnings growth.")),
 			agent.NewSentimentAnalyst(
 				"sentiment@"+fundID,
 				"Sentiment Analyst",
-				fundID, llm,
+				fundID, llmClient,
 				agent.WithAnalystPersona(
 					"a crowd-mood reader who weighs aggregate polarity but discounts "+
 						"single-source bias.")),
 			agent.NewNewsAnalyst(
 				"news@"+fundID,
 				"News Analyst",
-				fundID, llm,
+				fundID, llmClient,
 				agent.WithAnalystPersona(
 					"a catalyst hunter focused on earnings, M&A, regulator actions, "+
 						"and analyst upgrades / downgrades.")),
 			agent.NewTechnicalAnalyst(
 				"technical@"+fundID,
 				"Technical Analyst",
-				fundID, llm,
+				fundID, llmClient,
 				agent.WithAnalystPersona(
 					"a regime-aware chartist who reads MA cascade, MACD and "+
 						"ATR-budgeted position sizing.")),

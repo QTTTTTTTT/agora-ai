@@ -541,7 +541,19 @@ type advocateLLMReply struct {
 }
 
 func callAdvocateLLM(ctx context.Context, llm LLMClient, sys, user string) (advocateLLMReply, error) {
-	raw, err := llm.Complete(ctx, sys, user)
+	var (
+		raw string
+		err error
+	)
+	// S8.3: prefer native structured output when the underlying
+	// client supports it. The schema enforces stance =
+	// bullish/bearish, conf 30-95, and the support_points /
+	// rebuttals arrays.
+	if schemaClient, ok := llm.(SchemaLLMClient); ok {
+		raw, err = schemaClient.CompleteWithSchema(ctx, sys, user, AdvocateArgumentJSONSchema)
+	} else {
+		raw, err = llm.Complete(ctx, sys, user)
+	}
 	if err != nil {
 		return advocateLLMReply{}, fmt.Errorf("llm: %w", err)
 	}
