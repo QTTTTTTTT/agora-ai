@@ -923,6 +923,43 @@ export interface Messages {
     adminAsof: string;
     adminNote: string;
   };
+  analystPanel: {
+    title: string;
+    subtitle: string;
+    symbolLabel: string;
+    symbolPlaceholder: string;
+    runButton: string;
+    running: string;
+    persistLabel: string;
+    aggregateTitle: string;
+    aggregateDirection: string;
+    aggregateConfidence: string;
+    categoriesVoted: string;
+    voteSummary: string;
+    perCategoryTitle: string;
+    asof: string;
+    generatedAt: string;
+    directionBullish: string;
+    directionBearish: string;
+    directionNeutral: string;
+    categoryFundamentals: string;
+    categorySentiment: string;
+    categoryNews: string;
+    categoryTechnical: string;
+    thesisLabel: string;
+    keyFindingsLabel: string;
+    risksLabel: string;
+    dataPointsLabel: string;
+    sourcesLabel: string;
+    noPanelYet: string;
+    error: string;
+    historyTitle: string;
+    historyEmpty: string;
+    historyLoading: string;
+    confidenceLabel: string;
+    llmModelFallback: string;
+    llmModelLLM: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -1937,6 +1974,43 @@ export const messages: Record<LocaleId, Messages> = {
       adminBenchmarkId: '基准 ID',
       adminAsof: '截至日期',
       adminNote: '备注',
+    },
+    analystPanel: {
+      title: '分析师面板',
+      subtitle: '基本面 / 情绪 / 新闻 / 技术四位专业化分析师独立给出结论，面板按各自置信度加权得出整体判断。每位分析师都基于规则给出确定性的方向锚点，LLM 仅在叙述层加成。',
+      symbolLabel: '标的代码',
+      symbolPlaceholder: '如 AAPL / 600519',
+      runButton: '运行分析师面板',
+      running: '4 位分析师并行打分中…',
+      persistLabel: '存档此次面板',
+      aggregateTitle: '综合判断',
+      aggregateDirection: '方向',
+      aggregateConfidence: '置信度',
+      categoriesVoted: '参与表态分析师数',
+      voteSummary: '{voted}/{total} 位分析师明确表态',
+      perCategoryTitle: '各分析师报告',
+      asof: '截至',
+      generatedAt: '生成于',
+      directionBullish: '看多',
+      directionBearish: '看空',
+      directionNeutral: '中性',
+      categoryFundamentals: '基本面',
+      categorySentiment: '情绪',
+      categoryNews: '新闻 / 催化',
+      categoryTechnical: '技术面',
+      thesisLabel: '论点',
+      keyFindingsLabel: '关键发现',
+      risksLabel: '风险点',
+      dataPointsLabel: '数据指标',
+      sourcesLabel: '信息源',
+      noPanelYet: '尚未运行分析师面板',
+      error: '面板运行失败',
+      historyTitle: '历史面板',
+      historyEmpty: '暂无历史面板',
+      historyLoading: '加载中…',
+      confidenceLabel: '置信度 {value}%',
+      llmModelFallback: '规则回退',
+      llmModelLLM: 'LLM',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -2961,6 +3035,43 @@ export const messages: Record<LocaleId, Messages> = {
       adminBenchmarkId: 'Benchmark ID',
       adminAsof: 'As-of date',
       adminNote: 'Note',
+    },
+    analystPanel: {
+      title: 'Analyst Panel',
+      subtitle: 'Four specialised analysts (fundamentals / sentiment / news / technical) each produce an independent verdict; the panel blends them by confidence weight. Every analyst is anchored to a deterministic rule; the LLM only fills in the narrative on top.',
+      symbolLabel: 'Symbol',
+      symbolPlaceholder: 'e.g. AAPL / 600519',
+      runButton: 'Run analyst panel',
+      running: 'Polling 4 analysts in parallel…',
+      persistLabel: 'Archive this panel',
+      aggregateTitle: 'Aggregate verdict',
+      aggregateDirection: 'Direction',
+      aggregateConfidence: 'Confidence',
+      categoriesVoted: 'Analysts that voted',
+      voteSummary: '{voted} of {total} analysts took a side',
+      perCategoryTitle: 'Per-analyst reports',
+      asof: 'As of',
+      generatedAt: 'Generated at',
+      directionBullish: 'Bullish',
+      directionBearish: 'Bearish',
+      directionNeutral: 'Neutral',
+      categoryFundamentals: 'Fundamentals',
+      categorySentiment: 'Sentiment',
+      categoryNews: 'News / catalysts',
+      categoryTechnical: 'Technical',
+      thesisLabel: 'Thesis',
+      keyFindingsLabel: 'Key findings',
+      risksLabel: 'Risks',
+      dataPointsLabel: 'Data points',
+      sourcesLabel: 'Sources',
+      noPanelYet: 'No panel run yet',
+      error: 'Panel run failed',
+      historyTitle: 'Historical panels',
+      historyEmpty: 'No historical panels yet',
+      historyLoading: 'Loading…',
+      confidenceLabel: 'confidence {value}%',
+      llmModelFallback: 'rule fallback',
+      llmModelLLM: 'LLM',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',

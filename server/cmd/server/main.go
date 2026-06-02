@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fundai/server/internal/analystreport"
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/brinson"
@@ -585,6 +586,14 @@ type Services struct {
 	// BrinsonRepo backs S7 / P3-4 Brinson benchmark composition
 	// CRUD and the per-fund Brinson runner. nil-safe.
 	BrinsonRepo            *brinson.Repo
+	// AnalystReportRepo backs the S8.1 four-analyst panel
+	// runner (analystreport.Repo). nil-safe.
+	AnalystReportRepo      *analystreport.Repo
+	// AnalystPanelProvider returns the configured panel for a
+	// fund. Wired by the dependency-injection layer per
+	// deployment (LLM credentials, persona overrides, …). nil
+	// → /api/funds/{fundId}/analysts/run replies 503.
+	AnalystPanelProvider   AnalystPanelProvider
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -825,6 +834,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		FactorExposureRepo:  factorexposure.NewRepo(db),
 		StressRepo:          stress.NewRepo(db),
 		BrinsonRepo:         brinson.NewRepo(db),
+		AnalystReportRepo:   analystreport.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
 		WSFeedCache:         wsFeedCache,
@@ -843,6 +853,14 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// simulator — falls through to nil and downstream callers skip
 	// quote-tick fan-out.
 	services.StopTriggerEngine = newStopTriggerEngine(services.BrokerSimulator)
+
+	// S8.1 — install the default analyst panel provider. The
+	// provider is a closure so we can inject svc-scoped knobs
+	// (LLM client, persona overrides, …) without changing the
+	// handler API. The default in this sprint runs all four
+	// analysts on their deterministic fallback paths; S8.3 will
+	// swap nil → real llm.LLMClient once CompleteWithSchema lands.
+	services.AnalystPanelProvider = newDefaultAnalystPanelProvider(services)
 
 	// P1-5: order replay. Re-seed the simulator from open trade rows
 	// persisted before the last shutdown. Runs synchronously so the
@@ -1236,6 +1254,16 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// compositions sits on adminHandler.registerBrinsonAdminRoutes.
 	if bh := newBrinsonHandler(svc); bh != nil {
 		bh.RegisterRoutes(mux)
+	}
+
+	// S8.1 — per-fund analyst panel runner (fundamentals /
+	// sentiment / news / technical). The AnalystPanelProvider on
+	// Services is the dependency-injection seam: in production
+	// the wiring layer instantiates one panel per fund with
+	// fund-specific LLM credentials; in tests it can pass a
+	// fixed stub panel. Nil provider → /run replies 503.
+	if ah := newAnalystPanelHandler(svc, svc.AnalystPanelProvider); ah != nil {
+		ah.RegisterRoutes(mux, svc.AnalystPanelProvider)
 	}
 
 	// ---- SPA fallback: serve React static files ----

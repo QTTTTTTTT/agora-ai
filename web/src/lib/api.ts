@@ -2544,6 +2544,81 @@ export async function fetchFundBrinsonHistory(
 }
 
 // ---------------------------------------------------------------------------
+// S8.1 — Analyst panel (fundamentals / sentiment / news / technical)
+// ---------------------------------------------------------------------------
+//
+// Re-export the wire types so web component imports don't have
+// to know about @fundai/api-client.
+export type {
+  AnalystCategory,
+  AnalystDirection,
+  AnalystDataPoint,
+  AnalystReport,
+  AnalystPanelReport,
+  AnalystQualityScoreInput,
+  AnalystFundamentalsInput,
+  AnalystSentimentAggregateInput,
+  AnalystSentimentItemInput,
+  AnalystSentimentInput,
+  AnalystNewsHeadlineInput,
+  AnalystNewsInput,
+  AnalystQuantSnapshotInput,
+  AnalystTechnicalInput,
+  AnalystRunRequest,
+} from "@fundai/api-client";
+export { ALL_ANALYST_CATEGORIES } from "@fundai/api-client";
+
+// Per-fund analyst panel run. POST so the persist side-effect
+// isn't cached. Keep apiPost< T > and the URL on adjacent lines
+// so the api-contract validator's inferMethod resolves POST.
+export interface AnalystPanelRunResponse {
+  panel: import("@fundai/api-client").AnalystPanelReport;
+  persist_error?: string;
+}
+export async function runFundAnalystPanel(
+  fundId: string,
+  body: import("@fundai/api-client").AnalystRunRequest,
+): Promise<AnalystPanelRunResponse> {
+  return apiPost<AnalystPanelRunResponse>(`/api/funds/${encodeURIComponent(fundId)}/analysts/run`,
+    body);
+}
+
+export async function listFundAnalystPanels(
+  fundId: string,
+  opts: {
+    symbol?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    includeChildren?: boolean;
+  } = {},
+): Promise<{
+  panels: import("@fundai/api-client").AnalystPanelReport[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.symbol) qs.set("symbol", opts.symbol);
+  if (opts.from) qs.set("from", opts.from);
+  if (opts.to) qs.set("to", opts.to);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.includeChildren) qs.set("include", "children");
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    panels: import("@fundai/api-client").AnalystPanelReport[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/analysts/panels${tail}`);
+}
+
+export async function getFundAnalystPanel(
+  fundId: string,
+  panelId: string,
+): Promise<{
+  panel: import("@fundai/api-client").AnalystPanelReport;
+}> {
+  return apiGet<{
+    panel: import("@fundai/api-client").AnalystPanelReport;
+  }>(`/api/funds/${encodeURIComponent(fundId)}/analysts/panels/${encodeURIComponent(panelId)}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

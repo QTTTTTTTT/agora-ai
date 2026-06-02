@@ -32,6 +32,7 @@ import FactorExposurePanel from "../components/FactorExposurePanel";
 import VaRPanel from "../components/VaRPanel";
 import StressTestPanel from "../components/StressTestPanel";
 import BrinsonAttributionPanel from "../components/BrinsonAttributionPanel";
+import AnalystPanelSection from "../components/AnalystPanelSection";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
 
 // PR-3A9: a dedicated /funds/:id/performance route that compresses
@@ -778,6 +779,11 @@ const FundPerformance: React.FC = () => {
           active return vs an admin-maintained benchmark into
           allocation / selection / interaction effects per bucket. */}
       <BrinsonAttributionPanel fundId={fundId} language={language} />
+
+      {/* S8.1 — 4-analyst (fundamentals / sentiment / news /
+          technical) panel that votes on one symbol and produces an
+          aggregated bullish / bearish / neutral verdict. */}
+      <AnalystPanelSection fundId={fundId} language={language} />
     </div>
   );
 };

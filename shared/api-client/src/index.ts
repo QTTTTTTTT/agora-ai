@@ -1695,6 +1695,153 @@ export interface BrinsonHistoryEntry {
   buckets?: BrinsonBucketAttribution[];
 }
 
+// ---------------------------------------------------------------------------
+// S8.1 — analyst panel (fundamentals / sentiment / news / technical)
+// ---------------------------------------------------------------------------
+//
+// Four specialised analysts vote on one symbol; the panel
+// aggregates them into a single bullish / bearish / neutral
+// verdict. Each per-category report carries its own thesis,
+// findings, risks, and the deterministic data points it cited.
+//
+// The wire shapes mirror server/cmd/server/analyst_panel_handler.go.
+
+export type AnalystCategory = "fundamentals" | "sentiment" | "news" | "technical";
+
+export const ALL_ANALYST_CATEGORIES: readonly AnalystCategory[] = [
+  "fundamentals",
+  "sentiment",
+  "news",
+  "technical",
+];
+
+export type AnalystDirection = "bullish" | "bearish" | "neutral";
+
+export interface AnalystDataPoint {
+  name: string;
+  value: string;
+  source?: string;
+}
+
+export interface AnalystReport {
+  id?: string;
+  agent_id: string;
+  agent_name: string;
+  category: AnalystCategory;
+  symbol: string;
+  asof: string;
+  generated_at: string;
+  direction: AnalystDirection;
+  confidence: number; // 0..100
+  thesis: string;
+  key_findings: string[];
+  risks: string[];
+  data_points?: AnalystDataPoint[];
+  sources?: string[];
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  llm_model?: string;
+}
+
+export interface AnalystPanelReport {
+  id?: string;
+  fund_id: string;
+  symbol: string;
+  asof: string;
+  generated_at: string;
+  aggregate_direction: AnalystDirection;
+  aggregate_confidence: number; // 0..100
+  categories_voted: number; // 0..4
+  per_category_votes: Record<string, number>;
+  reports: AnalystReport[];
+}
+
+// AnalystQualityScoreInput is the typed quality block the caller
+// can feed the panel run; fields mirror internal/quality.Score.
+export interface AnalystQualityScoreInput {
+  profitability_z: number;
+  growth_z: number;
+  safety_z: number;
+  composite_z: number;
+  quartile: number;
+}
+
+export interface AnalystFundamentalsInput {
+  quality_score?: AnalystQualityScoreInput;
+  metrics?: Record<string, number>;
+  industry_peers?: string[];
+  filings_url?: string;
+}
+
+export interface AnalystSentimentAggregateInput {
+  average: number;
+  count: number;
+  polarity: string;
+}
+
+export interface AnalystSentimentItemInput {
+  title: string;
+  source: string;
+  score: number;
+  published_at?: string;
+  url?: string;
+}
+
+export interface AnalystSentimentInput {
+  aggregate: AnalystSentimentAggregateInput;
+  recent_items?: AnalystSentimentItemInput[];
+  source_breakdown?: Record<string, number>;
+}
+
+export interface AnalystNewsHeadlineInput {
+  title: string;
+  source: string;
+  summary?: string;
+  published_at?: string;
+  url?: string;
+  language?: string;
+}
+
+export interface AnalystNewsInput {
+  headlines?: AnalystNewsHeadlineInput[];
+  material_event_tags?: string[];
+}
+
+export interface AnalystQuantSnapshotInput {
+  regime: string;
+  close: number;
+  atr14: number;
+  atr_pct: number;
+  position_size_ceiling_pct: number;
+}
+
+export interface AnalystTechnicalInput {
+  snapshot: AnalystQuantSnapshotInput;
+  signals?: Record<string, number>;
+  price_history_spark?: number[];
+}
+
+// AnalystRunRequest is the body for POST
+// /api/funds/{fundId}/analysts/run. Every block is optional —
+// the analyst whose block is missing falls back to its
+// "sitting out" path with a neutral / floor verdict.
+export interface AnalystRunRequest {
+  symbol: string;
+  asset_class?: string;
+  market?: string;
+  asof?: string;
+  notes?: string;
+  persist?: boolean;
+  price_last?: number;
+  price_change?: number;
+  volume?: number;
+  avg_volume?: number;
+  fundamentals?: AnalystFundamentalsInput;
+  sentiment?: AnalystSentimentInput;
+  news?: AnalystNewsInput;
+  technical?: AnalystTechnicalInput;
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard
