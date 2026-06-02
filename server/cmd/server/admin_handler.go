@@ -15,9 +15,14 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/marketdata"
+	"github.com/fundai/server/internal/marketimpact"
+	"github.com/fundai/server/internal/lockup"
+	"github.com/fundai/server/internal/securitiesborrow"
 	"github.com/fundai/server/internal/quota"
+	"github.com/fundai/server/internal/quotecache"
 	"github.com/fundai/server/internal/repository"
 	"github.com/fundai/server/internal/subscription"
+	"github.com/fundai/server/internal/wsfeed"
 )
 
 const adminRoleSuperAdmin = "super_admin"
@@ -54,6 +59,40 @@ type adminHandler struct {
 	// per-fund timeline endpoint. Nil → corp-action endpoints return
 	// 503; tests that don't need them can leave it unset.
 	corpActionRepo *repository.CorpActionRepo
+
+	// metrics surfaces lifecycle counters for admin-driven flows
+	// (funding-request approve/reject, broker-link approve, etc.).
+	// Nil-safe in tests; production wires it via newAdminHandler.
+	metrics *serverMetrics
+
+	// marketImpact* are the S6.2 admin shims. Repo is the DB
+	// surface; cache is what the admin upsert / delete handlers
+	// invalidate so the simulator picks up changes immediately;
+	// adapter is the EstimateForProbe source the preview
+	// endpoint calls. All three may be nil in tests, in which
+	// case the corresponding endpoints return 503.
+	marketImpactRepo    *marketimpact.Repo
+	marketImpactCache   *marketimpact.Cache
+	marketImpactAdapter *marketimpact.SlippageAdapter
+
+	// lockupRepo backs the S6.3 IPO / private-placement lock-up
+	// admin endpoints. nil → endpoints return 503.
+	lockupRepo *lockup.Repo
+
+	// borrowRepo / borrowCache back the S6.4 securities-borrow
+	// admin endpoints (rate CRUD, locate audit, accrual ledger).
+	// nil → endpoints return 503.
+	borrowRepo  *securitiesborrow.Repo
+	borrowCache *securitiesborrow.Cache
+
+	// wsFeedManager / wsFeedCache / wsFeedBridge back the S6.5
+	// WebSocket-real-time market-data admin endpoints
+	// (connection status, current subscriptions, cache stats,
+	// force reconnect, manual subscribe). nil → endpoints
+	// return 503.
+	wsFeedManager *wsfeed.Manager
+	wsFeedCache   *quotecache.Cache
+	wsFeedBridge  *wsFeedSubscriptionBridge
 }
 
 // adminSuperAdminChecker implements audit.SuperAdminChecker by reading
@@ -184,6 +223,20 @@ func newAdminHandler(svc *Services) *adminHandler {
 			0, // use default 24h TTL
 		),
 		quotaService: quota.NewService(svc.DB),
+		metrics:      svc.Metrics,
+
+		marketImpactRepo:    svc.MarketImpactRepo,
+		marketImpactCache:   svc.MarketImpactCache,
+		marketImpactAdapter: svc.MarketImpactAdapter,
+
+		lockupRepo: svc.LockupRepo,
+
+		borrowRepo:  svc.BorrowRepo,
+		borrowCache: svc.BorrowCache,
+
+		wsFeedManager: svc.WSFeedManager,
+		wsFeedCache:   svc.WSFeedCache,
+		wsFeedBridge:  svc.WSFeedBridge,
 	}
 	if svc.WorkflowService != nil {
 		if svc.WorkflowService.scheduler != nil {
@@ -236,6 +289,18 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	// more fund holdings, and read back the per-fund timeline.
 	mux.HandleFunc("POST /api/admin/corp-actions", h.handleApplyCorpAction)
 	mux.HandleFunc("GET /api/admin/funds/{fundId}/corp-actions", h.handleListCorpActionsForFund)
+	// P1-6 — broker-link 4-eye approval routes.
+	h.registerBrokerLinkAdminRoutes(mux)
+	h.registerFundingAdminRoutes(mux)
+	h.registerFXAdminRoutes(mux)
+	h.registerReconAdminRoutes(mux)
+	h.registerSurveillanceAdminRoutes(mux)
+	h.registerDrawdownAdminRoutes(mux)
+	h.registerMarketStatusAdminRoutes(mux)
+	h.registerMarketImpactAdminRoutes(mux)
+	h.registerLockupAdminRoutes(mux)
+	h.registerBorrowAdminRoutes(mux)
+	h.registerWSFeedAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

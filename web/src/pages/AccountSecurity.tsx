@@ -1,6 +1,17 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ApiError, changePassword, formatApiError, requestEmailVerification } from "../lib/api";
+import {
+  ApiError,
+  changePassword,
+  disableTwoFA,
+  formatApiError,
+  getTwoFAStatus,
+  requestEmailVerification,
+  setupTwoFA,
+  TwoFASetupResponse,
+  TwoFAStatusResponse,
+  verifyTwoFA,
+} from "../lib/api";
 import { useAppPreferences } from "../lib/preferences";
 
 const AccountSecurity: React.FC = () => {
@@ -17,13 +28,31 @@ const AccountSecurity: React.FC = () => {
   const [resendSuccess, setResendSuccess] = useState<string | null>(null);
   const [resendError, setResendError] = useState<string | null>(null);
 
+  // P0-6 — 2FA state. status is loaded on mount + after every
+  // mutation so the UI reflects the persisted truth without a
+  // round-trip to a refresh button. setup is the in-flight enrol
+  // payload (QR / recovery codes) shown EXACTLY ONCE — once the
+  // user verifies the first code we drop it.
+  const [twoFAStatus, setTwoFAStatus] = useState<TwoFAStatusResponse | null>(null);
+  const [twoFASetup, setTwoFASetup] = useState<TwoFASetupResponse | null>(null);
+  const [twoFACode, setTwoFACode] = useState("");
+  const [twoFAError, setTwoFAError] = useState<string | null>(null);
+  const [twoFAInfo, setTwoFAInfo] = useState<string | null>(null);
+  const [twoFABusy, setTwoFABusy] = useState(false);
+  // Disable form fields. Password is mandatory; the user picks
+  // between TOTP code and recovery code.
+  const [disablePwd, setDisablePwd] = useState("");
+  const [disableCode, setDisableCode] = useState("");
+  const [disableRecovery, setDisableRecovery] = useState("");
+  const [disableMode, setDisableMode] = useState<"code" | "recovery">("code");
+
   const copy = useMemo(
     () =>
       language === "en-US"
         ? {
             title: "Account security",
             subtitle: "Rotate your password, re-issue email verification, and review high-risk operations from one place.",
-            sections: { password: "Change password", verification: "Re-send email verification" },
+            sections: { password: "Change password", verification: "Re-send email verification", twoFA: "Two-factor authentication" },
             labels: { old: "Current password", new: "New password", confirm: "Confirm new password" },
             placeholders: { old: "Current password", new: "At least 8 characters", confirm: "Re-enter the new password" },
             actions: {
@@ -44,11 +73,45 @@ const AccountSecurity: React.FC = () => {
             verificationDescription:
               "If you didn't receive the original verification email, request a new code here. The verify form is on /verify-email.",
             resendInfo: "Code sent. Check your inbox (and spam).",
+            twoFA: {
+              statusLoading: "Loading 2FA status...",
+              enabled: "Two-factor authentication is ENABLED.",
+              disabled: "Two-factor authentication is NOT enabled. Setting it up adds a second factor on top of your password.",
+              enableButton: "Set up 2FA",
+              disableButton: "Disable 2FA",
+              cancelEnrol: "Cancel setup",
+              setupIntro:
+                "1. Open your authenticator app (Google Authenticator, 1Password, Authy, ...). 2. Scan the QR or paste the secret. 3. Enter the 6-digit code below.",
+              scanQR: "Scan this QR code",
+              manualSecret: "Or enter the secret manually:",
+              recoveryHeader: "Recovery codes — save these somewhere safe",
+              recoveryDescription:
+                "Each code can be used ONCE if you lose your authenticator. They are shown EXACTLY ONCE — copy them now.",
+              codePlaceholder: "6-digit code",
+              verifyButton: "Verify and enable",
+              verifying: "Verifying...",
+              passwordPlaceholder: "Current password",
+              recoveryCodePlaceholder: "Recovery code",
+              modeCode: "Use authenticator code",
+              modeRecovery: "Use a recovery code",
+              disableExplain: "Disabling 2FA requires both your password AND a current code (or one of your recovery codes).",
+              disableConfirm: "Disable 2FA",
+              disabling: "Disabling...",
+              disabledNotice: "2FA disabled. You can re-enable it any time.",
+              enabledNotice: "2FA enabled successfully.",
+              enrolFailed: "Could not start 2FA setup",
+              verifyFailed: "Could not verify 2FA code",
+              disableFailed: "Could not disable 2FA",
+              statusFailed: "Could not load 2FA status",
+              copyHint: "(click to copy)",
+              copied: "Copied",
+              lastVerified: (when: string) => `Last verified: ${when}`,
+            },
           }
         : {
             title: "账户安全",
             subtitle: "更换密码、重发邮箱验证码以及查看高风险操作，全部在这里一站完成。",
-            sections: { password: "修改密码", verification: "重新发送邮箱验证码" },
+            sections: { password: "修改密码", verification: "重新发送邮箱验证码", twoFA: "二次验证（2FA）" },
             labels: { old: "当前密码", new: "新密码", confirm: "确认新密码" },
             placeholders: { old: "当前密码", new: "至少 8 位", confirm: "请再次输入新密码" },
             actions: {
@@ -69,6 +132,40 @@ const AccountSecurity: React.FC = () => {
             verificationDescription:
               "如果未收到初次邮箱验证邮件，可在此重新申请验证码，然后到 /verify-email 页面完成验证。",
             resendInfo: "验证码已发送，请前往邮箱（含垃圾邮件）查收。",
+            twoFA: {
+              statusLoading: "正在加载二次验证状态...",
+              enabled: "二次验证已开启。",
+              disabled: "二次验证未启用。开启后登录时除密码外还需输入动态验证码。",
+              enableButton: "开启二次验证",
+              disableButton: "关闭二次验证",
+              cancelEnrol: "取消设置",
+              setupIntro:
+                "1. 打开身份验证器 App（Google Authenticator / 1Password / Authy 等）。2. 扫描二维码或手动输入密钥。3. 输入下方 6 位验证码完成绑定。",
+              scanQR: "扫描下方二维码",
+              manualSecret: "或手动输入密钥：",
+              recoveryHeader: "恢复码 — 请妥善保存",
+              recoveryDescription:
+                "每个恢复码仅可使用一次，用于丢失身份验证器时登录。本次显示后将不再展示，请立即复制保存。",
+              codePlaceholder: "6 位验证码",
+              verifyButton: "验证并启用",
+              verifying: "验证中...",
+              passwordPlaceholder: "当前密码",
+              recoveryCodePlaceholder: "恢复码",
+              modeCode: "使用验证器代码",
+              modeRecovery: "使用恢复码",
+              disableExplain: "关闭二次验证需要同时提供密码与一次有效验证码（或恢复码）。",
+              disableConfirm: "确认关闭",
+              disabling: "处理中...",
+              disabledNotice: "二次验证已关闭，可随时重新开启。",
+              enabledNotice: "二次验证已成功启用。",
+              enrolFailed: "无法开始二次验证设置",
+              verifyFailed: "二次验证代码校验失败",
+              disableFailed: "关闭二次验证失败",
+              statusFailed: "二次验证状态加载失败",
+              copyHint: "（点击复制）",
+              copied: "已复制",
+              lastVerified: (when: string) => `上次验证：${when}`,
+            },
           },
     [language],
   );
@@ -117,6 +214,108 @@ const AccountSecurity: React.FC = () => {
     } finally {
       setResending(false);
     }
+  }
+
+  // P0-6 — load status on mount. We tolerate failures: a 404 / 503
+  // (TOTP_ENCRYPTION_KEY not set) leaves the section visible but
+  // disabled, and we surface the error inline so the operator can
+  // see what's wrong rather than guessing.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await getTwoFAStatus();
+        if (!cancelled) setTwoFAStatus(s);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
+          // 2FA endpoint not registered (no TOTP_ENCRYPTION_KEY).
+          setTwoFAStatus({ enabled: false, enrolmentPending: false });
+          return;
+        }
+        const message = err instanceof ApiError ? formatApiError(err, copy.twoFA.statusFailed) : copy.twoFA.statusFailed;
+        setTwoFAError(message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [copy.twoFA.statusFailed]);
+
+  async function handleStartTwoFASetup() {
+    setTwoFAError(null);
+    setTwoFAInfo(null);
+    setTwoFABusy(true);
+    try {
+      const setup = await setupTwoFA();
+      setTwoFASetup(setup);
+      setTwoFACode("");
+    } catch (err) {
+      const message = err instanceof ApiError ? formatApiError(err, copy.twoFA.enrolFailed) : copy.twoFA.enrolFailed;
+      setTwoFAError(message);
+    } finally {
+      setTwoFABusy(false);
+    }
+  }
+
+  async function handleVerifyTwoFA() {
+    if (!twoFACode.trim()) return;
+    setTwoFAError(null);
+    setTwoFABusy(true);
+    try {
+      await verifyTwoFA(twoFACode.trim());
+      setTwoFASetup(null);
+      setTwoFACode("");
+      setTwoFAInfo(copy.twoFA.enabledNotice);
+      // refresh status so the UI flips to "enabled".
+      try {
+        const s = await getTwoFAStatus();
+        setTwoFAStatus(s);
+      } catch {
+        // best-effort; the explicit success notice is the source of truth.
+      }
+    } catch (err) {
+      const message = err instanceof ApiError ? formatApiError(err, copy.twoFA.verifyFailed) : copy.twoFA.verifyFailed;
+      setTwoFAError(message);
+    } finally {
+      setTwoFABusy(false);
+    }
+  }
+
+  function handleCancelTwoFASetup() {
+    setTwoFASetup(null);
+    setTwoFACode("");
+    setTwoFAError(null);
+  }
+
+  async function handleDisableTwoFA() {
+    if (!disablePwd.trim()) return;
+    if (disableMode === "code" && !disableCode.trim()) return;
+    if (disableMode === "recovery" && !disableRecovery.trim()) return;
+    setTwoFAError(null);
+    setTwoFABusy(true);
+    try {
+      await disableTwoFA({
+        password: disablePwd,
+        code: disableMode === "code" ? disableCode.trim() : undefined,
+        recoveryCode: disableMode === "recovery" ? disableRecovery.trim() : undefined,
+      });
+      setDisablePwd("");
+      setDisableCode("");
+      setDisableRecovery("");
+      setTwoFAInfo(copy.twoFA.disabledNotice);
+      setTwoFAStatus({ enabled: false, enrolmentPending: false });
+    } catch (err) {
+      const message = err instanceof ApiError ? formatApiError(err, copy.twoFA.disableFailed) : copy.twoFA.disableFailed;
+      setTwoFAError(message);
+    } finally {
+      setTwoFABusy(false);
+    }
+  }
+
+  function copyToClipboard(text: string) {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(text).catch(() => undefined);
   }
 
   return (
@@ -203,6 +402,168 @@ const AccountSecurity: React.FC = () => {
           {resendError ? (
             <div className="mt-4 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
               {resendError}
+            </div>
+          ) : null}
+        </section>
+
+        {/* P0-6 — Two-factor authentication */}
+        <section className="mt-8 rounded-3xl border border-white/10 bg-white/5 p-8 shadow-xl backdrop-blur">
+          <h2 className="text-xl font-semibold text-slate-100">{copy.sections.twoFA}</h2>
+          {twoFAStatus === null ? (
+            <p className="mt-3 text-sm text-slate-300">{copy.twoFA.statusLoading}</p>
+          ) : twoFASetup ? (
+            <div className="mt-5 space-y-5">
+              <p className="text-sm leading-6 text-slate-300">{copy.twoFA.setupIntro}</p>
+              <div className="grid gap-5 md:grid-cols-2">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-slate-400">{copy.twoFA.scanQR}</p>
+                  <div className="mt-2 rounded-2xl bg-white p-3">
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(twoFASetup.provisioningUri)}`}
+                      alt="2FA QR code"
+                      className="h-48 w-48"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <p className="text-xs uppercase tracking-wide text-slate-400">{copy.twoFA.manualSecret}</p>
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(twoFASetup.secret)}
+                    className="break-all rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-left font-mono text-sm text-emerald-200 transition hover:border-emerald-400/40"
+                    title={copy.twoFA.copyHint}
+                  >
+                    {twoFASetup.secret}
+                  </button>
+                  <p className="text-xs text-slate-400">{copy.twoFA.copyHint}</p>
+                </div>
+              </div>
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-5">
+                <p className="text-sm font-semibold text-amber-200">{copy.twoFA.recoveryHeader}</p>
+                <p className="mt-2 text-xs leading-5 text-amber-100/80">{copy.twoFA.recoveryDescription}</p>
+                <ul className="mt-3 grid grid-cols-2 gap-2 text-sm font-mono text-amber-100">
+                  {twoFASetup.recoveryCodes.map((c) => (
+                    <li key={c} className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                      {c}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={8}
+                  value={twoFACode}
+                  onChange={(e) => setTwoFACode(e.target.value.replace(/[^0-9]/g, ""))}
+                  placeholder={copy.twoFA.codePlaceholder}
+                  className="w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 font-mono text-lg tracking-widest text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40 sm:w-48"
+                />
+                <button
+                  type="button"
+                  disabled={twoFABusy || twoFACode.length < 6}
+                  onClick={handleVerifyTwoFA}
+                  className="rounded-2xl bg-indigo-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {twoFABusy ? copy.twoFA.verifying : copy.twoFA.verifyButton}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelTwoFASetup}
+                  className="rounded-2xl border border-white/10 bg-transparent px-4 py-3 text-sm text-slate-300 transition hover:border-white/20"
+                >
+                  {copy.twoFA.cancelEnrol}
+                </button>
+              </div>
+            </div>
+          ) : twoFAStatus.enabled ? (
+            <div className="mt-5 space-y-5">
+              <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+                {copy.twoFA.enabled}
+                {twoFAStatus.lastVerifiedAt ? (
+                  <span className="ml-2 text-xs text-emerald-100/80">{copy.twoFA.lastVerified(twoFAStatus.lastVerifiedAt)}</span>
+                ) : null}
+              </div>
+              <p className="text-sm leading-6 text-slate-300">{copy.twoFA.disableExplain}</p>
+              <div className="grid gap-3 md:grid-cols-2">
+                <input
+                  type="password"
+                  value={disablePwd}
+                  onChange={(e) => setDisablePwd(e.target.value)}
+                  placeholder={copy.twoFA.passwordPlaceholder}
+                  autoComplete="current-password"
+                  className="rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                />
+                <div className="flex flex-col gap-2">
+                  <div className="flex gap-3 text-xs text-slate-300">
+                    <label className="flex items-center gap-1">
+                      <input
+                        type="radio"
+                        checked={disableMode === "code"}
+                        onChange={() => setDisableMode("code")}
+                      />
+                      {copy.twoFA.modeCode}
+                    </label>
+                    <label className="flex items-center gap-1">
+                      <input
+                        type="radio"
+                        checked={disableMode === "recovery"}
+                        onChange={() => setDisableMode("recovery")}
+                      />
+                      {copy.twoFA.modeRecovery}
+                    </label>
+                  </div>
+                  {disableMode === "code" ? (
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={8}
+                      value={disableCode}
+                      onChange={(e) => setDisableCode(e.target.value.replace(/[^0-9]/g, ""))}
+                      placeholder={copy.twoFA.codePlaceholder}
+                      className="rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 font-mono text-sm tracking-widest text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      value={disableRecovery}
+                      onChange={(e) => setDisableRecovery(e.target.value)}
+                      placeholder={copy.twoFA.recoveryCodePlaceholder}
+                      className="rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 font-mono text-sm tracking-widest text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                    />
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleDisableTwoFA}
+                disabled={twoFABusy}
+                className="rounded-2xl border border-rose-400/40 bg-rose-500/10 px-4 py-3 text-sm font-semibold text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {twoFABusy ? copy.twoFA.disabling : copy.twoFA.disableConfirm}
+              </button>
+            </div>
+          ) : (
+            <div className="mt-5 space-y-4">
+              <p className="text-sm leading-6 text-slate-300">{copy.twoFA.disabled}</p>
+              <button
+                type="button"
+                onClick={handleStartTwoFASetup}
+                disabled={twoFABusy}
+                className="rounded-2xl bg-indigo-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {twoFABusy ? copy.actions.changing : copy.twoFA.enableButton}
+              </button>
+            </div>
+          )}
+          {twoFAInfo ? (
+            <div className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+              {twoFAInfo}
+            </div>
+          ) : null}
+          {twoFAError ? (
+            <div className="mt-4 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+              {twoFAError}
             </div>
           ) : null}
         </section>

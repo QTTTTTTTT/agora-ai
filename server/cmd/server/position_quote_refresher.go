@@ -53,6 +53,13 @@ type positionQuoteRefresher struct {
 	// refresher operating on holding_positions only, matching
 	// the legacy pre-PR-3A1 behaviour.
 	lotRepo *repository.LotRepo
+	// wsCache is OPTIONAL. When non-nil, each refresh pass
+	// first consults the WS-feed quote cache (S6.5) and
+	// substitutes any fresh cached snapshot for the REST
+	// quote. This eliminates upstream calls for actively-
+	// traded symbols and keeps holding_positions in sync
+	// with the same prices the broker hot path sees.
+	wsCache wsCacheLookup
 	metrics positionRefreshMetrics
 
 	tickInSession  time.Duration
@@ -83,6 +90,27 @@ type noopPositionRefreshMetrics struct{}
 
 func (noopPositionRefreshMetrics) RecordRefreshPass(int, time.Duration, bool) {}
 
+// wsCacheLookup is the minimal slice of *quotecache.Cache the
+// refresher needs. Kept as an interface so unit tests can
+// substitute a fake without depending on the live cache.
+type wsCacheLookup interface {
+	// Lookup returns (snapshot, ok, stale). ok=false means
+	// the symbol has no WS data; stale=true means the symbol
+	// has data but it's older than the cache's StaleAfter
+	// window and the caller should fall back to REST.
+	Lookup(symbol string) (snap wsCacheSnap, ok bool, stale bool)
+}
+
+// wsCacheSnap is the per-symbol view of cached WS data. Only
+// the price/bid/ask + timestamp matter for the refresher;
+// other fields (provider, market) are ignored.
+type wsCacheSnap struct {
+	Last       float64
+	Bid        float64
+	Ask        float64
+	AsOf       time.Time
+}
+
 func newPositionQuoteRefresher(fundRepo *repository.FundRepo, positionRepo *repository.PositionRepo, marketData *marketdata.Service) *positionQuoteRefresher {
 	return &positionQuoteRefresher{
 		fundRepo:       fundRepo,
@@ -104,6 +132,16 @@ func newPositionQuoteRefresher(fundRepo *repository.FundRepo, positionRepo *repo
 			return marketdata.IsMajorMarketActive(now)
 		},
 	}
+}
+
+// SetWSCache wires the S6.5 WebSocket quote cache. nil disables
+// the WS overlay and the refresher behaves identically to pre-
+// S6.5 (REST-only path).
+func (r *positionQuoteRefresher) SetWSCache(cache wsCacheLookup) {
+	if r == nil {
+		return
+	}
+	r.wsCache = cache
 }
 
 // SetLeaderChecker wires the distributed leader-election check so only one
@@ -288,6 +326,37 @@ func (r *positionQuoteRefresher) runOnce() {
 		refs = append(refs, ref)
 	}
 	bySymbol := r.marketData.GetQuotes(ctx, refs)
+	// S6.5 WS overlay: for any symbol that has a fresh WS
+	// cache hit, use that snapshot instead of the REST result.
+	// WS data is by definition more recent (push semantics) so
+	// this only ever moves prices forward, never backwards.
+	if r.wsCache != nil {
+		now := r.nowFn()
+		for _, ref := range refs {
+			key := ref.NormalizedSymbol()
+			snap, ok, stale := r.wsCache.Lookup(ref.NormalizedSymbol())
+			if !ok || stale || snap.Last <= 0 {
+				continue
+			}
+			existing := bySymbol[key]
+			if existing != nil && !existing.AsOf.IsZero() && existing.AsOf.After(snap.AsOf) {
+				// REST quote is somehow newer (e.g. WS just
+				// reconnected and we haven't received the
+				// first tick yet) — keep the REST value.
+				continue
+			}
+			bySymbol[key] = &marketdata.QuoteSnapshot{
+				Symbol:    ref.NormalizedSymbol(),
+				Price:     snap.Last,
+				Bid:       snap.Bid,
+				Ask:       snap.Ask,
+				AsOf:      snap.AsOf,
+				IsStale:   false,
+				Source:    "wsfeed",
+			}
+			_ = now
+		}
+	}
 	if len(bySymbol) == 0 {
 		slog.Debug("position quote refresh: no quotes returned",
 			"unique_instruments", len(refs),

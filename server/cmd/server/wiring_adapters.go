@@ -1585,6 +1585,12 @@ type runtimeTradingEngine struct {
 	lotRepo   *repository.LotRepo
 	lotLedger *lotledger.Service
 	uow       repository.UnitOfWork
+
+	// cashLedger captures every cash movement at fill granularity
+	// (P1-1). Optional: when nil the engine writes nothing to the
+	// journal, which is the legacy behaviour and is fine for
+	// tests that don't care about reconciliation.
+	cashLedger *repository.CashLedgerRepo
 }
 
 type hardRiskState struct {
@@ -6077,6 +6083,7 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			lotRepo:      lotRepo,
 			lotLedger:    lotLedger,
 			uow:          uow,
+			cashLedger:   repository.NewCashLedgerRepo(s.db),
 		},
 		&runtimeMemorySystem{
 			db:           s.db,
@@ -17815,39 +17822,52 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	// was zero).
 	slippagePct := computeSlippagePct(side, planPrice, filledPrice)
 	executedAt := time.Now().UTC()
+	// P0-4: mint a deterministic idempotency key from
+	// (plan_action_id, side, attempt) so that an HTTP retry, a
+	// process restart, or any other duplicate path that calls
+	// tradeRepoCreateAndFill for the same plan_action_id collapses
+	// to the existing row rather than double-booking. The key MUST
+	// include side because reduce/sell against the same action_id
+	// is logically a different submission. quantity is appended to
+	// disambiguate partial-fill follow-ons (a future PR may slice
+	// a single action into multiple smaller submissions). The key
+	// is empty when action.ID is empty (synthetic test fixtures);
+	// in that case Create falls back to its non-idempotent path.
+	clientIdempotencyKey := mintTradeIdempotencyKey(action.ID, side, quantity)
 	trade := &repository.TradeExecution{
-		FundID:             fund.ID,
-		PlanID:             nullUUID(plan.ID),
-		PlanActionID:       nullUUID(action.ID),
-		InstrumentKey:      firstNonEmptyValue(action.InstrumentKey, buildInstrumentKey(action.Exchange.String, action.Symbol), action.Symbol),
-		Symbol:             action.Symbol,
-		Market:             action.Market,
-		Exchange:           action.Exchange,
-		AssetClass:         action.AssetClass,
-		InstrumentType:     action.InstrumentType,
-		Side:               side,
-		PositionSide:       action.PositionSide,
-		OpenClose:          action.OpenClose,
-		OrderType:          executionOrderType(action),
-		Quantity:           float64(quantity),
-		Price:              nullableFloat(planPrice),
-		Amount:             nullableFloat(amount),
-		FilledQty:          float64(quantity),
-		FilledPrice:        filledPrice,
-		FeeCommission:      feeCommission,
-		FeeStampTax:        feeStampTax,
-		FeeTransfer:        feeTransfer,
-		TradingMode:        normalizedTradingMode(fund.TradingMode),
-		Status:             status,
-		ExecutedAt:         sql.NullTime{Time: executedAt, Valid: true},
-		QuoteCurrency:      action.QuoteCurrency,
-		SettlementCurrency: action.SettlementCurrency,
-		MarginMode:         action.MarginMode,
-		Leverage:           action.Leverage,
-		ContractMultiplier: action.ContractMultiplier,
-		ExpiryDate:         action.ExpiryDate,
-		ReduceOnly:         action.ReduceOnly,
-		SlippagePct:        slippagePct,
+		FundID:               fund.ID,
+		PlanID:               nullUUID(plan.ID),
+		PlanActionID:         nullUUID(action.ID),
+		InstrumentKey:        firstNonEmptyValue(action.InstrumentKey, buildInstrumentKey(action.Exchange.String, action.Symbol), action.Symbol),
+		Symbol:               action.Symbol,
+		Market:               action.Market,
+		Exchange:             action.Exchange,
+		AssetClass:           action.AssetClass,
+		InstrumentType:       action.InstrumentType,
+		Side:                 side,
+		PositionSide:         action.PositionSide,
+		OpenClose:            action.OpenClose,
+		OrderType:            executionOrderType(action),
+		Quantity:             float64(quantity),
+		Price:                nullableFloat(planPrice),
+		Amount:               nullableFloat(amount),
+		FilledQty:            float64(quantity),
+		FilledPrice:          filledPrice,
+		FeeCommission:        feeCommission,
+		FeeStampTax:          feeStampTax,
+		FeeTransfer:          feeTransfer,
+		TradingMode:          normalizedTradingMode(fund.TradingMode),
+		Status:               status,
+		ExecutedAt:           sql.NullTime{Time: executedAt, Valid: true},
+		QuoteCurrency:        action.QuoteCurrency,
+		SettlementCurrency:   action.SettlementCurrency,
+		MarginMode:           action.MarginMode,
+		Leverage:             action.Leverage,
+		ContractMultiplier:   action.ContractMultiplier,
+		ExpiryDate:           action.ExpiryDate,
+		ReduceOnly:           action.ReduceOnly,
+		SlippagePct:          slippagePct,
+		ClientIdempotencyKey: clientIdempotencyKey,
 	}
 	tradeID, err := e.tradeRepo.Create(ctx, trade)
 	if err != nil {
@@ -17861,7 +17881,138 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	// has already filled, and the FIFO ledger can be reconciled
 	// later if it drifts.
 	e.recordLotFill(ctx, fund, action, tradeID, side, quantity, filledPrice, planPrice, feeCommission+feeStampTax+feeTransfer, executedAt, status)
+	// P1-1 — append cash_ledger rows for this fill so the journal
+	// stays in sync with funds.current_capital. Best-effort: a
+	// failure here doesn't roll the trade back, but the row's
+	// idempotency_key lets a future reconciliation job re-attempt
+	// the missed entries safely.
+	if status == "filled" {
+		filledExecutionPrice := planPrice
+		if filledPrice.Valid && filledPrice.Float64 > 0 {
+			filledExecutionPrice = filledPrice.Float64
+		}
+		e.recordCashLedgerForFill(ctx, fund, plan, action, tradeID, side, quantity, filledExecutionPrice, amount, feeCommission, feeStampTax, feeTransfer, executedAt)
+	}
 	return nil
+}
+
+// recordCashLedgerForFill writes the per-leg cash_ledger rows
+// for a single equity fill (P1-1). Best-effort: on failure we
+// log + count but do NOT bubble the error so the trade flow
+// stays unchanged. The idempotency_key is deterministic
+// ("trade:{tradeID}:{leg}") so a retry path collapses cleanly.
+//
+// Sign convention reminder: amounts are SIGNED.
+//
+//	buy
+//	  notional      = -quantity * price       (cash out)
+//	  commission    = -feeCommission          (cash out)
+//	  transfer_fee  = -feeTransfer            (cash out)
+//	  stamp_tax     = -feeStampTax            (cash out, usually 0 for buys)
+//	sell
+//	  notional      = +quantity * price       (cash in)
+//	  commission    = -feeCommission          (cash out)
+//	  transfer_fee  = -feeTransfer            (cash out)
+//	  stamp_tax     = -feeStampTax            (cash out)
+//
+// We deliberately separate the four legs rather than netting
+// them so reports can subtotal commissions cleanly. Net cash
+// movement equals SUM over the four entries.
+//
+// Currency: we record the fund's quote currency (action.QuoteCurrency)
+// when present, otherwise USD. P1-4 (FX) is responsible for
+// folding multi-currency entries into base-currency NAV.
+func (e *runtimeTradingEngine) recordCashLedgerForFill(
+	ctx context.Context,
+	fund *repository.Fund,
+	plan *repository.InvestmentPlan,
+	action repository.PlanAction,
+	tradeID string,
+	side string,
+	quantity int,
+	executionPrice float64,
+	notional float64,
+	feeCommission, feeStampTax, feeTransfer float64,
+	executedAt time.Time,
+) {
+	if e == nil || e.cashLedger == nil {
+		return
+	}
+	if fund == nil || fund.ID == "" || tradeID == "" {
+		return
+	}
+	currency := "USD"
+	if action.QuoteCurrency.Valid && strings.TrimSpace(action.QuoteCurrency.String) != "" {
+		currency = strings.ToUpper(strings.TrimSpace(action.QuoteCurrency.String))
+	}
+	tradingDate := executedAt
+	planID := ""
+	if plan != nil {
+		planID = plan.ID
+		if !plan.TradingDate.IsZero() {
+			tradingDate = plan.TradingDate
+		}
+	}
+	desc := fmt.Sprintf("%s %d %s @ %.4f", side, quantity, action.Symbol, executionPrice)
+	commonMeta := map[string]any{
+		"symbol":     action.Symbol,
+		"quantity":   quantity,
+		"price":      executionPrice,
+		"action_id":  action.ID,
+	}
+
+	type leg struct {
+		entryType string
+		amount    float64
+		key       string
+	}
+	var legs []leg
+	if strings.EqualFold(side, "buy") {
+		legs = []leg{
+			{entryType: repository.CashEntryTradeBuyNotional, amount: -notional, key: "notional"},
+			{entryType: repository.CashEntryTradeBuyCommission, amount: -feeCommission, key: "commission"},
+			{entryType: repository.CashEntryTradeBuyTransfer, amount: -feeTransfer, key: "transfer"},
+			{entryType: repository.CashEntryTradeBuyStampTax, amount: -feeStampTax, key: "stamp_tax"},
+		}
+	} else {
+		legs = []leg{
+			{entryType: repository.CashEntryTradeSellNotional, amount: notional, key: "notional"},
+			{entryType: repository.CashEntryTradeSellCommission, amount: -feeCommission, key: "commission"},
+			{entryType: repository.CashEntryTradeSellTransfer, amount: -feeTransfer, key: "transfer"},
+			{entryType: repository.CashEntryTradeSellStampTax, amount: -feeStampTax, key: "stamp_tax"},
+		}
+	}
+	for _, l := range legs {
+		// Skip zero-fee legs — the table CHECK rejects amount=0
+		// and there's no point recording "no commission paid".
+		if l.amount == 0 {
+			continue
+		}
+		params := repository.AppendParams{
+			FundID:         fund.ID,
+			PostedAt:       executedAt,
+			TradingDate:    &tradingDate,
+			EntryType:      l.entryType,
+			Amount:         roundCurrency(l.amount),
+			Currency:       currency,
+			TradeID:        tradeID,
+			PlanID:         planID,
+			PlanActionID:   action.ID,
+			Description:    desc,
+			Metadata:       commonMeta,
+			IdempotencyKey: fmt.Sprintf("trade:%s:%s", tradeID, l.key),
+		}
+		if _, err := e.cashLedger.Append(ctx, params); err != nil {
+			slog.Warn("cash_ledger: append failed",
+				"fund_id", fund.ID,
+				"trade_id", tradeID,
+				"entry_type", l.entryType,
+				"err", err.Error())
+			if e.metrics != nil {
+				e.metrics.RecordCashLedgerWriteFailure(l.entryType)
+			}
+		}
+	}
 }
 
 // recordLotFill bridges a successful trade-fill into the FIFO
@@ -18959,6 +19110,32 @@ func nullableFloat(value float64) sql.NullFloat64 {
 		return sql.NullFloat64{}
 	}
 	return sql.NullFloat64{Float64: value, Valid: true}
+}
+
+// mintTradeIdempotencyKey produces a deterministic client-side
+// idempotency key for a trade submission. It is the bridge between
+// the runtime engine's "I want to fill this plan_action" intent and
+// the broker.PlaceOrderRequest.ClientOrderID contract: the value
+// returned here flows into trade_executions.client_idempotency_key,
+// which has a partial UNIQUE index (migration 027) so duplicate
+// submissions for the same (action, side, qty) collapse to the
+// existing row instead of double-booking.
+//
+// Format: "trade:<actionID>:<side>:<qty>". Empty actionID returns an
+// invalid sql.NullString so legacy / synthetic call sites that lack a
+// plan_action_id keep the legacy non-idempotent insert path.
+func mintTradeIdempotencyKey(actionID, side string, quantity int) sql.NullString {
+	if strings.TrimSpace(actionID) == "" {
+		return sql.NullString{}
+	}
+	side = strings.ToLower(strings.TrimSpace(side))
+	if side == "" {
+		side = "buy"
+	}
+	return sql.NullString{
+		String: fmt.Sprintf("trade:%s:%s:%d", actionID, side, quantity),
+		Valid:  true,
+	}
 }
 
 func nullUUID(value string) sql.NullString {

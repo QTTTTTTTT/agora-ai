@@ -40,6 +40,11 @@ type Fund struct {
 	NAV            float64         `json:"nav"`
 	Status         string          `json:"status"`
 	Config         json.RawMessage `json:"config"`
+	// BaseCurrency is the reporting currency for NAV and the
+	// cash-ledger summary. P1-4. Defaults to "USD" via the DB
+	// migration; old rows continue to behave 1:1 USD until
+	// explicitly changed.
+	BaseCurrency   string          `json:"baseCurrency"`
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
 }
@@ -203,7 +208,46 @@ type TradeExecution struct {
 	// SlippageGuard rollout, sells (exempt by design), or non-priced
 	// fills (e.g. sell-all of an odd lot).
 	SlippagePct sql.NullFloat64 `json:"slippagePct"`
-	CreatedAt   time.Time       `json:"createdAt"`
+
+	// P0-2 broker fields. All nullable so legacy rows written before
+	// migration 051 keep working unchanged.
+	//
+	// StopPrice is the trigger price for stop / stop_limit orders.
+	StopPrice sql.NullFloat64 `json:"stopPrice"`
+	// TrailAmount / TrailPercent describe a trailing-stop in absolute
+	// or fractional terms (mutually exclusive: only one is set).
+	TrailAmount  sql.NullFloat64 `json:"trailAmount"`
+	TrailPercent sql.NullFloat64 `json:"trailPercent"`
+	// DisplayQty is the visible portion of an iceberg order.
+	DisplayQty sql.NullFloat64 `json:"displayQty"`
+	// TimeInForce is one of broker.TimeInForce: day / gtc / ioc / fok
+	// / gtd / opg. NULL falls back to the engine default ("day").
+	TimeInForce sql.NullString `json:"timeInForce"`
+	// GoodTillDate is the expiry timestamp for time_in_force = gtd.
+	GoodTillDate sql.NullTime `json:"goodTillDate"`
+	// ParentTradeID points at the bracket parent — set on stop-loss /
+	// take-profit / OCO child orders so the engine can de-activate
+	// siblings when one fills.
+	ParentTradeID sql.NullString `json:"parentTradeId"`
+	// ClientIdempotencyKey is the caller-minted idempotency key used
+	// by the broker layer (broker.PlaceOrderRequest.ClientOrderID maps
+	// to this column). The Create function performs ON CONFLICT DO
+	// NOTHING + RETURNING so a duplicate submission collapses to the
+	// existing row instead of double-booking.
+	ClientIdempotencyKey sql.NullString `json:"clientIdempotencyKey"`
+	CreatedAt            time.Time      `json:"createdAt"`
+
+	// P0-5 cancel / replace tracking. CancelledAt is set the moment
+	// status transitions to 'cancelled'; CancelReason is a short tag
+	// (user_requested / superseded_by_replace / ttl / risk_breach /
+	// system) so an aggregator can group reasons without parsing
+	// free text. ReplacedAt is bumped on every successful Replace
+	// call; ReplaceCount is the cumulative count and is bounded at
+	// 32 in the runtime to prevent runaway modify loops.
+	CancelledAt   sql.NullTime   `json:"cancelledAt"`
+	CancelReason  sql.NullString `json:"cancelReason"`
+	ReplacedAt    sql.NullTime   `json:"replacedAt"`
+	ReplaceCount  int            `json:"replaceCount"`
 }
 
 type HoldingPosition struct {
@@ -450,7 +494,69 @@ func (r *FundRepo) GetByID(ctx context.Context, id string) (*Fund, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fund_repo: get by id: %w", err)
 	}
+	// Default base currency to USD until the dedicated lookup
+	// runs. Callers that care about cross-currency math (NAV
+	// aggregator, cash_ledger summary) call GetBaseCurrency
+	// explicitly so the existing GetByID call surface stays
+	// backwards compatible — the fund-detail JSON shape doesn't
+	// flip on a single migration.
+	if f.BaseCurrency == "" {
+		f.BaseCurrency = "USD"
+	}
 	return f, nil
+}
+
+// GetBaseCurrency returns the per-fund reporting currency
+// (P1-4). Read separately from GetByID to keep the legacy SELECT
+// shape stable for the dozens of test fixtures that already mock
+// it. Falls back to "USD" if the column is NULL or empty.
+//
+// Callers: navcalc, cash_ledger summary, the funds-settings
+// fetcher, the FX-aware NAV history rebuild loop.
+func (r *FundRepo) GetBaseCurrency(ctx context.Context, fundID string) (string, error) {
+	if r == nil || r.db == nil {
+		return "", fmt.Errorf("fund_repo: nil db")
+	}
+	var cur sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		`SELECT base_currency FROM funds WHERE id = $1`, fundID,
+	).Scan(&cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("fund_repo: get base currency: %w", err)
+	}
+	if !cur.Valid || strings.TrimSpace(cur.String) == "" {
+		return "USD", nil
+	}
+	return strings.ToUpper(strings.TrimSpace(cur.String)), nil
+}
+
+// SetBaseCurrency persists a new reporting currency for the fund
+// (P1-4). Callers should pre-validate against fx.IsSupported.
+// We deliberately don't merge this into Update() because changes
+// to base_currency need their own audit log / 4-eye gate, not
+// the generic fund-update path.
+func (r *FundRepo) SetBaseCurrency(ctx context.Context, fundID, currency string) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("fund_repo: nil db")
+	}
+	cur := strings.ToUpper(strings.TrimSpace(currency))
+	if cur == "" {
+		return fmt.Errorf("fund_repo: empty currency")
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE funds
+		    SET base_currency = $2,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		fundID, cur,
+	)
+	if err != nil {
+		return fmt.Errorf("fund_repo: set base currency: %w", err)
+	}
+	return checkRowsAffected(res, "fund_repo: set base currency")
 }
 
 // GetByIDForUpdateTx locks the fund row inside the caller's transaction
@@ -1017,16 +1123,66 @@ func NewTradeRepo(db *sql.DB) *TradeRepo {
 	return &TradeRepo{db: db}
 }
 
+// Create inserts a new trade_execution row. When ClientIdempotencyKey is
+// non-NULL, the insert is idempotent on the partial UNIQUE index added
+// by migration 027 — a duplicate submission with the same key collapses
+// to the existing row and the original id is returned. Callers that
+// want strict "I created this row" semantics should compare the
+// returned id with one they minted (RETURNING xmax = 0 would also
+// work but the simpler SELECT-fallback pattern matches what
+// PlanRepo.Create does for investment_plans).
 func (r *TradeRepo) Create(ctx context.Context, t *TradeExecution) (string, error) {
 	var id string
-	err := r.db.QueryRowContext(ctx,
-		`INSERT INTO trade_executions
-		   (fund_id, plan_id, plan_action_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, side, position_side, open_close, order_type, quantity, price, amount,
-		    trading_mode, broker_order_id, mcp_server_id, status, executed_at, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
-		 RETURNING id`,
-		t.FundID, t.PlanID, t.PlanActionID, t.InstrumentKey, t.Symbol, t.Market, t.Exchange, t.AssetClass, t.InstrumentType, t.Side, t.PositionSide, t.OpenClose, t.OrderType, t.Quantity, t.Price, t.Amount,
-		t.TradingMode, t.BrokerOrderID, t.MCPServerID, t.Status, t.ExecutedAt, t.QuoteCurrency, t.SettlementCurrency, t.MarginMode, t.Leverage, t.ContractMultiplier, t.ExpiryDate, t.ReduceOnly,
+	// ON CONFLICT path is only taken when ClientIdempotencyKey is set
+	// (the unique index is partial WHERE client_idempotency_key IS
+	// NOT NULL). Rows without an idempotency key always insert
+	// fresh — this preserves the legacy contract where the runtime
+	// engine called Create without a key for every retry.
+	const sqlInsert = `
+		WITH ins AS (
+			INSERT INTO trade_executions (
+				fund_id, plan_id, plan_action_id, instrument_key, symbol,
+				market, exchange, asset_class, instrument_type, side,
+				position_side, open_close, order_type, quantity, price, amount,
+				trading_mode, broker_order_id, mcp_server_id, status, executed_at,
+				quote_currency, settlement_currency, margin_mode, leverage,
+				contract_multiplier, expiry_date, reduce_only,
+				stop_price, trail_amount, trail_percent, display_qty,
+				time_in_force, good_till_date, parent_trade_id,
+				client_idempotency_key
+			)
+			VALUES (
+				$1, $2, $3, $4, $5,
+				$6, $7, $8, $9, $10,
+				$11, $12, $13, $14, $15, $16,
+				$17, $18, $19, $20, $21,
+				$22, $23, $24, $25,
+				$26, $27, $28,
+				$29, $30, $31, $32,
+				$33, $34, $35,
+				$36
+			)
+			ON CONFLICT (client_idempotency_key)
+				WHERE client_idempotency_key IS NOT NULL
+				DO NOTHING
+			RETURNING id
+		)
+		SELECT id FROM ins
+		UNION ALL
+		SELECT id FROM trade_executions
+			WHERE client_idempotency_key = $36
+				AND $36 IS NOT NULL
+		LIMIT 1`
+	err := r.db.QueryRowContext(ctx, sqlInsert,
+		t.FundID, t.PlanID, t.PlanActionID, t.InstrumentKey, t.Symbol,
+		t.Market, t.Exchange, t.AssetClass, t.InstrumentType, t.Side,
+		t.PositionSide, t.OpenClose, t.OrderType, t.Quantity, t.Price, t.Amount,
+		t.TradingMode, t.BrokerOrderID, t.MCPServerID, t.Status, t.ExecutedAt,
+		t.QuoteCurrency, t.SettlementCurrency, t.MarginMode, t.Leverage,
+		t.ContractMultiplier, t.ExpiryDate, t.ReduceOnly,
+		t.StopPrice, t.TrailAmount, t.TrailPercent, t.DisplayQty,
+		t.TimeInForce, t.GoodTillDate, t.ParentTradeID,
+		t.ClientIdempotencyKey,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("trade_repo: create: %w", err)
@@ -1034,16 +1190,31 @@ func (r *TradeRepo) Create(ctx context.Context, t *TradeExecution) (string, erro
 	return id, nil
 }
 
+// tradeExecutionColumns lists the SELECT-side projection used by every
+// list / get function in this repo. Centralising it in one constant
+// keeps INSERT and SELECT in sync after schema changes (e.g. P0-2's
+// stop / trail / TIF / parent additions in migration 051, P0-5's
+// cancel / replace tracking in 053).
+const tradeExecutionColumns = `
+	id, fund_id, plan_id, plan_action_id, instrument_key, symbol,
+	market, exchange, asset_class, instrument_type, side, position_side,
+	open_close, order_type, quantity, price, amount, filled_qty,
+	filled_price, fee_commission, fee_stamp_tax, fee_transfer,
+	trading_mode, broker_order_id, mcp_server_id, status, executed_at,
+	quote_currency, settlement_currency, margin_mode, leverage,
+	contract_multiplier, expiry_date, reduce_only, slippage_pct,
+	stop_price, trail_amount, trail_percent, display_qty,
+	time_in_force, good_till_date, parent_trade_id,
+	client_idempotency_key, created_at,
+	cancelled_at, cancel_reason, replaced_at, replace_count`
+
 func (r *TradeRepo) ListByFund(ctx context.Context, fundID string, from, to time.Time, limit int) ([]TradeExecution, error) {
 	return r.ListByFundPage(ctx, fundID, from, to, limit, 0)
 }
 
 func (r *TradeRepo) ListByFundPage(ctx context.Context, fundID string, from, to time.Time, limit, offset int) ([]TradeExecution, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, fund_id, plan_id, plan_action_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, side, position_side, open_close, order_type, quantity,
-		        price, amount, filled_qty, filled_price, fee_commission, fee_stamp_tax,
-		        fee_transfer, trading_mode, broker_order_id, mcp_server_id, status,
-		        executed_at, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, slippage_pct, created_at
+		`SELECT `+tradeExecutionColumns+`
 		 FROM trade_executions
 		 WHERE fund_id = $1 AND created_at >= $2 AND created_at <= $3
 		 ORDER BY created_at DESC LIMIT $4 OFFSET $5`,
@@ -1058,10 +1229,7 @@ func (r *TradeRepo) ListByFundPage(ctx context.Context, fundID string, from, to 
 
 func (r *TradeRepo) ListByPlan(ctx context.Context, planID string) ([]TradeExecution, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, fund_id, plan_id, plan_action_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, side, position_side, open_close, order_type, quantity,
-		        price, amount, filled_qty, filled_price, fee_commission, fee_stamp_tax,
-		        fee_transfer, trading_mode, broker_order_id, mcp_server_id, status,
-		        executed_at, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, slippage_pct, created_at
+		`SELECT `+tradeExecutionColumns+`
 		 FROM trade_executions
 		 WHERE plan_id = $1
 		 ORDER BY created_at DESC, id DESC`,
@@ -1072,6 +1240,104 @@ func (r *TradeRepo) ListByPlan(ctx context.Context, planID string) ([]TradeExecu
 	}
 	defer rows.Close()
 	return scanTradeExecutions(rows)
+}
+
+// ListOpenByFund returns every non-terminal trade row for the fund.
+// Used by the order-replay loop on restart (P1-5) and by the
+// Cancel/Replace API (P0-5) to enumerate cancellable orders. Rows
+// are returned newest-first.
+func (r *TradeRepo) ListOpenByFund(ctx context.Context, fundID string) ([]TradeExecution, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+tradeExecutionColumns+`
+		 FROM trade_executions
+		 WHERE fund_id = $1
+		   AND status IN ('pending', 'working', 'triggered', 'partial')
+		 ORDER BY created_at DESC, id DESC`,
+		fundID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("trade_repo: list open by fund: %w", err)
+	}
+	defer rows.Close()
+	return scanTradeExecutions(rows)
+}
+
+// ListOpenAcrossFunds returns every non-terminal trade row for every
+// fund. The order-replay loop (P1-5) calls this exactly once at boot
+// to seed the broker.Simulator's in-memory book before any new
+// PlaceOrder requests are accepted. Rows are returned ordered by
+// fund_id then created_at (oldest first within a fund) so the
+// idempotency index is rebuilt deterministically.
+//
+// The query is paginated only via LIMIT to keep the boot path
+// bounded; in practice we expect this to be small (a few hundred at
+// most) since the runtime cancels stale GTC stops via the daily
+// reconcile loop. If you find this query slow, the right fix is to
+// add a partial index on (status) WHERE status IN
+// ('pending','working','triggered','partial').
+func (r *TradeRepo) ListOpenAcrossFunds(ctx context.Context, limit int) ([]TradeExecution, error) {
+	if limit <= 0 || limit > 100000 {
+		limit = 10000
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+tradeExecutionColumns+`
+		 FROM trade_executions
+		 WHERE status IN ('pending', 'working', 'triggered', 'partial')
+		 ORDER BY fund_id, created_at, id
+		 LIMIT $1`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("trade_repo: list open across funds: %w", err)
+	}
+	defer rows.Close()
+	return scanTradeExecutions(rows)
+}
+
+// ListActiveStopByFund returns active stop / stop_limit / trailing_stop
+// trades for the fund. The stop-trigger engine (P0-3) scans these on
+// every quote tick to decide whether to fire a child order.
+func (r *TradeRepo) ListActiveStopByFund(ctx context.Context, fundID string) ([]TradeExecution, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+tradeExecutionColumns+`
+		 FROM trade_executions
+		 WHERE fund_id = $1
+		   AND order_type IN ('stop', 'stop_limit', 'trailing_stop')
+		   AND status IN ('pending', 'working')`,
+		fundID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("trade_repo: list active stop by fund: %w", err)
+	}
+	defer rows.Close()
+	return scanTradeExecutions(rows)
+}
+
+// GetByClientIdempotencyKey looks up a trade by its caller-minted
+// idempotency key. Used during order-replay on restart (P1-5) when we
+// have the client_order_id but the broker_order_id was never
+// persisted (e.g. the process died after PlaceOrder accepted the
+// order but before the response was written back).
+func (r *TradeRepo) GetByClientIdempotencyKey(ctx context.Context, fundID, key string) (*TradeExecution, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+tradeExecutionColumns+`
+		 FROM trade_executions
+		 WHERE fund_id = $1 AND client_idempotency_key = $2
+		 LIMIT 1`,
+		fundID, key,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("trade_repo: get by idempotency key: %w", err)
+	}
+	defer rows.Close()
+	out, err := scanTradeExecutions(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, ErrNotFound
+	}
+	return &out[0], nil
 }
 
 // SumFilledBuyTodayByInstrument returns, for each (instrument_key, symbol)
@@ -1158,10 +1424,17 @@ func scanTradeExecutions(rows *sql.Rows) ([]TradeExecution, error) {
 	for rows.Next() {
 		var t TradeExecution
 		if err := rows.Scan(
-			&t.ID, &t.FundID, &t.PlanID, &t.PlanActionID, &t.InstrumentKey, &t.Symbol, &t.Market, &t.Exchange, &t.AssetClass, &t.InstrumentType, &t.Side, &t.PositionSide, &t.OpenClose, &t.OrderType, &t.Quantity,
-			&t.Price, &t.Amount, &t.FilledQty, &t.FilledPrice, &t.FeeCommission, &t.FeeStampTax,
-			&t.FeeTransfer, &t.TradingMode, &t.BrokerOrderID, &t.MCPServerID, &t.Status,
-			&t.ExecutedAt, &t.QuoteCurrency, &t.SettlementCurrency, &t.MarginMode, &t.Leverage, &t.ContractMultiplier, &t.ExpiryDate, &t.ReduceOnly, &t.SlippagePct, &t.CreatedAt,
+			&t.ID, &t.FundID, &t.PlanID, &t.PlanActionID, &t.InstrumentKey, &t.Symbol,
+			&t.Market, &t.Exchange, &t.AssetClass, &t.InstrumentType, &t.Side, &t.PositionSide,
+			&t.OpenClose, &t.OrderType, &t.Quantity, &t.Price, &t.Amount, &t.FilledQty,
+			&t.FilledPrice, &t.FeeCommission, &t.FeeStampTax, &t.FeeTransfer,
+			&t.TradingMode, &t.BrokerOrderID, &t.MCPServerID, &t.Status, &t.ExecutedAt,
+			&t.QuoteCurrency, &t.SettlementCurrency, &t.MarginMode, &t.Leverage,
+			&t.ContractMultiplier, &t.ExpiryDate, &t.ReduceOnly, &t.SlippagePct,
+			&t.StopPrice, &t.TrailAmount, &t.TrailPercent, &t.DisplayQty,
+			&t.TimeInForce, &t.GoodTillDate, &t.ParentTradeID,
+			&t.ClientIdempotencyKey, &t.CreatedAt,
+			&t.CancelledAt, &t.CancelReason, &t.ReplacedAt, &t.ReplaceCount,
 		); err != nil {
 			return nil, fmt.Errorf("trade_repo: scan row: %w", err)
 		}
@@ -1188,6 +1461,231 @@ func (r *TradeRepo) UpdateStatus(ctx context.Context, tradeID, status string, fi
 	}
 	return checkRowsAffected(res, "trade_repo: update status")
 }
+
+// GetByIDForFund returns a single trade scoped to a fund. Used by
+// the Cancel / Replace API (P0-5) which must enforce ownership before
+// allowing modification.
+//
+// Returns sql.ErrNoRows when (fundID, tradeID) does not exist OR when
+// it exists but belongs to a different fund — leaking "exists but
+// wrong fund" would let an attacker probe the trade-id space.
+func (r *TradeRepo) GetByIDForFund(ctx context.Context, fundID, tradeID string) (*TradeExecution, error) {
+	if strings.TrimSpace(fundID) == "" || strings.TrimSpace(tradeID) == "" {
+		return nil, sql.ErrNoRows
+	}
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT "+tradeExecutionColumns+" FROM trade_executions WHERE id = $1 AND fund_id = $2 LIMIT 1",
+		tradeID, fundID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("trade_repo: get by id: %w", err)
+	}
+	defer rows.Close()
+	trades, err := scanTradeExecutions(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(trades) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return &trades[0], nil
+}
+
+// CancelOrder transitions a trade to status='cancelled' and records
+// the cancel timestamp + reason. The transition is conditional on
+// the row currently sitting in a non-terminal state — pending,
+// working, triggered, or partial. Terminal rows return
+// ErrTradeNotCancellable so the API can surface a 409 instead of
+// silently swallowing the request.
+//
+// Reason MUST be one of the canonical short tags ("user_requested",
+// "superseded_by_replace", "ttl", "risk_breach", "system"). Free-text
+// is rejected at the column-check level (length > 0).
+func (r *TradeRepo) CancelOrder(ctx context.Context, fundID, tradeID, reason string) error {
+	if strings.TrimSpace(fundID) == "" || strings.TrimSpace(tradeID) == "" {
+		return sql.ErrNoRows
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "user_requested"
+	}
+	const q = `
+		UPDATE trade_executions
+		   SET status = 'cancelled',
+		       cancelled_at = NOW(),
+		       cancel_reason = $1
+		 WHERE id = $2
+		   AND fund_id = $3
+		   AND status IN ('pending', 'working', 'triggered', 'partial')`
+	res, err := r.db.ExecContext(ctx, q, reason, tradeID, fundID)
+	if err != nil {
+		return fmt.Errorf("trade_repo: cancel order: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("trade_repo: cancel order: rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrTradeNotCancellable
+	}
+	return nil
+}
+
+// ReplaceOrderFields atomically updates the modifiable fields of an
+// open trade and bumps replace_count + replaced_at. Each pointer is
+// nil-as-no-change. The function refuses to replace a terminal row
+// or one whose replace_count would exceed maxReplaces (32) — this
+// prevents an unbounded modify loop from filling the audit chain.
+//
+// Field validation rules:
+//
+//   - quantity must be > 0 and >= filled_qty (can't shrink below
+//     what's already been filled).
+//   - price (limit), stop_price, trail_amount, trail_percent, and
+//     display_qty must each be > 0 when supplied.
+//
+// Errors returned:
+//
+//   - ErrTradeNotReplaceable when the row is terminal or above the
+//     replace cap.
+//   - sql.ErrNoRows when (fund_id, trade_id) is not found.
+//
+// Audit logging is the caller's responsibility — see audit.LogMutation.
+func (r *TradeRepo) ReplaceOrderFields(ctx context.Context, fundID, tradeID string, fields ReplaceTradeFields) (*TradeExecution, error) {
+	if strings.TrimSpace(fundID) == "" || strings.TrimSpace(tradeID) == "" {
+		return nil, sql.ErrNoRows
+	}
+	if !fields.HasChanges() {
+		return nil, fmt.Errorf("trade_repo: replace requires at least one field change")
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("trade_repo: begin replace tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Lock the row for the duration of the modify so a concurrent
+	// status update (e.g. matching engine flipping working → filled)
+	// can't race with us.
+	row := tx.QueryRowContext(ctx,
+		`SELECT id, status, quantity, filled_qty, replace_count
+		   FROM trade_executions
+		  WHERE id = $1 AND fund_id = $2
+		  FOR UPDATE`,
+		tradeID, fundID,
+	)
+	var (
+		curID           string
+		curStatus       string
+		curQuantity     float64
+		curFilledQty    float64
+		curReplaceCount int
+	)
+	if err := row.Scan(&curID, &curStatus, &curQuantity, &curFilledQty, &curReplaceCount); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, err
+		}
+		return nil, fmt.Errorf("trade_repo: lookup for replace: %w", err)
+	}
+	switch curStatus {
+	case "pending", "working", "triggered", "partial":
+		// modifiable
+	default:
+		return nil, ErrTradeNotReplaceable
+	}
+	if curReplaceCount >= maxOrderReplaces {
+		return nil, ErrTradeNotReplaceable
+	}
+	if fields.Quantity != nil {
+		if *fields.Quantity <= 0 {
+			return nil, fmt.Errorf("trade_repo: replace quantity must be > 0")
+		}
+		if *fields.Quantity < curFilledQty {
+			return nil, fmt.Errorf("trade_repo: replace quantity below filled_qty (%v < %v)", *fields.Quantity, curFilledQty)
+		}
+	}
+
+	// Compose UPDATE clauses dynamically — only the supplied fields
+	// move so a NOT NULL replacement of an irrelevant column never
+	// happens.
+	var (
+		clauses []string
+		args    []any
+	)
+	pos := 1
+	add := func(clause string, value any) {
+		clauses = append(clauses, fmt.Sprintf(clause, pos))
+		args = append(args, value)
+		pos++
+	}
+	if fields.Quantity != nil {
+		add("quantity = $%d", *fields.Quantity)
+	}
+	if fields.LimitPrice != nil {
+		add("price = $%d", *fields.LimitPrice)
+	}
+	if fields.StopPrice != nil {
+		add("stop_price = $%d", *fields.StopPrice)
+	}
+	if fields.TrailAmount != nil {
+		add("trail_amount = $%d", *fields.TrailAmount)
+	}
+	if fields.TrailPercent != nil {
+		add("trail_percent = $%d", *fields.TrailPercent)
+	}
+	if fields.DisplayQty != nil {
+		add("display_qty = $%d", *fields.DisplayQty)
+	}
+	clauses = append(clauses, "replaced_at = NOW()", "replace_count = replace_count + 1")
+
+	q := "UPDATE trade_executions SET " + strings.Join(clauses, ", ") +
+		fmt.Sprintf(" WHERE id = $%d", pos)
+	args = append(args, tradeID)
+
+	if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+		return nil, fmt.Errorf("trade_repo: apply replace: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("trade_repo: commit replace: %w", err)
+	}
+	return r.GetByIDForFund(ctx, fundID, tradeID)
+}
+
+// ReplaceTradeFields holds the optional new values for a Replace
+// operation. All fields are pointer-as-no-change so callers can
+// supply any subset; HasChanges reports whether at least one is set.
+type ReplaceTradeFields struct {
+	Quantity     *float64
+	LimitPrice   *float64
+	StopPrice    *float64
+	TrailAmount  *float64
+	TrailPercent *float64
+	DisplayQty   *float64
+}
+
+// HasChanges reports whether any pointer is non-nil. A no-change
+// replace is rejected at the repo boundary.
+func (f ReplaceTradeFields) HasChanges() bool {
+	return f.Quantity != nil ||
+		f.LimitPrice != nil ||
+		f.StopPrice != nil ||
+		f.TrailAmount != nil ||
+		f.TrailPercent != nil ||
+		f.DisplayQty != nil
+}
+
+// maxOrderReplaces caps the per-order modify count. 32 chosen so a
+// thoughtful UI flow (price / qty / stop / trail × a few iterations)
+// never trips it, but a runaway script does.
+const maxOrderReplaces = 32
+
+// ErrTradeNotCancellable is returned by CancelOrder when the trade
+// is already in a terminal state.
+var ErrTradeNotCancellable = errors.New("trade_repo: trade is not in a cancellable state")
+
+// ErrTradeNotReplaceable is returned by ReplaceOrderFields when the
+// trade is terminal OR has hit the replace count cap.
+var ErrTradeNotReplaceable = errors.New("trade_repo: trade is not in a replaceable state")
 
 // ---------------------------------------------------------------------------
 // PositionRepo

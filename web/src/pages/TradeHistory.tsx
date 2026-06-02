@@ -1,6 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { apiGet, fetchFundMarketQuotes, formatApiError, type MarketQuote } from "../lib/api";
+import {
+  apiGet,
+  cancelOrder,
+  fetchFundMarketQuotes,
+  formatApiError,
+  replaceOrder,
+  type MarketQuote,
+  type OrderActionResponse,
+  type ReplaceOrderPayload,
+} from "../lib/api";
+import LiveReadinessBanner from "../components/LiveReadinessBanner";
 import {
   formatDateForLanguage,
   formatDateTimeForLanguage,
@@ -9,7 +19,14 @@ import {
   useAppPreferences,
 } from "../lib/preferences";
 
-type TradeStatus = "pending" | "filled" | "partial" | "cancelled" | "rejected" | string;
+type TradeStatus = "pending" | "working" | "triggered" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | string;
+
+// isOpenOrderStatus reports whether the order is still modifiable.
+// Mirrors the backend rule in trade_repo.CancelOrder/ReplaceOrderFields:
+// only pending / working / triggered / partial trades may be touched.
+function isOpenOrderStatus(s: string): boolean {
+  return s === "pending" || s === "working" || s === "triggered" || s === "partial";
+}
 type TradeSide = "buy" | "sell" | string;
 
 type RangeKey = "7d" | "30d" | "all";
@@ -121,6 +138,9 @@ const TradeHistory: React.FC = () => {
   const [fromDate, setFromDate] = useState<string>(dateInputValue(30));
   const [toDate, setToDate] = useState<string>(dateInputValue(0));
   const [statusFilter, setStatusFilter] = useState<TradeStatus | "all">("all");
+  const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [replaceTarget, setReplaceTarget] = useState<Trade | null>(null);
 
   const copy = useMemo(
     () =>
@@ -167,6 +187,30 @@ const TradeHistory: React.FC = () => {
               fee: "Fee",
               mode: "Mode",
               status: "Status",
+              actions: "Actions",
+            },
+            actions: {
+              cancel: "Cancel",
+              replace: "Modify",
+              cancelling: "Cancelling…",
+              replacing: "Saving…",
+              cancelTitle: "Cancel order",
+              replaceTitle: "Modify order",
+              cancelConfirm: "Cancel this order? This action records to the audit trail and cannot be undone.",
+              replaceQuantity: "New quantity",
+              replaceLimit: "New limit price",
+              replaceStop: "New stop trigger",
+              replaceTrailAmount: "New trail amount",
+              replaceTrailPercent: "New trail percent (0-1)",
+              replaceDisplayQty: "New display quantity (iceberg)",
+              replaceNote: "Reason (optional)",
+              replaceLeaveBlankHelp: "Leave blank to keep the current value.",
+              save: "Save changes",
+              cancelButton: "Cancel",
+              dismiss: "Close",
+              error: "Action failed",
+              cancelSuccess: "Order cancelled.",
+              replaceSuccess: "Order updated.",
             },
             orderType: "Order type",
             reduceOnly: "Reduce only",
@@ -260,6 +304,30 @@ const TradeHistory: React.FC = () => {
               fee: "费用",
               mode: "模式",
               status: "状态",
+              actions: "操作",
+            },
+            actions: {
+              cancel: "取消",
+              replace: "改单",
+              cancelling: "取消中…",
+              replacing: "保存中…",
+              cancelTitle: "取消订单",
+              replaceTitle: "修改订单",
+              cancelConfirm: "确定取消该订单？此操作会记入审计日志，且无法撤销。",
+              replaceQuantity: "新数量",
+              replaceLimit: "新限价",
+              replaceStop: "新止损触发价",
+              replaceTrailAmount: "新追踪金额",
+              replaceTrailPercent: "新追踪百分比 (0-1)",
+              replaceDisplayQty: "新冰山显示量",
+              replaceNote: "备注（可选）",
+              replaceLeaveBlankHelp: "留空表示不修改该字段。",
+              save: "保存修改",
+              cancelButton: "取消",
+              dismiss: "关闭",
+              error: "操作失败",
+              cancelSuccess: "订单已取消。",
+              replaceSuccess: "订单已更新。",
             },
             orderType: "订单类型",
             reduceOnly: "仅减仓",
@@ -430,6 +498,64 @@ const TradeHistory: React.FC = () => {
     void loadTrades();
   }, [loadTrades]);
 
+  // applyOrderUpdate patches a single trade in local state with the
+  // post-action snapshot returned by the server. Avoids a full
+  // reload (and the marketQuotes refetch) when only one row moved.
+  const applyOrderUpdate = useCallback((updated: OrderActionResponse) => {
+    setTrades((prev) =>
+      prev.map((t) =>
+        t.id === updated.id
+          ? {
+              ...t,
+              status: updated.status as TradeStatus,
+              quantity: updated.quantity,
+              filledQty: updated.filledQty,
+              price: updated.limitPrice ?? t.price,
+            }
+          : t,
+      ),
+    );
+  }, []);
+
+  const handleCancel = useCallback(
+    async (trade: Trade) => {
+      if (!fundId) return;
+      const confirmed = window.confirm(copy.actions.cancelConfirm);
+      if (!confirmed) return;
+      setBusyOrderId(trade.id);
+      setActionMessage(null);
+      try {
+        const updated = await cancelOrder(fundId, trade.id, { reason: "user_requested" });
+        applyOrderUpdate(updated);
+        setActionMessage({ kind: "success", text: copy.actions.cancelSuccess });
+      } catch (err) {
+        setActionMessage({ kind: "error", text: formatApiError(err, copy.actions.error) });
+      } finally {
+        setBusyOrderId(null);
+      }
+    },
+    [applyOrderUpdate, copy.actions, fundId],
+  );
+
+  const handleReplaceSubmit = useCallback(
+    async (trade: Trade, payload: ReplaceOrderPayload) => {
+      if (!fundId) return;
+      setBusyOrderId(trade.id);
+      setActionMessage(null);
+      try {
+        const updated = await replaceOrder(fundId, trade.id, payload);
+        applyOrderUpdate(updated);
+        setReplaceTarget(null);
+        setActionMessage({ kind: "success", text: copy.actions.replaceSuccess });
+      } catch (err) {
+        setActionMessage({ kind: "error", text: formatApiError(err, copy.actions.error) });
+      } finally {
+        setBusyOrderId(null);
+      }
+    },
+    [applyOrderUpdate, copy.actions, fundId],
+  );
+
   const visibleTrades = useMemo(() => {
     return statusFilter === "all" ? trades : trades.filter((trade) => trade.status === statusFilter);
   }, [statusFilter, trades]);
@@ -471,6 +597,9 @@ const TradeHistory: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {fundId ? (
+        <LiveReadinessBanner fundId={fundId} language={language} />
+      ) : null}
       <div className="flex flex-col gap-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">{copy.title}</h1>
@@ -619,6 +748,7 @@ const TradeHistory: React.FC = () => {
                   <th className="px-4 py-3 text-right font-medium">{copy.columns.fee}</th>
                   <th className="px-4 py-3 font-medium">{copy.columns.mode}</th>
                   <th className="px-4 py-3 font-medium">{copy.columns.status}</th>
+                  <th className="px-4 py-3 text-right font-medium">{copy.columns.actions}</th>
                 </tr>
               </thead>
               <tbody>
@@ -703,6 +833,30 @@ const TradeHistory: React.FC = () => {
                       <td className="px-4 py-4">
                         <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${status.badge}`}>{status.label}</span>
                       </td>
+                      <td className="px-4 py-4 text-right">
+                        {isOpenOrderStatus(trade.status) ? (
+                          <div className="flex flex-col items-end gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setReplaceTarget(trade)}
+                              disabled={busyOrderId === trade.id}
+                              className="rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {busyOrderId === trade.id ? copy.actions.replacing : copy.actions.replace}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleCancel(trade)}
+                              disabled={busyOrderId === trade.id}
+                              className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {busyOrderId === trade.id ? copy.actions.cancelling : copy.actions.cancel}
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400">—</span>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -711,6 +865,245 @@ const TradeHistory: React.FC = () => {
           </div>
         </div>
       )}
+
+      {actionMessage ? (
+        <div
+          className={`rounded-xl border px-4 py-3 text-sm ${
+            actionMessage.kind === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : "border-red-200 bg-red-50 text-red-700"
+          }`}
+        >
+          <div className="flex items-center justify-between gap-4">
+            <span>{actionMessage.text}</span>
+            <button
+              type="button"
+              onClick={() => setActionMessage(null)}
+              className="text-xs font-medium underline-offset-2 hover:underline"
+            >
+              {copy.actions.dismiss}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {replaceTarget ? (
+        <ReplaceOrderModal
+          trade={replaceTarget}
+          copy={copy.actions}
+          submitting={busyOrderId === replaceTarget.id}
+          onCancel={() => setReplaceTarget(null)}
+          onSubmit={(payload) => void handleReplaceSubmit(replaceTarget, payload)}
+        />
+      ) : null}
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// ReplaceOrderModal
+// ---------------------------------------------------------------------------
+
+type ReplaceCopy = {
+  replaceTitle: string;
+  replaceQuantity: string;
+  replaceLimit: string;
+  replaceStop: string;
+  replaceTrailAmount: string;
+  replaceTrailPercent: string;
+  replaceDisplayQty: string;
+  replaceNote: string;
+  replaceLeaveBlankHelp: string;
+  save: string;
+  cancelButton: string;
+  replacing: string;
+};
+
+interface ReplaceOrderModalProps {
+  trade: Trade;
+  copy: ReplaceCopy;
+  submitting: boolean;
+  onCancel: () => void;
+  onSubmit: (payload: ReplaceOrderPayload) => void;
+}
+
+const ReplaceOrderModal: React.FC<ReplaceOrderModalProps> = ({ trade, copy, submitting, onCancel, onSubmit }) => {
+  const [quantity, setQuantity] = useState<string>("");
+  const [limitPrice, setLimitPrice] = useState<string>("");
+  const [stopPrice, setStopPrice] = useState<string>("");
+  const [trailAmount, setTrailAmount] = useState<string>("");
+  const [trailPercent, setTrailPercent] = useState<string>("");
+  const [displayQty, setDisplayQty] = useState<string>("");
+  const [note, setNote] = useState<string>("");
+
+  const supportsLimit = trade.orderType === "limit" || trade.orderType === "stop_limit" || trade.orderType === "iceberg";
+  const supportsStop = trade.orderType === "stop" || trade.orderType === "stop_limit" || trade.orderType === "trailing_stop";
+  const supportsTrail = trade.orderType === "trailing_stop";
+  const supportsDisplayQty = trade.orderType === "iceberg";
+
+  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const payload: ReplaceOrderPayload = {};
+    const parseNum = (v: string): number | undefined => {
+      const trimmed = v.trim();
+      if (!trimmed) return undefined;
+      const num = Number(trimmed);
+      return Number.isFinite(num) && num > 0 ? num : undefined;
+    };
+    const q = parseNum(quantity);
+    if (q !== undefined) payload.quantity = q;
+    if (supportsLimit) {
+      const lp = parseNum(limitPrice);
+      if (lp !== undefined) payload.limitPrice = lp;
+    }
+    if (supportsStop) {
+      const sp = parseNum(stopPrice);
+      if (sp !== undefined) payload.stopPrice = sp;
+    }
+    if (supportsTrail) {
+      const ta = parseNum(trailAmount);
+      if (ta !== undefined) payload.trailAmount = ta;
+      const tp = parseNum(trailPercent);
+      if (tp !== undefined && tp < 1) payload.trailPercent = tp;
+    }
+    if (supportsDisplayQty) {
+      const dq = parseNum(displayQty);
+      if (dq !== undefined) payload.displayQty = dq;
+    }
+    const n = note.trim();
+    if (n) payload.note = n;
+    if (Object.keys(payload).length === 0 || (Object.keys(payload).length === 1 && payload.note)) {
+      // Pure note-only changes are still rejected by the backend
+      // since note doesn't count as a field change. Block here so
+      // the user gets immediate feedback.
+      return;
+    }
+    onSubmit(payload);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mb-4 flex items-start justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900">{copy.replaceTitle}</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              {trade.symbol} · {trade.side.toUpperCase()} · {trade.orderType}
+            </p>
+          </div>
+          <button type="button" onClick={onCancel} className="rounded-md p-1 text-gray-400 hover:bg-gray-100" aria-label="close">
+            ×
+          </button>
+        </div>
+        <p className="mb-4 text-xs text-gray-500">{copy.replaceLeaveBlankHelp}</p>
+        <form onSubmit={submit} className="space-y-3">
+          <label className="block text-sm">
+            <span className="mb-1 block text-gray-700">{copy.replaceQuantity}</span>
+            <input
+              type="number"
+              min="0"
+              step="any"
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              placeholder={String(trade.quantity)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            />
+          </label>
+          {supportsLimit ? (
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-700">{copy.replaceLimit}</span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={limitPrice}
+                onChange={(e) => setLimitPrice(e.target.value)}
+                placeholder={String(trade.price)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </label>
+          ) : null}
+          {supportsStop ? (
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-700">{copy.replaceStop}</span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={stopPrice}
+                onChange={(e) => setStopPrice(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </label>
+          ) : null}
+          {supportsTrail ? (
+            <>
+              <label className="block text-sm">
+                <span className="mb-1 block text-gray-700">{copy.replaceTrailAmount}</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={trailAmount}
+                  onChange={(e) => setTrailAmount(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block text-gray-700">{copy.replaceTrailPercent}</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="0.999999"
+                  step="any"
+                  value={trailPercent}
+                  onChange={(e) => setTrailPercent(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+              </label>
+            </>
+          ) : null}
+          {supportsDisplayQty ? (
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-700">{copy.replaceDisplayQty}</span>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={displayQty}
+                onChange={(e) => setDisplayQty(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </label>
+          ) : null}
+          <label className="block text-sm">
+            <span className="mb-1 block text-gray-700">{copy.replaceNote}</span>
+            <input
+              type="text"
+              maxLength={200}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            />
+          </label>
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              {copy.cancelButton}
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {submitting ? copy.replacing : copy.save}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 };

@@ -27,13 +27,17 @@ import { useTranslation } from 'react-i18next';
 
 import { i18n } from '../i18n';
 import { useAuth } from '../lib/auth';
+import { apiClient } from '../lib/api';
 import { setPushEnabled, unregisterDeviceForPush } from '../lib/push';
+import { clearStepUpCache } from '../lib/stepUp';
 import { recentEvents } from '../lib/telemetry';
 import { useTheme, type ThemePreference } from '../lib/theme';
 import {
   isBiometricEnabled,
   isPushEnabled,
+  isStepUpRequiredForOrders,
   setBiometricEnabled,
+  setStepUpRequiredForOrders,
 } from '../lib/userPrefs';
 
 const APP_VERSION = '0.1.0';
@@ -45,14 +49,35 @@ export default function MoreScreen(): JSX.Element {
   const [biometric, setBiometric] = useState<boolean>(true);
   const [push, setPush] = useState<boolean>(true);
   const [pushBusy, setPushBusy] = useState<boolean>(false);
+  // P0-6 — 2FA status. We keep this simple on Android: display
+  // whether 2FA is currently enabled, and direct the user to web
+  // for enrolment. The login flow already handles the challenge
+  // when 2FA is on. null while loading; { enabled: boolean } once
+  // resolved. A network/410 error sets it back to null which the
+  // UI renders as "loading"; the operator can still log out.
+  const [twoFA, setTwoFA] = useState<{ enabled: boolean } | null>(null);
+  // P0-7 — per-action biometric gate for orders.
+  const [stepUpOrders, setStepUpOrders] = useState<boolean>(true);
 
   useEffect(() => {
     setBiometric(isBiometricEnabled());
     setPush(isPushEnabled());
+    setStepUpOrders(isStepUpRequiredForOrders());
+    // Best-effort 2FA status. Swallowed errors leave twoFA null,
+    // which the UI renders as "loading…" rather than scary red.
+    (async () => {
+      try {
+        const status = await apiClient.twoFAStatus();
+        setTwoFA({ enabled: Boolean(status.enabled) });
+      } catch {
+        setTwoFA({ enabled: false });
+      }
+    })();
   }, []);
 
   const handleLogout = useCallback(async () => {
     await unregisterDeviceForPush();
+    clearStepUpCache();
     await logout();
   }, [logout]);
 
@@ -70,6 +95,17 @@ export default function MoreScreen(): JSX.Element {
     },
     [],
   );
+
+  const handleToggleStepUpOrders = useCallback((next: boolean) => {
+    // Persist + take effect on the very next order action. We
+    // also drop the cached step-up token so a freshly disabled
+    // toggle doesn't accidentally let one more action sail through
+    // on a stale token, and a freshly enabled toggle starts clean
+    // (the next action prompts).
+    setStepUpOrders(next);
+    setStepUpRequiredForOrders(next);
+    clearStepUpCache();
+  }, []);
 
   const handleTogglePush = useCallback(async (next: boolean) => {
     setPush(next);
@@ -135,6 +171,38 @@ export default function MoreScreen(): JSX.Element {
           </Text>
         </View>
         <Switch value={push} onValueChange={(v) => void handleTogglePush(v)} disabled={pushBusy} />
+      </View>
+
+      {/* P0-6 — 2FA status row. Read-only on Android; enrolment
+          and disable live on the web account-security page. */}
+      <View style={[styles.row, { backgroundColor: colors.surface }]} accessibilityRole="summary">
+        <View style={styles.rowText}>
+          <Text style={[styles.label, { color: colors.text }]}>{t('more.twoFATitle')}</Text>
+          <Text style={[styles.hint, { color: colors.textMuted }]}>
+            {twoFA == null
+              ? t('more.twoFAHintLoading')
+              : twoFA.enabled
+                ? t('more.twoFAHintEnabled')
+                : t('more.twoFAHintDisabled')}
+          </Text>
+        </View>
+        <Text style={[styles.value, { color: twoFA?.enabled ? colors.accent : colors.textMuted }]}>
+          {twoFA == null ? '…' : twoFA.enabled ? t('more.twoFAStatusOn') : t('more.twoFAStatusOff')}
+        </Text>
+      </View>
+
+      {/* P0-7 — per-action biometric gate for orders. Default on. */}
+      <View
+        style={[styles.row, { backgroundColor: colors.surface }]}
+        accessibilityRole="switch"
+        accessibilityState={{ checked: stepUpOrders }}
+        accessibilityLabel={t('more.stepUpOrders')}
+      >
+        <View style={styles.rowText}>
+          <Text style={[styles.label, { color: colors.text }]}>{t('more.stepUpOrders')}</Text>
+          <Text style={[styles.hint, { color: colors.textMuted }]}>{t('more.stepUpOrdersHint')}</Text>
+        </View>
+        <Switch value={stepUpOrders} onValueChange={handleToggleStepUpOrders} />
       </View>
 
       {/* Language */}

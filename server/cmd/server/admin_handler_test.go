@@ -144,10 +144,7 @@ func TestAdminListKYCApplicationsIncludesUserAndDocuments(t *testing.T) {
 		WithArgs("pending", 100, 0).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "email", "display_name", "kyc_level", "status", "full_name", "id_document_type", "id_document_number", "document_image_urls", "rejection_reason", "created_at", "updated_at"}).
 			AddRow(appID, userID, "user@example.com", "Alice", "tier2_advanced", "pending", "Alice Doe", "passport", "P123456", []byte(`["https://example.test/passport.png"]`), "", now, now))
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO data_access_log (actor_user_id, action, resource_type, resource_id, details)
-			 VALUES ($1, $2, $3, $4, $5)`)).
-		WithArgs("admin-1", "read", "kyc_applications", "pending", sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAccessLogInsert(mock, "admin-1", "read", "kyc_applications", "pending")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/kyc-applications", nil)
 	req = req.WithContext(api.WithAuthenticatedUserID(req.Context(), "admin-1"))
@@ -195,10 +192,7 @@ func TestAdminApproveKYCApplicationRecordsAudit(t *testing.T) {
 		WithArgs("verified", "tier2_advanced", userID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO data_access_log (actor_user_id, action, resource_type, resource_id, details)
-			 VALUES ($1, $2, $3, $4, $5)`)).
-		WithArgs(adminID, "approve", "kyc_application", appID, sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAccessLogInsert(mock, adminID, "approve", "kyc_application", appID)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/kyc-applications/"+appID+"/approve", strings.NewReader(`{"action":"approve"}`))
 	req.SetPathValue("id", appID)

@@ -4,6 +4,7 @@
  * 三态：
  *   loading       — 启动时检查 keychain + biometrics 期间
  *   unauthenticated — 渲染 LoginScreen
+ *   challenge_pending — 一阶段密码已通过，等用户提交 2FA 验证码
  *   authenticated — 渲染 main tabs
  *
  * 我们故意不在这里管 access token refresh — server 端用单一长 token，
@@ -24,11 +25,32 @@ import { isBiometricEnabled } from './userPrefs';
 export type AuthState =
   | { status: 'loading' }
   | { status: 'unauthenticated'; reason?: 'logout' | 'biometrics' | 'unauthorized' | 'session_error' }
+  // 2FA second-factor pending. The login screen flips into the
+  // TOTP prompt; on success we move to `authenticated`. The
+  // `challenge` is the short-lived JWT the server returned and
+  // `expiresAt` is its UTC ISO8601 expiry — useful for showing a
+  // countdown (we don't enforce it client-side; the server will
+  // refuse the exchange after expiry).
+  | { status: 'challenge_pending'; challenge: string; expiresAt: string }
   | { status: 'authenticated'; user: LoginResponse };
 
 interface AuthContextValue {
   state: AuthState;
+  // login may resolve to either an authenticated state or a 2FA
+  // challenge — when challenge_pending, the caller flips its UI
+  // and posts the code via `submitTwoFA`. We deliberately don't
+  // throw on challenge: the caller's exception handler is for
+  // hard failures (wrong password, network, 5xx), not for "we
+  // need a second factor".
   login(email: string, password: string): Promise<void>;
+  // submitTwoFA exchanges the persisted challenge for a session.
+  // Pass either { code } (TOTP) or { recoveryCode } (one-time
+  // recovery). Throws on mismatch / expired challenge.
+  submitTwoFA(input: { code?: string; recoveryCode?: string }): Promise<void>;
+  // cancelTwoFA drops the pending challenge and routes back to
+  // the password screen — useful when the user picked the wrong
+  // account.
+  cancelTwoFA(): void;
   logout(): Promise<void>;
   requireReauth(reason: string): Promise<boolean>;
 }
@@ -113,9 +135,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
-    const resp = await apiClient.login({ email, password });
+    // Use the discriminated `loginOutcome` so the caller can react
+    // to a 2FA challenge without inspecting the raw payload.
+    const outcome = await apiClient.loginOutcome({ email, password });
+    if (outcome.kind === 'challenge') {
+      setState({ status: 'challenge_pending', challenge: outcome.challenge, expiresAt: outcome.expiresAt });
+      return;
+    }
+    const resp = outcome.payload;
     await setSessionToken(resp.token, resp.user_id);
     setState({ status: 'authenticated', user: resp });
+  }, []);
+
+  const submitTwoFA = useCallback(async (input: { code?: string; recoveryCode?: string }) => {
+    if (state.status !== 'challenge_pending') {
+      throw new Error('no pending 2FA challenge');
+    }
+    const resp = await apiClient.twoFAChallenge({
+      challenge: state.challenge,
+      code: input.code,
+      recoveryCode: input.recoveryCode,
+    });
+    await setSessionToken(resp.token, resp.user_id);
+    setState({ status: 'authenticated', user: resp });
+  }, [state]);
+
+  const cancelTwoFA = useCallback(() => {
+    setState({ status: 'unauthenticated', reason: 'logout' });
   }, []);
 
   const logout = useCallback(async () => {
@@ -135,8 +181,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }): JSX.E
   }, []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ state, login, logout, requireReauth }),
-    [state, login, logout, requireReauth],
+    () => ({ state, login, submitTwoFA, cancelTwoFA, logout, requireReauth }),
+    [state, login, submitTwoFA, cancelTwoFA, logout, requireReauth],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

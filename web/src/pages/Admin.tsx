@@ -15,6 +15,17 @@ import {
   type FundSchedulerStatus,
 } from "../lib/api";
 import { formatDateTimeForLanguage, formatMoneyForLanguage, useAppPreferences } from "../lib/preferences";
+import AdminBrokerLinksSection from "../components/AdminBrokerLinksSection";
+import AdminFundingSection from "../components/AdminFundingSection";
+import AdminFXSection from "../components/AdminFXSection";
+import AdminReconSection from "../components/AdminReconSection";
+import AdminSurveillanceSection from "../components/AdminSurveillanceSection";
+import AdminBorrowSection from "../components/AdminBorrowSection";
+import AdminDrawdownSection from "../components/AdminDrawdownSection";
+import AdminLockupSection from "../components/AdminLockupSection";
+import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
+import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
+import AdminWSFeedSection from "../components/AdminWSFeedSection";
 
 interface PlatformSettings {
   access_mode: "paid_open" | "free_open";
@@ -1173,6 +1184,28 @@ const Admin: React.FC = () => {
             {kycError ? <p className="mt-3 text-sm text-red-600">{kycError}</p> : null}
             {kycSuccess ? <p className="mt-3 text-sm text-emerald-700">{kycSuccess}</p> : null}
           </section>
+
+          <AdminBrokerLinksSection language={language} />
+
+          <AdminFundingSection language={language} />
+
+          <AdminFXSection language={language} />
+
+          <AdminReconSection language={language} />
+
+          <AdminSurveillanceSection language={language} />
+
+          <AdminDrawdownSection language={language} />
+
+          <AdminMarketStatusSection language={language} />
+
+          <AdminMarketImpactSection language={language} />
+
+          <AdminLockupSection language={language} />
+
+          <AdminBorrowSection language={language} />
+
+          <AdminWSFeedSection language={language} />
 
           <section className="rounded-2xl border border-sky-200 bg-sky-50 px-5 py-5 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">

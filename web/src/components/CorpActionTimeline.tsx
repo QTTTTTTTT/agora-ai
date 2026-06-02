@@ -141,7 +141,7 @@ export const CorpActionTimeline: React.FC<CorpActionTimelineProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, fundId, limit, items, loading]);
+  }, [open, fundId, limit, items, loading, copy.error]);
 
   const retry = () => {
     setItems(null);

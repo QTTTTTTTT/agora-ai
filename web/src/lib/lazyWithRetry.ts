@@ -42,7 +42,6 @@ import { ComponentType, lazy, LazyExoticComponent } from "react";
 // gets a wall of "FC<{}> is not assignable to ComponentType<unknown>"
 // errors. `any` is the standard escape hatch here and matches @types/react.
 //
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Importer<T extends ComponentType<any>> = () => Promise<{ default: T }>;
 
 const DEFAULT_DELAYS_MS = [200, 600, 1200];
@@ -66,7 +65,6 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function importWithRetry<T extends ComponentType<any>>(
   importer: Importer<T>,
   delays: number[],
@@ -117,7 +115,6 @@ async function importWithRetry<T extends ComponentType<any>>(
  * survives transient chunk-load failures. Same return type and same
  * usage; no other call-site changes required.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function lazyWithRetry<T extends ComponentType<any>>(
   importer: Importer<T>,
   delays: number[] = DEFAULT_DELAYS_MS,

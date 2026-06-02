@@ -372,7 +372,16 @@ function persistLogin(payload: LoginResponse): LoginResponse {
   return payload;
 }
 
-async function submitAuth(path: string, body: AuthPayload): Promise<LoginResponse> {
+// LoginOutcome is what login flows return: either a finalised
+// session, or a 2FA challenge that the caller must satisfy by
+// posting (challenge, code) back to /api/auth/2fa/challenge. The
+// `kind` discriminator keeps the consuming UI exhaustive — TS
+// will refuse to compile without handling both cases.
+export type LoginOutcome =
+  | { kind: "session"; payload: LoginResponse }
+  | { kind: "challenge"; challenge: string; expiresAt: string };
+
+async function submitAuth(path: string, body: AuthPayload): Promise<LoginOutcome> {
   const response = await fetch(buildUrl(path), {
     method: "POST",
     credentials: "include",
@@ -382,20 +391,36 @@ async function submitAuth(path: string, body: AuthPayload): Promise<LoginRespons
     },
     body: JSON.stringify(body),
   });
-  const payload = (await response.json().catch(() => null)) as LoginResponse | null;
-  if (!response.ok || !payload?.token || !payload.user_id) {
+  // We accept three flavours of body:
+  //   1. classic LoginResponse  → finalise the session.
+  //   2. { requires_2fa, challenge, expires_at } → return a
+  //      challenge envelope. The caller renders the TOTP prompt
+  //      and posts the code to /api/auth/2fa/challenge.
+  //   3. error JSON → throw ApiError as before.
+  const payload = (await response.json().catch(() => null)) as
+    | LoginResponse
+    | (TwoFAChallengeResponse & { request_id?: string })
+    | null;
+  if (!response.ok) {
     const fallback = `登录失败，状态码 ${response.status}`;
     const normalized = normalizeErrorMessage(payload, fallback);
     throw new ApiError(normalized.message, response.status, normalized.detail, payload?.request_id);
   }
-  return persistLogin(payload);
+  if (payload && (payload as TwoFAChallengeResponse).requires_2fa) {
+    const ch = payload as TwoFAChallengeResponse;
+    return { kind: "challenge", challenge: ch.challenge, expiresAt: ch.expires_at };
+  }
+  if (!payload || !(payload as LoginResponse).token || !(payload as LoginResponse).user_id) {
+    throw new ApiError("登录失败，响应体异常", response.status, undefined, payload?.request_id);
+  }
+  return { kind: "session", payload: persistLogin(payload as LoginResponse) };
 }
 
-export function loginWithPassword(payload: AuthPayload): Promise<LoginResponse> {
+export function loginWithPassword(payload: AuthPayload): Promise<LoginOutcome> {
   return submitAuth("/api/auth/login", payload);
 }
 
-export function registerWithPassword(payload: AuthPayload): Promise<LoginResponse> {
+export function registerWithPassword(payload: AuthPayload): Promise<LoginOutcome> {
   return submitAuth("/api/auth/register", payload);
 }
 
@@ -535,6 +560,13 @@ export async function logoutSession(): Promise<void> {
 export function apiPut<T>(path: string, body?: unknown): Promise<T> {
   return apiRequest<T>(path, {
     method: "PUT",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  return apiRequest<T>(path, {
+    method: "PATCH",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
@@ -801,6 +833,1406 @@ export async function getBacktest(fundId: string, jobId: string): Promise<Backte
 
 export async function cancelBacktest(fundId: string, jobId: string): Promise<void> {
   await apiPost<{ cancelled: boolean }>(`/api/funds/${encodeURIComponent(fundId)}/backtests/${encodeURIComponent(jobId)}/cancel`);
+}
+
+// ---------------------------------------------------------------------------
+// P0-5 — Order cancel / replace
+// ---------------------------------------------------------------------------
+
+/**
+ * OrderActionResponse mirrors the trim wire shape returned by the
+ * cancel/replace endpoints. Fields beyond the basics are 0/empty
+ * when unset by the underlying order — the UI should treat 0 as
+ * "no value" and only render the field when truthy.
+ */
+export interface OrderActionResponse {
+  id: string;
+  fundId: string;
+  symbol: string;
+  side: string;
+  orderType: string;
+  status: string;
+  quantity: number;
+  filledQty: number;
+  limitPrice?: number;
+  stopPrice?: number;
+  trailAmount?: number;
+  trailPercent?: number;
+  displayQty?: number;
+  cancelReason?: string;
+  replaceCount: number;
+}
+
+/** Replace fields. All are optional — nil-as-no-change at the wire. */
+export interface ReplaceOrderPayload {
+  quantity?: number;
+  limitPrice?: number;
+  stopPrice?: number;
+  trailAmount?: number;
+  trailPercent?: number;
+  displayQty?: number;
+  /** Free-text rationale captured into the audit metadata. */
+  note?: string;
+}
+
+/**
+ * Cancel an order (status pending / working / triggered / partial).
+ * Backend rejects terminal orders with 409.
+ */
+export async function cancelOrder(
+  fundId: string,
+  tradeId: string,
+  options?: { reason?: string; note?: string },
+): Promise<OrderActionResponse> {
+  const body: Record<string, string> = {};
+  if (options?.reason) body.reason = options.reason;
+  if (options?.note) body.note = options.note;
+  const resp = await apiPost<{ order: OrderActionResponse }>(
+    `/api/funds/${encodeURIComponent(fundId)}/orders/${encodeURIComponent(tradeId)}/cancel`,
+    Object.keys(body).length > 0 ? body : undefined,
+  );
+  return resp.order;
+}
+
+/**
+ * Replace one or more modifiable fields of an open order. At least
+ * one of (quantity, limitPrice, stopPrice, trailAmount, trailPercent,
+ * displayQty) must be set, or the backend returns 400.
+ */
+export async function replaceOrder(
+  fundId: string,
+  tradeId: string,
+  payload: ReplaceOrderPayload,
+): Promise<OrderActionResponse> {
+  const resp = await apiPost<{ order: OrderActionResponse }>(
+    `/api/funds/${encodeURIComponent(fundId)}/orders/${encodeURIComponent(tradeId)}/replace`,
+    payload,
+  );
+  return resp.order;
+}
+
+// ---------------------------------------------------------------------------
+// Live trading hard gate (P0-9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire shape of GET /api/funds/{fundId}/live-readiness. Mirrors the
+ * backend's LiveReadiness — see server/cmd/server/live_trading_gate.go
+ * for the source-of-truth comments. We deliberately keep the
+ * snake_case keys to match the Go JSON encoder.
+ */
+export interface LiveReadinessResponse {
+  trading_mode: string;
+  ready: boolean;
+  gate_enforced: boolean;
+  kyc_ok: boolean;
+  broker_link_ok: boolean;
+  two_fa_ok: boolean;
+  step_up_ok: boolean;
+  first_failing?: string;
+  broker_link_id?: string;
+  step_up_user_id?: string;
+}
+
+/**
+ * Fetch the per-fund live-trading readiness picture. The web UI
+ * uses this to render a checklist before the user attempts a
+ * cancel/replace on a live fund. Pass `stepUpToken` if the user
+ * just completed a biometric prompt — it's appended as a query
+ * parameter so cached page navigations through proxies that
+ * strip non-standard headers still work.
+ *
+ * Errors:
+ *   - 401 when not signed in
+ *   - 403/404 when the user doesn't own the fund (we map both
+ *     to ApiError so the caller can show "fund not found").
+ */
+export async function getLiveReadiness(
+  fundId: string,
+  stepUpToken?: string,
+): Promise<LiveReadinessResponse> {
+  const qs = stepUpToken
+    ? `?step_up_token=${encodeURIComponent(stepUpToken)}`
+    : "";
+  return apiGet<LiveReadinessResponse>(
+    `/api/funds/${encodeURIComponent(fundId)}/live-readiness${qs}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Broker link self-service (P1-6)
+// ---------------------------------------------------------------------------
+
+// BrokerLinkRow mirrors the wire shape returned by the user-side
+// /api/funds/{fundId}/broker-links endpoints (account_id is
+// already redacted by the server — never the full value).
+export interface BrokerLinkRow {
+  id: string;
+  fundId: string;
+  userId: string;
+  brokerId: string;
+  accountId: string; // redacted (e.g. "••••4567")
+  status: "pending" | "active" | "suspended" | "revoked";
+  approvedBy?: string;
+  approvedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateBrokerLinkPayload {
+  brokerId: string;       // one of: ibkr, futu, alpaca, binance, mock
+  accountId: string;      // broker-side account id; not a secret
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Submit a new broker-link request. The row starts in 'pending'
+ * and waits for an admin approval (4-eye check). Backend returns
+ * 400 on unknown broker_id.
+ */
+export async function requestBrokerLink(
+  fundId: string,
+  payload: CreateBrokerLinkPayload,
+): Promise<{ link_id: string; status: BrokerLinkRow["status"] }> {
+  return apiPost<{ link_id: string; status: BrokerLinkRow["status"] }>(
+    `/api/funds/${encodeURIComponent(fundId)}/broker-links`,
+    payload,
+  );
+}
+
+/**
+ * List ALL broker links for the fund (any status), newest first.
+ * Used by AccountSecurity to render the per-broker badges.
+ */
+export async function listBrokerLinks(fundId: string): Promise<BrokerLinkRow[]> {
+  const resp = await apiGet<{ links: BrokerLinkRow[] }>(
+    `/api/funds/${encodeURIComponent(fundId)}/broker-links`,
+  );
+  return resp.links ?? [];
+}
+
+/**
+ * User-side revoke. Moves the link to terminal 'revoked'. The
+ * hard gate (P0-9) starts blocking cancel/replace immediately
+ * because broker_link_ok flips to false.
+ */
+export async function revokeBrokerLink(
+  fundId: string,
+  linkId: string,
+): Promise<{ link_id: string; status: BrokerLinkRow["status"] }> {
+  return apiPost<{ link_id: string; status: BrokerLinkRow["status"] }>(
+    `/api/funds/${encodeURIComponent(fundId)}/broker-links/${encodeURIComponent(linkId)}/revoke`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cash ledger (P1-1)
+// ---------------------------------------------------------------------------
+
+// CashLedgerEntry mirrors the JSON projection from
+// server/cmd/server/cash_ledger_handler.go. The amount is signed
+// (negative = debit / cash out, positive = credit / cash in)
+// matching the storage convention.
+export interface CashLedgerEntry {
+  id: string;
+  fund_id: string;
+  posted_at: string;
+  trading_date?: string;
+  entry_type: string;
+  amount: number;
+  currency: string;
+  trade_id?: string;
+  plan_id?: string;
+  plan_action_id?: string;
+  corp_action_id?: string;
+  broker_link_id?: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+  idempotency_key?: string;
+  created_at: string;
+}
+
+export interface CashLedgerListResponse {
+  entries: CashLedgerEntry[];
+  next_cursor?: string;
+  subtotals?: Record<string, number>;
+  balance?: number;
+  currency?: string;
+}
+
+export interface ListCashLedgerOptions {
+  from?: string;
+  to?: string;
+  types?: string[];
+  limit?: number;
+  cursor?: string;
+  summary?: boolean;
+  balance?: boolean;
+}
+
+/**
+ * Fetch a page of cash-ledger entries. Use `summary: true` /
+ * `balance: true` to also pull the subtotals + total balance
+ * (extra DB hit each — only set when the UI actually renders
+ * those panels).
+ */
+export async function listCashLedger(
+  fundId: string,
+  options: ListCashLedgerOptions = {},
+): Promise<CashLedgerListResponse> {
+  const params = new URLSearchParams();
+  if (options.from) params.set("from", options.from);
+  if (options.to) params.set("to", options.to);
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.cursor) params.set("cursor", options.cursor);
+  if (options.summary) params.set("summary", "1");
+  if (options.balance) params.set("balance", "1");
+  // type=foo&type=bar — repeatable param.
+  if (options.types && options.types.length > 0) {
+    for (const t of options.types) params.append("type", t);
+  }
+  const qs = params.toString();
+  return apiGet<CashLedgerListResponse>(
+    `/api/funds/${encodeURIComponent(fundId)}/cash-ledger${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Funding requests (P1-2)
+// ---------------------------------------------------------------------------
+
+export type {
+  FundingDirection,
+  FundingMethod,
+  FundingRequestRow,
+  FundingStatus,
+} from "@fundai/api-client";
+
+import type {
+  FundingDirection as _FundingDirection,
+  FundingMethod as _FundingMethod,
+  FundingRequestRow as _FundingRequestRow,
+  FundingStatus as _FundingStatus,
+} from "@fundai/api-client";
+
+export interface CreateFundingRequestInput {
+  direction: _FundingDirection;
+  amount: number;
+  method: _FundingMethod;
+  currency?: string;
+  externalReference?: string;
+  notes?: string;
+}
+
+export async function listFundingRequests(
+  fundId: string,
+  options: { statuses?: _FundingStatus[]; limit?: number } = {},
+): Promise<_FundingRequestRow[]> {
+  const params = new URLSearchParams();
+  if (options.statuses && options.statuses.length > 0) {
+    for (const s of options.statuses) params.append("status", s);
+  }
+  if (options.limit) params.set("limit", String(options.limit));
+  const qs = params.toString();
+  const resp = await apiGet<{ requests: _FundingRequestRow[] }>(
+    `/api/funds/${encodeURIComponent(fundId)}/funding-requests${qs ? `?${qs}` : ""}`,
+  );
+  return resp.requests;
+}
+
+export async function createFundingRequest(
+  fundId: string,
+  input: CreateFundingRequestInput,
+): Promise<{ id: string; status: _FundingStatus }> {
+  return apiPost<{ id: string; status: _FundingStatus }>(
+    `/api/funds/${encodeURIComponent(fundId)}/funding-requests`,
+    input,
+  );
+}
+
+export async function cancelFundingRequest(
+  fundId: string,
+  requestId: string,
+): Promise<{ status: _FundingStatus }> {
+  return apiPost<{ status: _FundingStatus }>(
+    `/api/funds/${encodeURIComponent(fundId)}/funding-requests/${encodeURIComponent(requestId)}/cancel`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Admin funding (P1-2)
+// ---------------------------------------------------------------------------
+
+export type AdminFundingRow = _FundingRequestRow;
+
+export async function listAdminFundingRequests(
+  status?: string,
+): Promise<{ requests: AdminFundingRow[]; status: string; row_count: number }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return apiGet<{
+    requests: AdminFundingRow[];
+    status: string;
+    row_count: number;
+  }>(`/api/admin/funding-requests${qs}`);
+}
+
+export async function approveFundingRequest(
+  id: string,
+  note?: string,
+): Promise<{ id: string; status: _FundingStatus; cashLedgerEntryId?: string }> {
+  return apiPost<{ id: string; status: _FundingStatus; cashLedgerEntryId?: string }>(
+    `/api/admin/funding-requests/${encodeURIComponent(id)}/approve`,
+    { note: note ?? "" },
+  );
+}
+
+export async function rejectFundingRequest(
+  id: string,
+  reason: string,
+): Promise<{ id: string; status: _FundingStatus }> {
+  return apiPost<{ id: string; status: _FundingStatus }>(
+    `/api/admin/funding-requests/${encodeURIComponent(id)}/reject`,
+    { reason },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FX rates (P1-4)
+// ---------------------------------------------------------------------------
+
+// FXRateRow mirrors fxAdminWire on the server. Snake-case rate_at
+// matches the wire format the Go handler emits.
+export interface FXRateRow {
+  base: string;
+  quote: string;
+  rate: number;
+  rate_at: string;
+  source: string;
+}
+
+export interface ListFXRatesResponse {
+  rates: FXRateRow[];
+  currencies: string[];
+}
+
+// listAdminFXRates fetches the FX-rate table. `pair` accepts the
+// "USD/CNY" style filter the GET endpoint understands.
+export async function listAdminFXRates(opts: { pair?: string; limit?: number } = {}): Promise<ListFXRatesResponse> {
+  const qs = new URLSearchParams();
+  if (opts.pair) qs.set("pair", opts.pair);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListFXRatesResponse>(`/api/admin/fx-rates${tail}`);
+}
+
+export interface UpsertFXRateInput {
+  base: string;
+  quote: string;
+  rate: number;
+  source?: "manual" | "override";
+  rate_at?: string;
+  note?: string;
+}
+
+// upsertAdminFXRate writes a manual rate. The server emits a
+// 400 with a structured ApiError on validation failure (bad
+// currency, non-positive rate, bad source) so the form can show
+// inline errors per field.
+export async function upsertAdminFXRate(input: UpsertFXRateInput): Promise<{ id: string }> {
+  return apiPost<{ id: string }>(`/api/admin/fx-rates`, input);
+}
+
+// updateFundBaseCurrency posts to the standard fund-update
+// endpoint with the new base_currency. We expose a thin helper
+// here so the fund-settings UI doesn't have to remember the
+// shape.
+//
+// The server side accepts NULLIF('') so passing the same value
+// back is a no-op; the FundsSettings component still gates the
+// PUT on a real change to avoid a chatty audit log.
+export async function updateFundBaseCurrency(fundId: string, baseCurrency: string): Promise<{ ok: true }> {
+  return apiPost<{ ok: true }>(`/api/funds/${encodeURIComponent(fundId)}/settings/base-currency`, {
+    base_currency: baseCurrency,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation (P1-3)
+// ---------------------------------------------------------------------------
+//
+// The recon admin surface speaks JSON exclusively. Wire types
+// mirror the Go side; nullable numerics are surfaced as `number |
+// null` because JSON.parse turns `null` into the JS null and
+// component code branches on that.
+
+import type {
+  ReconciliationRun,
+  ReconciliationBreak,
+} from "@fundai/api-client";
+
+export type { ReconciliationRun, ReconciliationBreak } from "@fundai/api-client";
+
+export interface ListReconRunsResponse {
+  runs: ReconciliationRun[];
+}
+
+export interface ListReconBreaksResponse {
+  breaks: ReconciliationBreak[];
+}
+
+export interface GetReconRunResponse {
+  run: ReconciliationRun;
+  breaks: ReconciliationBreak[];
+}
+
+export interface TriggerReconRunInput {
+  fund_id: string;
+  as_of_date?: string;
+  use_mock_provider: boolean;
+  mock_drift_qty?: number;
+  mock_drift_cash?: number;
+  mock_drift_price?: number;
+}
+
+// listAdminReconRuns reads the recent runs feed. fund_id filters
+// to one fund; absent → all funds (operator overview).
+export async function listAdminReconRuns(opts: { fundId?: string; limit?: number } = {}): Promise<ListReconRunsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListReconRunsResponse>(`/api/admin/reconciliation/runs${tail}`);
+}
+
+export async function getAdminReconRun(runId: string): Promise<GetReconRunResponse> {
+  return apiGet<GetReconRunResponse>(`/api/admin/reconciliation/runs/${encodeURIComponent(runId)}`);
+}
+
+// listAdminReconBreaks supports the open-breaks dashboard. The
+// usual filter is `{ status: 'open', severity: 'critical' }` —
+// the server orders rows by severity DESC so the highest-priority
+// break lands first.
+export async function listAdminReconBreaks(opts: {
+  fundId?: string;
+  runId?: string;
+  status?: "open" | "acknowledged" | "resolved" | "ignored";
+  severity?: "info" | "warning" | "critical";
+  limit?: number;
+} = {}): Promise<ListReconBreaksResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.runId) qs.set("run_id", opts.runId);
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.severity) qs.set("severity", opts.severity);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListReconBreaksResponse>(`/api/admin/reconciliation/breaks${tail}`);
+}
+
+// triggerAdminReconRun fires an on-demand run. Currently mock
+// provider only; the server enforces this via 400 with code
+// `provider_required` if `use_mock_provider` is false.
+export async function triggerAdminReconRun(input: TriggerReconRunInput): Promise<GetReconRunResponse> {
+  return apiPost<GetReconRunResponse>(`/api/admin/reconciliation/runs`, input);
+}
+
+// resolveAdminReconBreak transitions a break out of 'open'. The
+// note is recorded on the audit chain.
+export async function resolveAdminReconBreak(
+  breakId: string,
+  status: "open" | "acknowledged" | "resolved" | "ignored",
+  note?: string,
+): Promise<{ break: ReconciliationBreak }> {
+  return apiPost<{ break: ReconciliationBreak }>(
+    `/api/admin/reconciliation/breaks/${encodeURIComponent(breakId)}/resolve`,
+    { status, note: note ?? "" },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Trade Surveillance admin (P1-7)
+// ---------------------------------------------------------------------------
+//
+// Mirrors the recon shape: list events / runs, detail, review, scan.
+// All endpoints sit under /api/admin/surveillance/* and require the
+// admin gate.
+
+import type {
+  SurveillanceEvent,
+  SurveillanceRun,
+  SurveillanceEventStatus,
+  SurveillanceRuleCode,
+} from "@fundai/api-client";
+
+export type {
+  SurveillanceEvent,
+  SurveillanceRun,
+  SurveillanceEventStatus,
+  SurveillanceRuleCode,
+} from "@fundai/api-client";
+
+export interface ListSurveillanceEventsResponse {
+  events: SurveillanceEvent[];
+}
+
+export interface ListSurveillanceRunsResponse {
+  runs: SurveillanceRun[];
+}
+
+export interface GetSurveillanceEventResponse {
+  event: SurveillanceEvent;
+}
+
+export interface TriggerSurveillanceScanInput {
+  fund_id: string;
+  as_of_date?: string;
+  session_close_utc?: string;
+}
+
+export interface TriggerSurveillanceScanResponse {
+  run: SurveillanceRun;
+  events: SurveillanceEvent[];
+}
+
+// listAdminSurveillanceEvents reads the events feed. Filters are
+// composed server-side; status='open' is the dashboard's default
+// because everything else has already been triaged.
+export async function listAdminSurveillanceEvents(
+  opts: {
+    fundId?: string;
+    ruleCode?: SurveillanceRuleCode;
+    status?: SurveillanceEventStatus;
+    severity?: "info" | "warning" | "critical";
+    limit?: number;
+  } = {},
+): Promise<ListSurveillanceEventsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.ruleCode) qs.set("rule_code", opts.ruleCode);
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.severity) qs.set("severity", opts.severity);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListSurveillanceEventsResponse>(`/api/admin/surveillance/events${tail}`);
+}
+
+export async function getAdminSurveillanceEvent(
+  eventId: string,
+): Promise<GetSurveillanceEventResponse> {
+  return apiGet<GetSurveillanceEventResponse>(
+    `/api/admin/surveillance/events/${encodeURIComponent(eventId)}`,
+  );
+}
+
+// reviewAdminSurveillanceEvent transitions an event between
+// open / reviewing / cleared / escalated. The note is recorded
+// on the audit chain.
+export async function reviewAdminSurveillanceEvent(
+  eventId: string,
+  status: SurveillanceEventStatus,
+  note?: string,
+): Promise<{ event: SurveillanceEvent }> {
+  return apiPost<{ event: SurveillanceEvent }>(
+    `/api/admin/surveillance/events/${encodeURIComponent(eventId)}/review`,
+    { status, note: note ?? "" },
+  );
+}
+
+export async function listAdminSurveillanceRuns(
+  opts: { fundId?: string; limit?: number } = {},
+): Promise<ListSurveillanceRunsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListSurveillanceRunsResponse>(`/api/admin/surveillance/runs${tail}`);
+}
+
+export async function triggerAdminSurveillanceScan(
+  input: TriggerSurveillanceScanInput,
+): Promise<TriggerSurveillanceScanResponse> {
+  return apiPost<TriggerSurveillanceScanResponse>(
+    `/api/admin/surveillance/scan`,
+    input,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Drawdown soft circuit breaker (P3-5)
+// ---------------------------------------------------------------------------
+//
+// REST surface mirrors the engine: tiered policy CRUD, on-demand
+// status preview, on-demand check (records event on breach), event
+// list + review.
+
+import type {
+  DrawdownPolicy,
+  DrawdownTier,
+  DrawdownEvent,
+  DrawdownEventStatus,
+  DrawdownStatus,
+} from "@fundai/api-client";
+
+export type {
+  DrawdownPolicy,
+  DrawdownTier,
+  DrawdownEvent,
+  DrawdownEventStatus,
+  DrawdownStatus,
+  DrawdownAction,
+} from "@fundai/api-client";
+
+export interface GetDrawdownPolicyResponse {
+  policy: DrawdownPolicy;
+}
+
+export interface GetDrawdownStatusResponse {
+  status: DrawdownStatus;
+}
+
+export interface ListDrawdownEventsResponse {
+  events: DrawdownEvent[];
+}
+
+export interface GetDrawdownEventResponse {
+  event: DrawdownEvent;
+}
+
+// TriggerDrawdownCheckResponse: when no tier matches we get
+// `{breach: false}`; otherwise we get the persisted event.
+export interface TriggerDrawdownCheckResponse {
+  breach: boolean;
+  event_id?: string;
+  event?: DrawdownEvent;
+}
+
+export async function getAdminDrawdownPolicy(fundID: string): Promise<GetDrawdownPolicyResponse> {
+  return apiGet<GetDrawdownPolicyResponse>(
+    `/api/admin/drawdown/funds/${encodeURIComponent(fundID)}/policy`,
+  );
+}
+
+// upsertAdminDrawdownTier writes one tier row. Re-calling for the
+// same (fund, tier) updates in place.
+export async function upsertAdminDrawdownTier(
+  fundID: string,
+  tier: DrawdownTier,
+): Promise<{ tier: DrawdownTier }> {
+  return apiPut<{ tier: DrawdownTier }>(
+    `/api/admin/drawdown/funds/${encodeURIComponent(fundID)}/policy/tiers/${tier.tier}`,
+    {
+      dd_pct: tier.dd_pct,
+      action: tier.action,
+      trim_ratio: tier.trim_ratio,
+      cooldown_hours: tier.cooldown_hours,
+      auto_execute: tier.auto_execute,
+      note: tier.note ?? "",
+    },
+  );
+}
+
+export async function deleteAdminDrawdownTier(fundID: string, tier: number): Promise<{ ok: boolean }> {
+  return apiDelete<{ ok: boolean }>(
+    `/api/admin/drawdown/funds/${encodeURIComponent(fundID)}/policy/tiers/${tier}`,
+  );
+}
+
+export async function getAdminDrawdownStatus(fundID: string): Promise<GetDrawdownStatusResponse> {
+  return apiGet<GetDrawdownStatusResponse>(
+    `/api/admin/drawdown/funds/${encodeURIComponent(fundID)}/status`,
+  );
+}
+
+export async function triggerAdminDrawdownCheck(fundID: string): Promise<TriggerDrawdownCheckResponse> {
+  return apiPost<TriggerDrawdownCheckResponse>(
+    `/api/admin/drawdown/funds/${encodeURIComponent(fundID)}/check`,
+    {},
+  );
+}
+
+export async function listAdminDrawdownEvents(
+  opts: {
+    fundId?: string;
+    status?: DrawdownEventStatus;
+    limit?: number;
+  } = {},
+): Promise<ListDrawdownEventsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListDrawdownEventsResponse>(`/api/admin/drawdown/events${tail}`);
+}
+
+export async function getAdminDrawdownEvent(eventID: string): Promise<GetDrawdownEventResponse> {
+  return apiGet<GetDrawdownEventResponse>(
+    `/api/admin/drawdown/events/${encodeURIComponent(eventID)}`,
+  );
+}
+
+// reviewAdminDrawdownEvent transitions an event between proposed /
+// approved / dismissed / superseded. The note lands on the audit
+// chain. The 'executed' status is reserved for the auto-execute
+// worker; the API rejects manual setting of 'executed'.
+export async function reviewAdminDrawdownEvent(
+  eventID: string,
+  status: Exclude<DrawdownEventStatus, "executed">,
+  note?: string,
+): Promise<{ event: DrawdownEvent }> {
+  return apiPost<{ event: DrawdownEvent }>(
+    `/api/admin/drawdown/events/${encodeURIComponent(eventID)}/review`,
+    { status, note: note ?? "" },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Market-status gate (S6.1)
+// ---------------------------------------------------------------------------
+
+import type {
+  MarketStatusInstrument,
+  MarketStatusInstrumentState,
+  MarketStatusCalendarDay,
+  MarketStatusEvent,
+  MarketStatusDecision,
+  MarketStatusRuleCode,
+} from "@fundai/api-client";
+
+export type {
+  MarketStatusInstrument,
+  MarketStatusInstrumentState,
+  MarketStatusCalendarDay,
+  MarketStatusEvent,
+  MarketStatusDecision,
+  MarketStatusRuleCode,
+} from "@fundai/api-client";
+
+export interface ListMarketStatusInstrumentsResponse {
+  instruments: MarketStatusInstrument[];
+}
+
+export interface GetMarketStatusInstrumentResponse {
+  instrument: MarketStatusInstrument;
+}
+
+export interface ListMarketStatusCalendarResponse {
+  days: MarketStatusCalendarDay[];
+}
+
+export interface ListMarketStatusEventsResponse {
+  events: MarketStatusEvent[];
+}
+
+export async function listAdminMarketStatusInstruments(
+  opts: { market?: string; status?: MarketStatusInstrumentState; symbol?: string; limit?: number } = {},
+): Promise<ListMarketStatusInstrumentsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.market) qs.set("market", opts.market);
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.symbol) qs.set("symbol", opts.symbol);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListMarketStatusInstrumentsResponse>(`/api/admin/marketstatus/instruments${tail}`);
+}
+
+export async function getAdminMarketStatusInstrument(key: string): Promise<GetMarketStatusInstrumentResponse> {
+  return apiGet<GetMarketStatusInstrumentResponse>(
+    `/api/admin/marketstatus/instruments/${encodeURIComponent(key)}`,
+  );
+}
+
+export interface UpsertMarketStatusInstrumentInput {
+  symbol: string;
+  market: string;
+  status: MarketStatusInstrumentState;
+  halt_reason?: string;
+  halt_started_at?: string;
+  halt_until?: string;
+  lower_limit?: number | null;
+  upper_limit?: number | null;
+  asset_class?: string;
+  staleness_budget_seconds?: number | null;
+  note?: string;
+}
+
+export async function upsertAdminMarketStatusInstrument(
+  key: string,
+  input: UpsertMarketStatusInstrumentInput,
+): Promise<GetMarketStatusInstrumentResponse> {
+  return apiPut<GetMarketStatusInstrumentResponse>(
+    `/api/admin/marketstatus/instruments/${encodeURIComponent(key)}`,
+    input,
+  );
+}
+
+export async function haltAdminMarketStatusInstrument(
+  key: string,
+  reason: string,
+  haltUntil?: string,
+): Promise<GetMarketStatusInstrumentResponse> {
+  return apiPost<GetMarketStatusInstrumentResponse>(
+    `/api/admin/marketstatus/instruments/${encodeURIComponent(key)}/halt`,
+    { reason, halt_until: haltUntil ?? "" },
+  );
+}
+
+export async function unhaltAdminMarketStatusInstrument(
+  key: string,
+): Promise<GetMarketStatusInstrumentResponse> {
+  return apiPost<GetMarketStatusInstrumentResponse>(
+    `/api/admin/marketstatus/instruments/${encodeURIComponent(key)}/unhalt`,
+    {},
+  );
+}
+
+export async function setAdminMarketStatusLimits(
+  key: string,
+  lower: number | null,
+  upper: number | null,
+): Promise<GetMarketStatusInstrumentResponse> {
+  return apiPost<GetMarketStatusInstrumentResponse>(
+    `/api/admin/marketstatus/instruments/${encodeURIComponent(key)}/limits`,
+    { lower_limit: lower, upper_limit: upper },
+  );
+}
+
+export async function listAdminMarketStatusCalendar(
+  market: string,
+  fromDate?: string,
+  toDate?: string,
+): Promise<ListMarketStatusCalendarResponse> {
+  const qs = new URLSearchParams({ market });
+  if (fromDate) qs.set("from", fromDate);
+  if (toDate) qs.set("to", toDate);
+  return apiGet<ListMarketStatusCalendarResponse>(
+    `/api/admin/marketstatus/calendar?${qs.toString()}`,
+  );
+}
+
+export interface UpsertMarketStatusCalendarInput {
+  is_open: boolean;
+  open_local?: string;
+  close_local?: string;
+  market_tz?: string;
+  half_day?: boolean;
+  note?: string;
+}
+
+export async function upsertAdminMarketStatusCalendar(
+  market: string,
+  date: string,
+  input: UpsertMarketStatusCalendarInput,
+): Promise<{ ok: boolean }> {
+  return apiPut<{ ok: boolean }>(
+    `/api/admin/marketstatus/calendar/${encodeURIComponent(market)}/${encodeURIComponent(date)}`,
+    input,
+  );
+}
+
+export async function listAdminMarketStatusEvents(
+  opts: {
+    fundId?: string;
+    instrumentKey?: string;
+    ruleCode?: MarketStatusRuleCode;
+    decision?: MarketStatusDecision;
+    limit?: number;
+  } = {},
+): Promise<ListMarketStatusEventsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.instrumentKey) qs.set("instrument_key", opts.instrumentKey);
+  if (opts.ruleCode) qs.set("rule_code", opts.ruleCode);
+  if (opts.decision) qs.set("decision", opts.decision);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListMarketStatusEventsResponse>(`/api/admin/marketstatus/events${tail}`);
+}
+
+// ---------------------------------------------------------------------------
+// Market-impact / size-aware slippage (S6.2)
+// ---------------------------------------------------------------------------
+
+export interface ListMarketImpactInstrumentsResponse {
+  instruments: import("@fundai/api-client").MarketImpactInstrument[];
+  total: number;
+}
+
+export interface GetMarketImpactInstrumentResponse {
+  instrument: import("@fundai/api-client").MarketImpactInstrument;
+}
+
+export interface UpsertMarketImpactInstrumentInput {
+  symbol: string;
+  market: string;
+  asset_class?: string;
+  adv_shares?: number | null;
+  adv_notional?: number | null;
+  adv_window_days?: number | null;
+  daily_volatility?: number | null;
+  impact_coefficient?: number | null;
+  impact_exponent?: number | null;
+  min_slippage_bps?: number | null;
+  max_slippage_bps?: number | null;
+  last_calibrated_at?: string;
+  calibration_source?: import("@fundai/api-client").MarketImpactCalibrationSource;
+  note?: string;
+}
+
+export async function listAdminMarketImpactInstruments(
+  opts: { market?: string; assetClass?: string; limit?: number; offset?: number } = {},
+): Promise<ListMarketImpactInstrumentsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.market) qs.set("market", opts.market);
+  if (opts.assetClass) qs.set("asset_class", opts.assetClass);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListMarketImpactInstrumentsResponse>(`/api/admin/marketimpact/instruments${tail}`);
+}
+
+export async function getAdminMarketImpactInstrument(
+  key: string,
+): Promise<GetMarketImpactInstrumentResponse> {
+  return apiGet<GetMarketImpactInstrumentResponse>(
+    `/api/admin/marketimpact/instruments/${encodeURIComponent(key)}`,
+  );
+}
+
+export async function upsertAdminMarketImpactInstrument(
+  key: string,
+  input: UpsertMarketImpactInstrumentInput,
+): Promise<GetMarketImpactInstrumentResponse> {
+  return apiPut<GetMarketImpactInstrumentResponse>(
+    `/api/admin/marketimpact/instruments/${encodeURIComponent(key)}`,
+    input,
+  );
+}
+
+export async function deleteAdminMarketImpactInstrument(
+  key: string,
+): Promise<{ ok: boolean }> {
+  return apiDelete<{ ok: boolean }>(
+    `/api/admin/marketimpact/instruments/${encodeURIComponent(key)}`,
+  );
+}
+
+export interface MarketImpactPreviewInput {
+  instrument_key: string;
+  symbol?: string;
+  asset_class?: string;
+  side: "buy" | "sell";
+  quantity: number;
+  reference_price: number;
+}
+
+export async function previewAdminMarketImpact(
+  input: MarketImpactPreviewInput,
+): Promise<import("@fundai/api-client").MarketImpactPreviewResponse> {
+  return apiPost<import("@fundai/api-client").MarketImpactPreviewResponse>(
+    `/api/admin/marketimpact/preview`,
+    input,
+  );
+}
+
+export async function getAdminMarketImpactCacheStats(): Promise<
+  import("@fundai/api-client").MarketImpactCacheStats
+> {
+  return apiGet<import("@fundai/api-client").MarketImpactCacheStats>(
+    `/api/admin/marketimpact/cache`,
+  );
+}
+
+export async function refreshAdminMarketImpactCache(): Promise<
+  import("@fundai/api-client").MarketImpactCacheStats & { ok?: boolean }
+> {
+  return apiPost<
+    import("@fundai/api-client").MarketImpactCacheStats & { ok?: boolean }
+  >(`/api/admin/marketimpact/cache/refresh`, {});
+}
+
+// ---------------------------------------------------------------------------
+// IPO / restricted-share lock-ups (S6.3)
+// ---------------------------------------------------------------------------
+
+export interface ListAdminLockupsResponse {
+  lockups: import("@fundai/api-client").LockupRecord[];
+  total: number;
+}
+
+export interface GetAdminLockupResponse {
+  lockup: import("@fundai/api-client").LockupRecord;
+}
+
+export interface CreateLockupInput {
+  fund_id: string;
+  instrument_key: string;
+  symbol: string;
+  locked_qty: number;
+  locked_until: string;
+  reason?: import("@fundai/api-client").LockupReason;
+  source_lot_id?: string;
+  note?: string;
+}
+
+export interface UpdateLockupInput {
+  locked_qty?: number;
+  locked_until?: string;
+  reason?: import("@fundai/api-client").LockupReason;
+  note?: string;
+}
+
+export async function listAdminLockups(opts: {
+  fundId?: string;
+  instrumentKey?: string;
+  status?: import("@fundai/api-client").LockupStatus;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ListAdminLockupsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.instrumentKey) qs.set("instrument_key", opts.instrumentKey);
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListAdminLockupsResponse>(`/api/admin/lockups${tail}`);
+}
+
+export async function getAdminLockup(id: string): Promise<GetAdminLockupResponse> {
+  return apiGet<GetAdminLockupResponse>(`/api/admin/lockups/${encodeURIComponent(id)}`);
+}
+
+export async function createAdminLockup(
+  input: CreateLockupInput,
+): Promise<GetAdminLockupResponse> {
+  return apiPost<GetAdminLockupResponse>(`/api/admin/lockups`, input);
+}
+
+export async function updateAdminLockup(
+  id: string,
+  input: UpdateLockupInput,
+): Promise<GetAdminLockupResponse> {
+  return apiPatch<GetAdminLockupResponse>(
+    `/api/admin/lockups/${encodeURIComponent(id)}`,
+    input,
+  );
+}
+
+export async function deleteAdminLockup(id: string): Promise<{ ok: boolean }> {
+  return apiDelete<{ ok: boolean }>(`/api/admin/lockups/${encodeURIComponent(id)}`);
+}
+
+export async function releaseAdminLockup(
+  id: string,
+  reason: string,
+): Promise<GetAdminLockupResponse> {
+  return apiPost<GetAdminLockupResponse>(
+    `/api/admin/lockups/${encodeURIComponent(id)}/release`,
+    { reason },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Securities borrow / locate (S6.4)
+// ---------------------------------------------------------------------------
+
+export interface ListAdminBorrowRatesResponse {
+  rates: import("@fundai/api-client").BorrowRate[];
+  total: number;
+}
+
+export interface UpsertBorrowRateInput {
+  instrument_key: string;
+  symbol: string;
+  market?: string;
+  asset_class?: string;
+  borrow_rate_bps_annual?: number;
+  locate_fee_bps?: number;
+  availability?: import("@fundai/api-client").BorrowAvailability;
+  available_shares?: number;
+  min_locate_qty?: number;
+  max_locate_qty?: number;
+  source?: import("@fundai/api-client").BorrowCalibrationSource;
+  note?: string;
+}
+
+export interface BorrowLocatePreviewInput {
+  fund_id?: string;
+  instrument_key: string;
+  requested_qty: number;
+  intended_price?: number;
+}
+
+export interface ListBorrowLocateEventsResponse {
+  events: import("@fundai/api-client").BorrowLocateEvent[];
+  total: number;
+}
+
+export interface ListBorrowLedgerResponse {
+  entries: import("@fundai/api-client").BorrowLedgerEntry[];
+  total: number;
+}
+
+export async function listAdminBorrowRates(opts: {
+  market?: string;
+  assetClass?: string;
+  availability?: import("@fundai/api-client").BorrowAvailability;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ListAdminBorrowRatesResponse> {
+  const qs = new URLSearchParams();
+  if (opts.market) qs.set("market", opts.market);
+  if (opts.assetClass) qs.set("asset_class", opts.assetClass);
+  if (opts.availability) qs.set("availability", opts.availability);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListAdminBorrowRatesResponse>(`/api/admin/borrow/rates${tail}`);
+}
+
+export async function upsertAdminBorrowRate(
+  input: UpsertBorrowRateInput,
+): Promise<{ rate: import("@fundai/api-client").BorrowRate }> {
+  return apiPost<{ rate: import("@fundai/api-client").BorrowRate }>(
+    `/api/admin/borrow/rates`,
+    input,
+  );
+}
+
+export async function deleteAdminBorrowRate(
+  instrumentKey: string,
+): Promise<{ ok: boolean }> {
+  return apiDelete<{ ok: boolean }>(
+    `/api/admin/borrow/rates/${encodeURIComponent(instrumentKey)}`,
+  );
+}
+
+export async function previewAdminBorrowLocate(
+  input: BorrowLocatePreviewInput,
+): Promise<import("@fundai/api-client").BorrowLocatePreviewResponse> {
+  return apiPost<import("@fundai/api-client").BorrowLocatePreviewResponse>(
+    `/api/admin/borrow/locate/preview`,
+    input,
+  );
+}
+
+export async function listAdminBorrowLocateEvents(opts: {
+  fundId?: string;
+  instrumentKey?: string;
+  decision?: import("@fundai/api-client").BorrowLocateDecisionKind;
+  since?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ListBorrowLocateEventsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.instrumentKey) qs.set("instrument_key", opts.instrumentKey);
+  if (opts.decision) qs.set("decision", opts.decision);
+  if (opts.since) qs.set("since", opts.since);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListBorrowLocateEventsResponse>(`/api/admin/borrow/locate/events${tail}`);
+}
+
+export async function listAdminBorrowLedger(opts: {
+  fundId?: string;
+  instrumentKey?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ListBorrowLedgerResponse> {
+  const qs = new URLSearchParams();
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.instrumentKey) qs.set("instrument_key", opts.instrumentKey);
+  if (opts.since) qs.set("since", opts.since);
+  if (opts.until) qs.set("until", opts.until);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<ListBorrowLedgerResponse>(`/api/admin/borrow/ledger${tail}`);
+}
+
+export async function getAdminBorrowCacheStats(): Promise<
+  import("@fundai/api-client").BorrowCacheStats
+> {
+  return apiGet<import("@fundai/api-client").BorrowCacheStats>(`/api/admin/borrow/cache`);
+}
+
+export async function refreshAdminBorrowCache(): Promise<
+  import("@fundai/api-client").BorrowCacheStats & { ok?: boolean }
+> {
+  return apiPost<
+    import("@fundai/api-client").BorrowCacheStats & { ok?: boolean }
+  >(`/api/admin/borrow/cache/refresh`, {});
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket real-time market data admin (S6.5)
+// ---------------------------------------------------------------------------
+
+import type {
+  WSFeedStatus,
+  WSFeedConnection,
+  WSFeedSubscription,
+  WSFeedCacheListResponse,
+  WSFeedCacheSnapshot,
+} from "@fundai/api-client";
+
+export async function getAdminWSFeedStatus(): Promise<WSFeedStatus> {
+  return apiGet<WSFeedStatus>(`/api/admin/wsfeed/status`);
+}
+
+export async function listAdminWSFeedConnections(): Promise<{
+  connections: WSFeedConnection[];
+}> {
+  return apiGet<{ connections: WSFeedConnection[] }>(
+    `/api/admin/wsfeed/connections`
+  );
+}
+
+export async function listAdminWSFeedSubscriptions(): Promise<{
+  subscriptions: WSFeedSubscription[];
+}> {
+  return apiGet<{ subscriptions: WSFeedSubscription[] }>(
+    `/api/admin/wsfeed/subscriptions`
+  );
+}
+
+export async function listAdminWSFeedCache(): Promise<WSFeedCacheListResponse> {
+  return apiGet<WSFeedCacheListResponse>(`/api/admin/wsfeed/cache`);
+}
+
+export async function getAdminWSFeedCacheEntry(
+  symbol: string,
+): Promise<WSFeedCacheSnapshot> {
+  return apiGet<WSFeedCacheSnapshot>(
+    `/api/admin/wsfeed/cache/${encodeURIComponent(symbol)}`,
+  );
+}
+
+export async function subscribeAdminWSFeed(
+  symbol: string,
+  market?: string,
+): Promise<{ ok: boolean; symbol: string }> {
+  return apiPost<{ ok: boolean; symbol: string }>(
+    `/api/admin/wsfeed/subscribe`,
+    { symbol, market: market ?? "" },
+  );
+}
+
+export async function unsubscribeAdminWSFeed(
+  symbol: string,
+): Promise<{ ok: boolean; symbol: string }> {
+  return apiPost<{ ok: boolean; symbol: string }>(
+    `/api/admin/wsfeed/unsubscribe`,
+    { symbol },
+  );
+}
+
+export async function evictAdminWSFeedCache(
+  symbol: string,
+): Promise<{ ok: boolean; evicted: number }> {
+  return apiPost<{ ok: boolean; evicted: number }>(
+    `/api/admin/wsfeed/cache/evict`,
+    { symbol },
+  );
+}
+
+export async function reconcileAdminWSFeed(): Promise<{ ok: boolean }> {
+  return apiPost<{ ok: boolean }>(`/api/admin/wsfeed/reconcile`, {});
+}
+
+// ---------------------------------------------------------------------------
+// 2FA / TOTP (P0-6)
+// ---------------------------------------------------------------------------
+
+// TwoFAStatusResponse mirrors GET /api/auth/2fa/status. Default
+// shape (404 → all-false) is normalised inside getTwoFAStatus so
+// callers don't have to special-case "no row".
+export interface TwoFAStatusResponse {
+  enabled: boolean;
+  enrolmentPending: boolean;
+  lastVerifiedAt?: string;
+  lastUsedRecoveryAt?: string;
+}
+
+// TwoFASetupResponse is the one-shot payload returned by
+// /api/auth/2fa/setup. The frontend is responsible for showing
+// secret + recoveryCodes EXACTLY ONCE — they cannot be retrieved
+// later.
+export interface TwoFASetupResponse {
+  secret: string;
+  provisioningUri: string;
+  recoveryCodes: string[];
+  issuer: string;
+  accountLabel: string;
+  digits: number;
+  period: number;
+  algorithm: string;
+}
+
+export async function getTwoFAStatus(): Promise<TwoFAStatusResponse> {
+  return apiGet<TwoFAStatusResponse>("/api/auth/2fa/status");
+}
+
+export async function setupTwoFA(): Promise<TwoFASetupResponse> {
+  return apiPost<TwoFASetupResponse>("/api/auth/2fa/setup", {});
+}
+
+export async function verifyTwoFA(code: string): Promise<{ enabled: boolean }> {
+  return apiPost<{ enabled: boolean }>("/api/auth/2fa/verify", { code });
+}
+
+export async function disableTwoFA(params: {
+  password: string;
+  code?: string;
+  recoveryCode?: string;
+}): Promise<{ disabled: boolean }> {
+  const body: Record<string, string> = { password: params.password };
+  if (params.code) body.code = params.code;
+  if (params.recoveryCode) body.recoveryCode = params.recoveryCode;
+  return apiPost<{ disabled: boolean }>("/api/auth/2fa/disable", body);
+}
+
+// TwoFAChallengeResponse is what /api/auth/login returns when the
+// user has 2FA enabled. The frontend stashes the challenge,
+// presents the TOTP prompt, then forwards (challenge, code) to
+// /api/auth/2fa/challenge to receive the actual session.
+export interface TwoFAChallengeResponse {
+  requires_2fa: true;
+  challenge: string;
+  expires_at: string;
+}
+
+// SessionTokenResponse mirrors the legacy /login success body. We
+// keep the snake_case keys to match the wire protocol — the rest
+// of the platform reads them as-is.
+export interface SessionTokenResponse {
+  token: string;
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: string;
+  kyc_status?: string;
+  kyc_level?: string;
+  expires_at: string;
+}
+
+export async function exchangeTwoFAChallenge(params: {
+  challenge: string;
+  code?: string;
+  recoveryCode?: string;
+}): Promise<LoginResponse> {
+  const body: Record<string, string> = { challenge: params.challenge };
+  if (params.code) body.code = params.code;
+  if (params.recoveryCode) body.recoveryCode = params.recoveryCode;
+  const resp = await apiPost<SessionTokenResponse>("/api/auth/2fa/challenge", body);
+  // Reuse the same persistence path as classic login so cookies +
+  // local storage end up in the same shape downstream code expects.
+  return persistLogin(resp as LoginResponse);
 }
 
 export interface BacktestComparisonDiff {

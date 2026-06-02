@@ -40,6 +40,15 @@ export interface Messages {
     resetSuccess: string;
     resetTokenInvalid: string;
     resetPasswordMismatch: string;
+    twoFATitle: string;
+    twoFASubtitle: string;
+    twoFAModeCode: string;
+    twoFAModeRecovery: string;
+    twoFACodePlaceholder: string;
+    twoFARecoveryPlaceholder: string;
+    twoFASubmit: string;
+    twoFACancel: string;
+    twoFAInvalidCode: string;
   };
   tabs: {
     home: string;
@@ -47,6 +56,7 @@ export interface Messages {
     memory: string;
     team: string;
     more: string;
+    orders: string;
   };
   home: {
     title: string;
@@ -101,6 +111,60 @@ export interface Messages {
     error: string;
     retry: string;
   };
+  orders: {
+    title: string;
+    empty: string;
+    loadFailed: string;
+    retry: string;
+    actionsLabel: string;
+    cancel: string;
+    replace: string;
+    cancelling: string;
+    replacing: string;
+    cancelConfirmTitle: string;
+    cancelConfirmBody: string;
+    cancelOk: string;
+    cancelOkConfirm: string;
+    cancelDismiss: string;
+    cancelSuccess: string;
+    replaceTitle: string;
+    replaceQuantity: string;
+    replaceLimit: string;
+    replaceStop: string;
+    replaceTrailAmount: string;
+    replaceTrailPercent: string;
+    replaceDisplayQty: string;
+    replaceNote: string;
+    replaceLeaveBlankHint: string;
+    replaceSubmit: string;
+    replaceCancel: string;
+    replaceSuccess: string;
+    actionFailed: string;
+    stepUpCancelReason: string;
+    stepUpReplaceReason: string;
+    // P0-9: live trading hard gate — banner + per-pillar labels.
+    liveBannerTitle: string;
+    liveBannerSubtitle: string;
+    liveBannerEnforced: string;
+    liveBannerBypass: string;
+    livePillarKYC: string;
+    livePillarBrokerLink: string;
+    livePillarTwoFA: string;
+    livePillarStepUp: string;
+    livePillarOK: string;
+    livePillarMissing: string;
+    liveBlockedKYC: string;
+    liveBlockedBrokerLink: string;
+    liveBlockedTwoFA: string;
+    liveBlockedStepUp: string;
+    columns: {
+      symbol: string;
+      side: string;
+      qty: string;
+      price: string;
+      status: string;
+    };
+  };
   more: {
     title: string;
     language: string;
@@ -132,6 +196,547 @@ export interface Messages {
     sectionLanguage: string;
     sectionDanger: string;
     recentEvents: string;
+    twoFATitle: string;
+    twoFAHintLoading: string;
+    twoFAHintEnabled: string;
+    twoFAHintDisabled: string;
+    twoFAStatusOn: string;
+    twoFAStatusOff: string;
+    stepUpOrders: string;
+    stepUpOrdersHint: string;
+  };
+  brokerLinks: {
+    title: string;
+    subtitle: string;
+    formTitle: string;
+    formBroker: string;
+    formAccountId: string;
+    formAccountIdPlaceholder: string;
+    formSubmit: string;
+    formSubmitting: string;
+    formNote: string;
+    refresh: string;
+    empty: string;
+    loading: string;
+    revoke: string;
+    revoking: string;
+    confirmRevoke: string;
+    statusPending: string;
+    statusActive: string;
+    statusSuspended: string;
+    statusRevoked: string;
+    errorPrefix: string;
+  };
+  funding: {
+    title: string;
+    subtitle: string;
+    formTitle: string;
+    formDirection: string;
+    formDirectionDeposit: string;
+    formDirectionWithdrawal: string;
+    formAmount: string;
+    formAmountPlaceholder: string;
+    formCurrency: string;
+    formMethod: string;
+    formExternalReference: string;
+    formExternalReferencePlaceholder: string;
+    formNotes: string;
+    formNotesPlaceholder: string;
+    formSubmit: string;
+    formSubmitting: string;
+    formNote: string;
+    methodWire: string;
+    methodACH: string;
+    methodSEPA: string;
+    methodCheck: string;
+    methodInternal: string;
+    methodManual: string;
+    refresh: string;
+    empty: string;
+    loading: string;
+    cancel: string;
+    cancelling: string;
+    confirmCancel: string;
+    statusPending: string;
+    statusApproved: string;
+    statusRejected: string;
+    statusCancelled: string;
+    statusPosted: string;
+    rejectionReasonLabel: string;
+    awaitingApproval: string;
+    errorPrefix: string;
+    insufficientCash: string;
+  };
+  fx: {
+    panelTitle: string;
+    panelSubtitle: string;
+    listEmpty: string;
+    listLoading: string;
+    listError: string;
+    refresh: string;
+    pairLabel: string;
+    rateLabel: string;
+    rateAtLabel: string;
+    sourceLabel: string;
+    formTitle: string;
+    formBase: string;
+    formQuote: string;
+    formRate: string;
+    formRatePlaceholder: string;
+    formSource: string;
+    formSourceManual: string;
+    formSourceOverride: string;
+    formNote: string;
+    formNotePlaceholder: string;
+    formSubmit: string;
+    formSubmitting: string;
+    formSuccess: string;
+    sourceManual: string;
+    sourceOverride: string;
+    sourceYahoo: string;
+    sourceEod: string;
+    fundBaseCurrencyLabel: string;
+    fundBaseCurrencyHint: string;
+    fundBaseCurrencySaving: string;
+    fundBaseCurrencySaved: string;
+    fxStaleBanner: string;
+  };
+  recon: {
+    panelTitle: string;
+    panelSubtitle: string;
+    listEmpty: string;
+    listLoading: string;
+    listError: string;
+    refresh: string;
+    runDateLabel: string;
+    triggerSourceLabel: string;
+    statusLabel: string;
+    breakCountLabel: string;
+    breakCountCriticalLabel: string;
+    breakCountWarningLabel: string;
+    breakCountInfoLabel: string;
+    severityCritical: string;
+    severityWarning: string;
+    severityInfo: string;
+    statusOpen: string;
+    statusAcknowledged: string;
+    statusResolved: string;
+    statusIgnored: string;
+    statusPending: string;
+    statusCompleted: string;
+    statusFailed: string;
+    triggerSourceManual: string;
+    triggerSourceScheduled: string;
+    triggerSourceReplay: string;
+    breakTypePositionQuantity: string;
+    breakTypePositionAvgCost: string;
+    breakTypePositionMissingInternal: string;
+    breakTypePositionMissingBroker: string;
+    breakTypeCashBalance: string;
+    breakTypeCashCurrencyMissingInternal: string;
+    breakTypeCashCurrencyMissingBroker: string;
+    breakTypeTradeMissingInternal: string;
+    breakTypeTradeMissingBroker: string;
+    breakTypeTradeQuantity: string;
+    breakTypeTradePrice: string;
+    breakTypeTradeSide: string;
+    triggerRunButton: string;
+    triggerRunDialogTitle: string;
+    triggerRunFundIdLabel: string;
+    triggerRunFundIdPlaceholder: string;
+    triggerRunUseMockLabel: string;
+    triggerRunDriftQtyLabel: string;
+    triggerRunDriftCashLabel: string;
+    triggerRunDriftPriceLabel: string;
+    triggerRunSubmit: string;
+    triggerRunSubmitting: string;
+    triggerRunSuccess: string;
+    triggerRunError: string;
+    breakActionAcknowledge: string;
+    breakActionResolve: string;
+    breakActionIgnore: string;
+    breakActionReopen: string;
+    breakResolveDialogTitle: string;
+    breakResolveNoteLabel: string;
+    breakResolveSubmit: string;
+    breakResolveSubmitting: string;
+    breakDrillDownTitle: string;
+    breakDetailInternalValue: string;
+    breakDetailBrokerValue: string;
+    breakDetailDiffValue: string;
+    breakDetailDiffPercent: string;
+    breakDetailDescription: string;
+    breakDetailMetadata: string;
+    drillDownNoBreaks: string;
+  };
+  surveillance: {
+    panelTitle: string;
+    panelSubtitle: string;
+    listEmpty: string;
+    listLoading: string;
+    listError: string;
+    refresh: string;
+    detectedAtLabel: string;
+    ruleCodeLabel: string;
+    severityLabel: string;
+    statusLabel: string;
+    symbolLabel: string;
+    summaryLabel: string;
+    triggerScanButton: string;
+    triggerScanDialogTitle: string;
+    triggerScanFundIdLabel: string;
+    triggerScanFundIdPlaceholder: string;
+    triggerScanAsOfLabel: string;
+    triggerScanSessionCloseLabel: string;
+    triggerScanSubmit: string;
+    triggerScanSubmitting: string;
+    triggerScanSuccess: string;
+    triggerScanError: string;
+    severityCritical: string;
+    severityWarning: string;
+    severityInfo: string;
+    statusOpen: string;
+    statusReviewing: string;
+    statusCleared: string;
+    statusEscalated: string;
+    triggerSourceManual: string;
+    triggerSourceScheduled: string;
+    ruleWashTrade: string;
+    ruleMarkingClose: string;
+    ruleSelfTradePair: string;
+    ruleRapidFireReversal: string;
+    ruleLayeringSuspect: string;
+    eventActionAcknowledge: string;
+    eventActionClear: string;
+    eventActionEscalate: string;
+    eventActionReopen: string;
+    eventReviewDialogTitle: string;
+    eventReviewNoteLabel: string;
+    eventReviewSubmit: string;
+    eventReviewSubmitting: string;
+    eventDetailMetadata: string;
+    eventDetailTradeIDs: string;
+    eventDetailWindow: string;
+    runsSubpanelTitle: string;
+    runsTradeCountLabel: string;
+    runsEventCountLabel: string;
+    runsDurationLabel: string;
+  };
+  drawdown: {
+    panelTitle: string;
+    panelSubtitle: string;
+    refresh: string;
+    listEmpty: string;
+    listLoading: string;
+    listError: string;
+    fundIdLabel: string;
+    fundIdPlaceholder: string;
+    loadFundButton: string;
+    statusTitle: string;
+    peakNavLabel: string;
+    currentNavLabel: string;
+    currentDDLabel: string;
+    hasPolicyTrue: string;
+    hasPolicyFalse: string;
+    breachedTierLabel: string;
+    triggerCheckButton: string;
+    triggerCheckRunning: string;
+    triggerCheckNoBreach: string;
+    triggerCheckBreached: string;
+    triggerCheckError: string;
+    tiersTitle: string;
+    tierLabel: string;
+    ddPctLabel: string;
+    actionLabel: string;
+    trimRatioLabel: string;
+    cooldownLabel: string;
+    autoExecuteLabel: string;
+    noteLabel: string;
+    addTierButton: string;
+    saveTierButton: string;
+    saveTierSubmitting: string;
+    deleteTierButton: string;
+    deleteConfirm: string;
+    actionTrimProportional: string;
+    actionFlatten: string;
+    actionDefensiveOnly: string;
+    eventsTitle: string;
+    detectedAtLabel: string;
+    statusLabel: string;
+    statusProposed: string;
+    statusApproved: string;
+    statusExecuted: string;
+    statusDismissed: string;
+    statusSuperseded: string;
+    trimPlanTitle: string;
+    trimPlanEmpty: string;
+    eventActionApprove: string;
+    eventActionDismiss: string;
+    eventActionReopen: string;
+    reviewDialogTitle: string;
+    reviewNoteLabel: string;
+    reviewSubmit: string;
+    reviewSubmitting: string;
+    reviewError: string;
+  };
+  marketStatus: {
+    panelTitle: string;
+    panelSubtitle: string;
+    refresh: string;
+    instrumentsTitle: string;
+    instrumentsEmpty: string;
+    fieldKey: string;
+    fieldSymbol: string;
+    fieldMarket: string;
+    fieldStatus: string;
+    fieldHaltReason: string;
+    fieldHaltUntil: string;
+    fieldLower: string;
+    fieldUpper: string;
+    fieldLastQuoteAt: string;
+    fieldStalenessBudget: string;
+    statusTrading: string;
+    statusHalted: string;
+    statusSuspended: string;
+    haltButton: string;
+    haltSubmitting: string;
+    haltDialogTitle: string;
+    haltReasonLabel: string;
+    haltUntilLabel: string;
+    unhaltButton: string;
+    setLimitsButton: string;
+    setLimitsDialogTitle: string;
+    upsertDialogTitle: string;
+    saveButton: string;
+    saveSubmitting: string;
+    cancelButton: string;
+    eventsTitle: string;
+    eventDecision: string;
+    eventRule: string;
+    eventSummary: string;
+    eventDetected: string;
+    decisionAllow: string;
+    decisionWarn: string;
+    decisionReject: string;
+    ruleHalted: string;
+    ruleSuspended: string;
+    rulePriceLimit: string;
+    ruleStaleQuote: string;
+    ruleMarketClosed: string;
+    ruleHalfDayClosed: string;
+    calendarTitle: string;
+    calendarMarketLabel: string;
+    calendarFromLabel: string;
+    calendarToLabel: string;
+    calendarLoadButton: string;
+    calendarUpsertTitle: string;
+    calendarIsOpen: string;
+    calendarHalfDay: string;
+    calendarOpenLocal: string;
+    calendarCloseLocal: string;
+    calendarTZ: string;
+    calendarNote: string;
+    error: string;
+  };
+  marketImpact: {
+    panelTitle: string;
+    panelSubtitle: string;
+    refresh: string;
+    instrumentsTitle: string;
+    instrumentsEmpty: string;
+    fieldKey: string;
+    fieldSymbol: string;
+    fieldMarket: string;
+    fieldAssetClass: string;
+    fieldADV: string;
+    fieldADVNotional: string;
+    fieldVolatility: string;
+    fieldImpactCoef: string;
+    fieldImpactExp: string;
+    fieldMinBps: string;
+    fieldMaxBps: string;
+    fieldLastCalibrated: string;
+    fieldSource: string;
+    upsertButton: string;
+    upsertDialogTitle: string;
+    deleteButton: string;
+    deleteConfirm: string;
+    saveButton: string;
+    saveSubmitting: string;
+    cancelButton: string;
+    sourceManual: string;
+    sourceHistorical: string;
+    sourceBrokerReported: string;
+    previewTitle: string;
+    previewSubtitle: string;
+    previewSide: string;
+    previewSideBuy: string;
+    previewSideSell: string;
+    previewQuantity: string;
+    previewReferencePrice: string;
+    previewSubmit: string;
+    previewSubmitting: string;
+    previewResult: string;
+    previewBps: string;
+    previewImpliedFill: string;
+    previewImpactCost: string;
+    previewUsedDefaults: string;
+    previewUsedADVFallback: string;
+    cacheTitle: string;
+    cacheSize: string;
+    cacheLastRefresh: string;
+    cacheRefreshButton: string;
+    cacheRefreshing: string;
+    error: string;
+  };
+  lockup: {
+    panelTitle: string;
+    panelSubtitle: string;
+    refresh: string;
+    listTitle: string;
+    listEmpty: string;
+    fieldFund: string;
+    fieldInstrument: string;
+    fieldSymbol: string;
+    fieldQty: string;
+    fieldUntil: string;
+    fieldReason: string;
+    fieldNote: string;
+    fieldStatus: string;
+    fieldSourceLot: string;
+    fieldReleasedAt: string;
+    fieldReleasedReason: string;
+    statusActive: string;
+    statusExpired: string;
+    statusReleased: string;
+    reasonIPO: string;
+    reasonPrivatePlacement: string;
+    reasonRSU: string;
+    reasonRestricted: string;
+    reasonEmployeeGrant: string;
+    reasonBlockSale: string;
+    reasonOther: string;
+    filterAll: string;
+    createButton: string;
+    createDialogTitle: string;
+    editButton: string;
+    editDialogTitle: string;
+    deleteButton: string;
+    deleteConfirm: string;
+    releaseButton: string;
+    releaseDialogTitle: string;
+    releaseReasonLabel: string;
+    saveButton: string;
+    saveSubmitting: string;
+    cancelButton: string;
+    error: string;
+  };
+  borrow: {
+    panelTitle: string;
+    panelSubtitle: string;
+    refresh: string;
+    listTitle: string;
+    listEmpty: string;
+    fieldKey: string;
+    fieldSymbol: string;
+    fieldMarket: string;
+    fieldRate: string;
+    fieldLocateFee: string;
+    fieldAvailability: string;
+    fieldAvailable: string;
+    fieldMinLocate: string;
+    fieldMaxLocate: string;
+    fieldSource: string;
+    fieldNote: string;
+    availEasy: string;
+    availHard: string;
+    availRestricted: string;
+    availUnavailable: string;
+    sourceManual: string;
+    sourceBrokerQuote: string;
+    sourceAgentLender: string;
+    sourceHistorical: string;
+    sourcePublicFeed: string;
+    upsertButton: string;
+    upsertSubmitting: string;
+    deleteButton: string;
+    cacheTitle: string;
+    cacheSize: string;
+    cacheLastRefresh: string;
+    cacheRefreshButton: string;
+    cacheRefreshing: string;
+    previewTitle: string;
+    previewSubtitle: string;
+    previewFundLabel: string;
+    previewKeyLabel: string;
+    previewQtyLabel: string;
+    previewPriceLabel: string;
+    previewSubmit: string;
+    previewSubmitting: string;
+    previewResultDecision: string;
+    previewResultRate: string;
+    previewResultLocateFee: string;
+    previewResultNotional: string;
+    auditTitle: string;
+    auditFundFilter: string;
+    auditDecisionFilter: string;
+    auditEmpty: string;
+    ledgerTitle: string;
+    ledgerEmpty: string;
+    error: string;
+  };
+  wsfeed: {
+    panelTitle: string;
+    panelSubtitle: string;
+    disabled: string;
+    refresh: string;
+    reconcile: string;
+    reconcileSubmitting: string;
+    statusEnabled: string;
+    statusHealthyProviders: string;
+    statusSubscriptions: string;
+    statusCacheSymbols: string;
+    statusTotalTicks: string;
+    statusDroppedEvents: string;
+    connectionsTitle: string;
+    connectionsEmpty: string;
+    colProvider: string;
+    colState: string;
+    colTickCount: string;
+    colReconnects: string;
+    colLastTick: string;
+    colConnectedAt: string;
+    colLastError: string;
+    stateConnected: string;
+    stateConnecting: string;
+    stateReconnecting: string;
+    stateBackoff: string;
+    stateDisconnected: string;
+    stateClosed: string;
+    stateUnknown: string;
+    subscriptionsTitle: string;
+    subscriptionsEmpty: string;
+    colSymbol: string;
+    colMarket: string;
+    colConsumers: string;
+    cacheTitle: string;
+    cacheStats: string;
+    cacheEmpty: string;
+    colLast: string;
+    colBid: string;
+    colAsk: string;
+    colAsOf: string;
+    colStale: string;
+    subscribeTitle: string;
+    subscribeSymbolPlaceholder: string;
+    subscribeMarketPlaceholder: string;
+    subscribeSubmit: string;
+    subscribeSubmitting: string;
+    unsubscribeButton: string;
+    evictCacheTitle: string;
+    evictCacheButton: string;
+    evictCacheAllButton: string;
+    error: string;
   };
   corpActions: {
     title: string;
@@ -277,8 +882,17 @@ export const messages: Record<LocaleId, Messages> = {
       resetSuccess: '密码已更新，请重新登录。',
       resetTokenInvalid: '链接无效或已过期，请回到忘记密码页面重新发起。',
       resetPasswordMismatch: '两次输入的密码不一致。',
+      twoFATitle: '二次验证',
+      twoFASubtitle: '请输入身份验证器中显示的 6 位验证码。',
+      twoFAModeCode: '验证器代码',
+      twoFAModeRecovery: '恢复码',
+      twoFACodePlaceholder: '6 位验证码',
+      twoFARecoveryPlaceholder: '恢复码',
+      twoFASubmit: '验证并登录',
+      twoFACancel: '更换账号',
+      twoFAInvalidCode: '验证码无效，请重试。',
     },
-    tabs: { home: '首页', decisions: '决策', memory: '记忆', team: '团队', more: '更多' },
+    tabs: { home: '首页', decisions: '决策', memory: '记忆', team: '团队', more: '更多', orders: '订单' },
     home: {
       title: '我的基金',
       empty: '暂无基金，先在 web 端创建。',
@@ -327,6 +941,53 @@ export const messages: Record<LocaleId, Messages> = {
       retry: '重试',
     },
     team: { title: 'Agent 团队', empty: '当前基金未配置 agent。', error: '加载失败', retry: '重试' },
+    orders: {
+      title: '我的订单',
+      empty: '暂无未完成订单。',
+      loadFailed: '加载订单失败',
+      retry: '重试',
+      actionsLabel: '操作',
+      cancel: '取消',
+      replace: '改单',
+      cancelling: '取消中…',
+      replacing: '保存中…',
+      cancelConfirmTitle: '取消订单',
+      cancelConfirmBody: '确定取消该订单？此操作会记入审计日志，且无法撤销。',
+      cancelOk: '确定',
+      cancelOkConfirm: '取消订单',
+      cancelDismiss: '关闭',
+      cancelSuccess: '订单已取消。',
+      replaceTitle: '修改订单',
+      replaceQuantity: '新数量',
+      replaceLimit: '新限价',
+      replaceStop: '新止损触发价',
+      replaceTrailAmount: '新追踪金额',
+      replaceTrailPercent: '新追踪百分比 (0-1)',
+      replaceDisplayQty: '新冰山显示量',
+      replaceNote: '备注（可选）',
+      replaceLeaveBlankHint: '留空表示不修改该字段。',
+      replaceSubmit: '保存修改',
+      replaceCancel: '取消',
+      replaceSuccess: '订单已更新。',
+      actionFailed: '操作失败',
+      stepUpCancelReason: '请通过生物识别确认撤单',
+      stepUpReplaceReason: '请通过生物识别确认改单',
+      liveBannerTitle: '实盘前置条件',
+      liveBannerSubtitle: '该基金为实盘模式，需四项校验全部通过后才能下单/改单/撤单。',
+      liveBannerEnforced: '硬门禁已开启',
+      liveBannerBypass: '硬门禁未开启（开发模式）',
+      livePillarKYC: 'KYC 实名认证',
+      livePillarBrokerLink: '券商账户绑定',
+      livePillarTwoFA: '2FA / TOTP',
+      livePillarStepUp: '生物识别确认',
+      livePillarOK: '已通过',
+      livePillarMissing: '待完成',
+      liveBlockedKYC: '请先完成 KYC 实名认证',
+      liveBlockedBrokerLink: '请先绑定券商账户',
+      liveBlockedTwoFA: '请先开启 2FA / TOTP',
+      liveBlockedStepUp: '请先通过生物识别确认',
+      columns: { symbol: '标的', side: '方向', qty: '数量', price: '价格', status: '状态' },
+    },
     more: {
       title: '更多',
       language: '语言',
@@ -358,6 +1019,554 @@ export const messages: Record<LocaleId, Messages> = {
       sectionLanguage: '语言与地区',
       sectionDanger: '会话',
       recentEvents: '最近事件',
+      twoFATitle: '二次验证',
+      twoFAHintLoading: '正在加载状态…',
+      twoFAHintEnabled: '已启用。可在网页端账户安全页修改。',
+      twoFAHintDisabled: '未启用。请前往网页端开启。',
+      twoFAStatusOn: '已开启',
+      twoFAStatusOff: '未开启',
+      stepUpOrders: '下单/改单生物识别',
+      stepUpOrdersHint: '开启后，每次撤单/改单都会先要求生物识别确认。',
+    },
+    brokerLinks: {
+      title: '券商账户绑定',
+      subtitle: '为该基金绑定一个券商账户。新建请求会进入待审批状态，需另一位 super_admin 完成 4-eye 审核后才能用于实盘下单。',
+      formTitle: '新建绑定请求',
+      formBroker: '券商',
+      formAccountId: '券商账号',
+      formAccountIdPlaceholder: '如 U1234567',
+      formSubmit: '提交申请',
+      formSubmitting: '提交中…',
+      formNote: '提交后请等待管理员 4-eye 审批；已通过的绑定才会被实盘门禁认可。',
+      refresh: '刷新',
+      empty: '暂无绑定记录',
+      loading: '加载中…',
+      revoke: '注销',
+      revoking: '注销中…',
+      confirmRevoke: '注销该绑定后，实盘下单将被门禁拦截，确定继续？',
+      statusPending: '待审批',
+      statusActive: '已生效',
+      statusSuspended: '已暂停',
+      statusRevoked: '已注销',
+      errorPrefix: '操作失败：',
+    },
+    funding: {
+      title: '出入金管理',
+      subtitle: '提交基金的出入金请求；金额仅在另一位 super_admin 4-eye 审批通过后才会落账并写入 cash_ledger。',
+      formTitle: '新建出入金',
+      formDirection: '方向',
+      formDirectionDeposit: '入金',
+      formDirectionWithdrawal: '出金',
+      formAmount: '金额',
+      formAmountPlaceholder: '如 100000',
+      formCurrency: '币种',
+      formMethod: '渠道',
+      formExternalReference: '外部凭证号',
+      formExternalReferencePlaceholder: '如电汇 ref / ACH trace id',
+      formNotes: '备注',
+      formNotesPlaceholder: '可填写 ticket 编号或场景说明，便于审批人参考',
+      formSubmit: '提交申请',
+      formSubmitting: '提交中…',
+      formNote: '出金会在审批时校验余额是否充足；不足将被拒绝。',
+      methodWire: '电汇',
+      methodACH: 'ACH',
+      methodSEPA: 'SEPA',
+      methodCheck: '支票',
+      methodInternal: '内部划转',
+      methodManual: '人工',
+      refresh: '刷新',
+      empty: '暂无出入金记录',
+      loading: '加载中…',
+      cancel: '撤回',
+      cancelling: '撤回中…',
+      confirmCancel: '撤回后该请求不再被审批；可以重新提交一次新的，确定继续？',
+      statusPending: '待审批',
+      statusApproved: '已通过',
+      statusRejected: '已拒绝',
+      statusCancelled: '已撤回',
+      statusPosted: '已落账',
+      rejectionReasonLabel: '拒绝原因',
+      awaitingApproval: '等待管理员 4-eye 审批',
+      errorPrefix: '操作失败：',
+      insufficientCash: '余额不足，无法批准此次出金',
+    },
+    fx: {
+      panelTitle: 'FX 汇率',
+      panelSubtitle: '系统每 6 小时从 Yahoo 抓取 USD 主导对，操作员可在此手动覆盖；NAV 与现金台账按基金 base_currency 折算时使用最近一次 manual / override / yahoo 的值。',
+      listEmpty: '暂无 FX 汇率记录',
+      listLoading: '加载中…',
+      listError: '加载 FX 汇率失败',
+      refresh: '刷新',
+      pairLabel: '货币对',
+      rateLabel: '汇率',
+      rateAtLabel: '观察时间',
+      sourceLabel: '来源',
+      formTitle: '手动覆盖汇率',
+      formBase: '基础货币',
+      formQuote: '报价货币',
+      formRate: '汇率（1 base = ? quote）',
+      formRatePlaceholder: '例如 7.18',
+      formSource: '来源标记',
+      formSourceManual: 'manual（操作员录入）',
+      formSourceOverride: 'override（覆盖自动抓取）',
+      formNote: '备注（可选）',
+      formNotePlaceholder: '说明本次覆盖原因，便于审计回溯',
+      formSubmit: '提交',
+      formSubmitting: '提交中…',
+      formSuccess: '已写入 fx_rates，并记录审计链',
+      sourceManual: '人工',
+      sourceOverride: '人工覆盖',
+      sourceYahoo: 'Yahoo',
+      sourceEod: 'EOD',
+      fundBaseCurrencyLabel: '基金报告币种',
+      fundBaseCurrencyHint: '改为非 USD 后，系统将按 USD-anchored 汇率把所有持仓和现金折算到该币种再展示 NAV。',
+      fundBaseCurrencySaving: '保存中…',
+      fundBaseCurrencySaved: '已保存',
+      fxStaleBanner: '部分币种当前没有最新 FX 汇率，余额按原币种近似计入，仅供参考',
+    },
+    recon: {
+      panelTitle: '日终对账',
+      panelSubtitle: '系统每天自动按 mock 券商对账单与持仓 / 现金 / 成交进行 diff，breaks 写入审计链；运维确认后 acknowledge 或 resolve。',
+      listEmpty: '暂无对账运行记录',
+      listLoading: '加载中…',
+      listError: '加载对账记录失败',
+      refresh: '刷新',
+      runDateLabel: '业务日',
+      triggerSourceLabel: '触发方式',
+      statusLabel: '状态',
+      breakCountLabel: '差异数',
+      breakCountCriticalLabel: '严重',
+      breakCountWarningLabel: '警告',
+      breakCountInfoLabel: '提示',
+      severityCritical: '严重',
+      severityWarning: '警告',
+      severityInfo: '提示',
+      statusOpen: '待处理',
+      statusAcknowledged: '已确认',
+      statusResolved: '已解决',
+      statusIgnored: '已忽略',
+      statusPending: '运行中',
+      statusCompleted: '已完成',
+      statusFailed: '失败',
+      triggerSourceManual: '手动',
+      triggerSourceScheduled: '日终调度',
+      triggerSourceReplay: '重放',
+      breakTypePositionQuantity: '持仓数量不一致',
+      breakTypePositionAvgCost: '持仓成本价不一致',
+      breakTypePositionMissingInternal: '内部缺持仓',
+      breakTypePositionMissingBroker: '券商缺持仓',
+      breakTypeCashBalance: '现金余额不一致',
+      breakTypeCashCurrencyMissingInternal: '内部缺该币种现金',
+      breakTypeCashCurrencyMissingBroker: '券商缺该币种现金',
+      breakTypeTradeMissingInternal: '内部缺成交',
+      breakTypeTradeMissingBroker: '券商缺成交',
+      breakTypeTradeQuantity: '成交数量不一致',
+      breakTypeTradePrice: '成交价格不一致',
+      breakTypeTradeSide: '成交方向不一致',
+      triggerRunButton: '手动触发对账',
+      triggerRunDialogTitle: '手动触发对账运行',
+      triggerRunFundIdLabel: '基金 ID',
+      triggerRunFundIdPlaceholder: '请输入要对账的基金 UUID',
+      triggerRunUseMockLabel: '使用 mock 券商对账单（当前仅支持此模式）',
+      triggerRunDriftQtyLabel: '人为持仓数量偏移（演示用）',
+      triggerRunDriftCashLabel: '人为现金偏移（演示用）',
+      triggerRunDriftPriceLabel: '人为成交价格偏移（演示用）',
+      triggerRunSubmit: '提交',
+      triggerRunSubmitting: '提交中…',
+      triggerRunSuccess: '运行已完成',
+      triggerRunError: '触发失败',
+      breakActionAcknowledge: '确认',
+      breakActionResolve: '标记已解决',
+      breakActionIgnore: '忽略',
+      breakActionReopen: '重开',
+      breakResolveDialogTitle: '处理对账差异',
+      breakResolveNoteLabel: '备注（写明原因，便于事后审计）',
+      breakResolveSubmit: '确定',
+      breakResolveSubmitting: '处理中…',
+      breakDrillDownTitle: '差异明细',
+      breakDetailInternalValue: '内部值',
+      breakDetailBrokerValue: '券商值',
+      breakDetailDiffValue: '差值',
+      breakDetailDiffPercent: '差值百分比',
+      breakDetailDescription: '说明',
+      breakDetailMetadata: '附加信息',
+      drillDownNoBreaks: '本次运行无差异',
+    },
+    surveillance: {
+      panelTitle: '交易监控（Trade Surveillance）',
+      panelSubtitle: '每小时扫描当日成交，识别 wash trade / marking close / self-trade 等可疑模式；命中即写审计链，由合规复核 cleared / escalated。',
+      listEmpty: '暂无监控事件',
+      listLoading: '加载中…',
+      listError: '加载监控事件失败',
+      refresh: '刷新',
+      detectedAtLabel: '检测时间',
+      ruleCodeLabel: '规则',
+      severityLabel: '级别',
+      statusLabel: '状态',
+      symbolLabel: '标的',
+      summaryLabel: '说明',
+      triggerScanButton: '手动触发扫描',
+      triggerScanDialogTitle: '手动触发监控扫描',
+      triggerScanFundIdLabel: '基金 ID',
+      triggerScanFundIdPlaceholder: '请输入要扫描的基金 UUID',
+      triggerScanAsOfLabel: '业务日（YYYY-MM-DD，默认今日 UTC）',
+      triggerScanSessionCloseLabel: '收盘时间 UTC（HH:MM，默认 20:00）',
+      triggerScanSubmit: '提交扫描',
+      triggerScanSubmitting: '扫描中…',
+      triggerScanSuccess: '扫描已完成',
+      triggerScanError: '扫描失败',
+      severityCritical: '严重',
+      severityWarning: '警告',
+      severityInfo: '提示',
+      statusOpen: '待复核',
+      statusReviewing: '复核中',
+      statusCleared: '已澄清',
+      statusEscalated: '已上报',
+      triggerSourceManual: '手动',
+      triggerSourceScheduled: '定时调度',
+      ruleWashTrade: '洗售 (wash trade)',
+      ruleMarkingClose: '尾盘 marking close',
+      ruleSelfTradePair: '自成交对 (self-cross)',
+      ruleRapidFireReversal: '快速反向交易',
+      ruleLayeringSuspect: '可疑分层下单',
+      eventActionAcknowledge: '开始复核',
+      eventActionClear: '澄清结案',
+      eventActionEscalate: '上报合规',
+      eventActionReopen: '重开复核',
+      eventReviewDialogTitle: '处理监控事件',
+      eventReviewNoteLabel: '复核备注（写明依据 / 上报理由，便于审计）',
+      eventReviewSubmit: '确定',
+      eventReviewSubmitting: '处理中…',
+      eventDetailMetadata: '触发证据',
+      eventDetailTradeIDs: '相关成交',
+      eventDetailWindow: '检测窗口',
+      runsSubpanelTitle: '最近扫描运行',
+      runsTradeCountLabel: '扫描成交数',
+      runsEventCountLabel: '检出事件数',
+      runsDurationLabel: '耗时',
+    },
+    drawdown: {
+      panelTitle: '回撤软熔断（Drawdown soft circuit breaker）',
+      panelSubtitle:
+        '按基金配置 DD 分级阈值，每 5 分钟自动评估；超阈值时记录建议降仓事件，由运维确认后通过审批流出单。auto_execute 打开的层会经审计链直接挂单（仍走风控）。',
+      refresh: '刷新',
+      listEmpty: '暂无回撤事件',
+      listLoading: '加载中…',
+      listError: '加载回撤数据失败',
+      fundIdLabel: '基金 ID',
+      fundIdPlaceholder: '输入基金 UUID 查看 / 配置',
+      loadFundButton: '加载',
+      statusTitle: '当前 DD 状态',
+      peakNavLabel: '区间峰值 NAV',
+      currentNavLabel: '当前 NAV',
+      currentDDLabel: '当前回撤',
+      hasPolicyTrue: '已配置阈值',
+      hasPolicyFalse: '未配置阈值',
+      breachedTierLabel: '当前已触发档位',
+      triggerCheckButton: '立即检查',
+      triggerCheckRunning: '检查中…',
+      triggerCheckNoBreach: '未触发任何档位',
+      triggerCheckBreached: '已触发：',
+      triggerCheckError: '检查失败',
+      tiersTitle: '阈值配置（最多 5 档，由轻到重）',
+      tierLabel: '档位',
+      ddPctLabel: 'DD 阈值（负数，例如 -0.05 表示 -5%）',
+      actionLabel: '动作',
+      trimRatioLabel: '降仓比例（trim_proportional 时生效）',
+      cooldownLabel: '冷却时间（小时）',
+      autoExecuteLabel: '自动执行（auto_execute）',
+      noteLabel: '备注',
+      addTierButton: '新增 / 修改档位',
+      saveTierButton: '保存',
+      saveTierSubmitting: '保存中…',
+      deleteTierButton: '删除',
+      deleteConfirm: '确定删除这一档？',
+      actionTrimProportional: '按比例降仓',
+      actionFlatten: '清仓',
+      actionDefensiveOnly: '仅防守（拒绝新多头）',
+      eventsTitle: '回撤事件',
+      detectedAtLabel: '检测时间',
+      statusLabel: '状态',
+      statusProposed: '待审批',
+      statusApproved: '已批准',
+      statusExecuted: '已执行',
+      statusDismissed: '已驳回',
+      statusSuperseded: '已被覆盖',
+      trimPlanTitle: '降仓计划',
+      trimPlanEmpty: '本档位无具体降仓订单（defensive_only）',
+      eventActionApprove: '批准并下单',
+      eventActionDismiss: '驳回',
+      eventActionReopen: '重开',
+      reviewDialogTitle: '处理回撤事件',
+      reviewNoteLabel: '备注（写明依据，便于审计）',
+      reviewSubmit: '确定',
+      reviewSubmitting: '处理中…',
+      reviewError: '处理失败',
+    },
+    marketStatus: {
+      panelTitle: '市场状态门控（停牌 / 涨跌停 / 陈旧报价 / 交易日历）',
+      panelSubtitle:
+        '在订单进入撮合引擎前先做市场可达性检查：停牌或暂停的标的、超出涨跌停的限价、陈旧报价、节假日 / 半天市等。任意硬性条件不满足则拒绝；仅警告项（如报价稍陈旧）会以备注形式跟随订单流向回放与对账。',
+      refresh: '刷新',
+      instrumentsTitle: '标的状态',
+      instrumentsEmpty: '尚未配置任何标的',
+      fieldKey: 'instrument_key',
+      fieldSymbol: '代码',
+      fieldMarket: '市场',
+      fieldStatus: '状态',
+      fieldHaltReason: '停牌原因',
+      fieldHaltUntil: '停牌至',
+      fieldLower: '跌停价',
+      fieldUpper: '涨停价',
+      fieldLastQuoteAt: '最近报价时间',
+      fieldStalenessBudget: '陈旧阈值（秒）',
+      statusTrading: '正常交易',
+      statusHalted: '临时停牌',
+      statusSuspended: '长期暂停',
+      haltButton: '停牌',
+      haltSubmitting: '处理中…',
+      haltDialogTitle: '停牌',
+      haltReasonLabel: '原因（必填）',
+      haltUntilLabel: '恢复时间（可选 RFC3339）',
+      unhaltButton: '复牌',
+      setLimitsButton: '设置涨跌停',
+      setLimitsDialogTitle: '涨跌停限价',
+      upsertDialogTitle: '编辑标的状态',
+      saveButton: '保存',
+      saveSubmitting: '保存中…',
+      cancelButton: '取消',
+      eventsTitle: '门控事件',
+      eventDecision: '判定',
+      eventRule: '规则',
+      eventSummary: '说明',
+      eventDetected: '时间',
+      decisionAllow: '通过',
+      decisionWarn: '警告',
+      decisionReject: '拒绝',
+      ruleHalted: '已停牌',
+      ruleSuspended: '长期暂停',
+      rulePriceLimit: '涨跌停越线',
+      ruleStaleQuote: '报价陈旧',
+      ruleMarketClosed: '休市',
+      ruleHalfDayClosed: '半天市后',
+      calendarTitle: '交易日历',
+      calendarMarketLabel: '市场代码（如 CN / US / HK）',
+      calendarFromLabel: '从',
+      calendarToLabel: '到',
+      calendarLoadButton: '加载',
+      calendarUpsertTitle: '新增 / 编辑日历',
+      calendarIsOpen: '开市',
+      calendarHalfDay: '半天市',
+      calendarOpenLocal: '开市时间（HH:MM）',
+      calendarCloseLocal: '收市时间（HH:MM）',
+      calendarTZ: '时区',
+      calendarNote: '备注',
+      error: '加载失败',
+    },
+    marketImpact: {
+      panelTitle: 'S6.2 · 大单冲击模型',
+      panelSubtitle:
+        '为模拟器配置每个标的的 ADV / 波动率，撮合引擎将以平方根冲击模型（bps = σ · 系数 · √(Q/ADV) · 10000）估算大单滑点，避免回测中大单仍以 last 成交、放大 P&L 的问题。未校准的标的回退到资产类别默认值。',
+      refresh: '刷新',
+      instrumentsTitle: '校准列表',
+      instrumentsEmpty: '尚无标的校准。可点击下方"新增校准"，或保留为空走资产类别默认。',
+      fieldKey: 'instrument_key',
+      fieldSymbol: '代码',
+      fieldMarket: '市场',
+      fieldAssetClass: '资产类别',
+      fieldADV: 'ADV（股 / 张）',
+      fieldADVNotional: 'ADV（名义金额）',
+      fieldVolatility: '日波动率 σ',
+      fieldImpactCoef: '冲击系数 k',
+      fieldImpactExp: '指数 α（默认 0.5）',
+      fieldMinBps: '最小滑点 bps',
+      fieldMaxBps: '最大滑点 bps',
+      fieldLastCalibrated: '最近校准时间',
+      fieldSource: '校准来源',
+      upsertButton: '新增 / 编辑',
+      upsertDialogTitle: '编辑校准',
+      deleteButton: '删除',
+      deleteConfirm: '确认删除此标的的校准？删除后将回退到资产类别默认值。',
+      saveButton: '保存',
+      saveSubmitting: '保存中…',
+      cancelButton: '取消',
+      sourceManual: '手工录入',
+      sourceHistorical: '历史回算',
+      sourceBrokerReported: '券商上报',
+      previewTitle: '撮合冲击预演',
+      previewSubtitle: '不下单，仅基于当前校准估算一笔订单的滑点 bps 与隐含成交价。',
+      previewSide: '方向',
+      previewSideBuy: '买入',
+      previewSideSell: '卖出',
+      previewQuantity: '数量',
+      previewReferencePrice: '参考价格',
+      previewSubmit: '运行预演',
+      previewSubmitting: '运行中…',
+      previewResult: '预演结果',
+      previewBps: '不利滑点',
+      previewImpliedFill: '隐含成交价',
+      previewImpactCost: '冲击成本（参考币）',
+      previewUsedDefaults: '使用资产类别默认',
+      previewUsedADVFallback: 'ADV 缺失，回退到 min_bps',
+      cacheTitle: '内存缓存',
+      cacheSize: '校准条目',
+      cacheLastRefresh: '最近刷新',
+      cacheRefreshButton: '强制刷新',
+      cacheRefreshing: '刷新中…',
+      error: '加载失败',
+    },
+    lockup: {
+      panelTitle: 'S6.3 · IPO / 受限股 lock-up',
+      panelSubtitle:
+        '为 IPO 配售、定增、RSU、限售股等受限持仓登记锁定期。撮合时若 SELL 数量超过 (持仓 - 活跃锁定 qty)，模拟器会拒单。可在到期前手工提前释放，操作会写入审计。',
+      refresh: '刷新',
+      listTitle: 'Lock-up 记录',
+      listEmpty: '暂无 lock-up 记录',
+      fieldFund: '基金',
+      fieldInstrument: 'instrument_key',
+      fieldSymbol: '代码',
+      fieldQty: '锁定数量',
+      fieldUntil: '锁定至',
+      fieldReason: '原因',
+      fieldNote: '备注',
+      fieldStatus: '状态',
+      fieldSourceLot: '关联 lot',
+      fieldReleasedAt: '提前释放时间',
+      fieldReleasedReason: '释放原因',
+      statusActive: '生效中',
+      statusExpired: '已到期',
+      statusReleased: '已提前释放',
+      reasonIPO: 'IPO 配售',
+      reasonPrivatePlacement: '定向增发',
+      reasonRSU: 'RSU',
+      reasonRestricted: '限售股',
+      reasonEmployeeGrant: '员工股权',
+      reasonBlockSale: '大宗交易锁定',
+      reasonOther: '其他',
+      filterAll: '全部',
+      createButton: '新增',
+      createDialogTitle: '登记 Lock-up',
+      editButton: '编辑',
+      editDialogTitle: '编辑 Lock-up',
+      deleteButton: '删除',
+      deleteConfirm: '直接删除会丢失审计痕迹，确认要删除而不是「提前释放」吗？',
+      releaseButton: '提前释放',
+      releaseDialogTitle: '提前释放 Lock-up',
+      releaseReasonLabel: '释放原因（必填，会写入审计日志）',
+      saveButton: '保存',
+      saveSubmitting: '保存中…',
+      cancelButton: '取消',
+      error: '加载失败',
+    },
+    borrow: {
+      panelTitle: 'S6.4 · 借券与 locate 费',
+      panelSubtitle:
+        '为可融券品种登记借券费率、locate 费、可用数量。模拟器在 SHORT 开仓时按需走 locate gate；EOD 自动按持仓 × 当日收盘价 × 年化费率 / 365 计提借券费，写入 cash_ledger（borrow_fee）+ 短仓借券台账。',
+      refresh: '刷新',
+      listTitle: '借券费率',
+      listEmpty: '暂未登记任何借券费率',
+      fieldKey: 'instrument_key',
+      fieldSymbol: '代码',
+      fieldMarket: '市场',
+      fieldRate: '年化费率 (bps)',
+      fieldLocateFee: 'Locate 费 (bps)',
+      fieldAvailability: '可借状态',
+      fieldAvailable: '可借数量',
+      fieldMinLocate: 'locate 最小',
+      fieldMaxLocate: 'locate 最大',
+      fieldSource: '来源',
+      fieldNote: '备注',
+      availEasy: '易借',
+      availHard: '难借',
+      availRestricted: '受限',
+      availUnavailable: '不可借',
+      sourceManual: '手动登记',
+      sourceBrokerQuote: '券商报价',
+      sourceAgentLender: 'Agent lender',
+      sourceHistorical: '历史校准',
+      sourcePublicFeed: '公开数据',
+      upsertButton: '保存',
+      upsertSubmitting: '保存中…',
+      deleteButton: '删除',
+      cacheTitle: '内存缓存',
+      cacheSize: '缓存条目数',
+      cacheLastRefresh: '上次刷新',
+      cacheRefreshButton: '强制刷新',
+      cacheRefreshing: '刷新中…',
+      previewTitle: 'Locate 预演',
+      previewSubtitle:
+        '不下单的情况下试算 locate gate 的判定结果（含 locate 费）。',
+      previewFundLabel: '基金 ID',
+      previewKeyLabel: 'instrument_key',
+      previewQtyLabel: '请求数量',
+      previewPriceLabel: '预期价格',
+      previewSubmit: '预演',
+      previewSubmitting: '计算中…',
+      previewResultDecision: '判定',
+      previewResultRate: '年化借券费率 (bps)',
+      previewResultLocateFee: 'Locate 费',
+      previewResultNotional: 'Notional',
+      auditTitle: 'Locate 审计日志',
+      auditFundFilter: '按基金过滤',
+      auditDecisionFilter: '按判定过滤',
+      auditEmpty: '暂无 locate 审计记录',
+      ledgerTitle: '借券费台账',
+      ledgerEmpty: '暂无借券费记录',
+      error: '加载失败',
+    },
+    wsfeed: {
+      panelTitle: 'S6.5 · WebSocket 实时行情',
+      panelSubtitle:
+        '把 broker 撮合 + 持仓刷新的报价来源从 REST 轮询换成 push tick。配置 WSFEED_ENABLED=true 并配上 provider（mock / 真实券商）后，所有热路径优先读 WS-cache，cache miss 或 stale 时自动回退 REST。',
+      disabled: '当前禁用：',
+      refresh: '刷新',
+      reconcile: '立即对齐订阅',
+      reconcileSubmitting: '对齐中…',
+      statusEnabled: '运行中',
+      statusHealthyProviders: '健康 provider',
+      statusSubscriptions: '订阅数',
+      statusCacheSymbols: '缓存合约',
+      statusTotalTicks: '累计 tick 数',
+      statusDroppedEvents: '丢弃事件',
+      connectionsTitle: '上游连接',
+      connectionsEmpty: '未注册任何 provider',
+      colProvider: 'Provider',
+      colState: '状态',
+      colTickCount: 'Tick 数',
+      colReconnects: '重连',
+      colLastTick: '最近 tick',
+      colConnectedAt: '连接时间',
+      colLastError: '最近错误',
+      stateConnected: '已连接',
+      stateConnecting: '连接中',
+      stateReconnecting: '重连中',
+      stateBackoff: '退避中',
+      stateDisconnected: '断开',
+      stateClosed: '已关闭',
+      stateUnknown: '未知',
+      subscriptionsTitle: '当前订阅',
+      subscriptionsEmpty: '当前没有任何订阅',
+      colSymbol: '合约',
+      colMarket: '市场',
+      colConsumers: '订阅方',
+      cacheTitle: 'Quote Cache',
+      cacheStats: '命中 / 错失 / 过期 / 淘汰',
+      cacheEmpty: '缓存为空',
+      colLast: '最新',
+      colBid: 'Bid',
+      colAsk: 'Ask',
+      colAsOf: '时间',
+      colStale: '过期',
+      subscribeTitle: '手动订阅',
+      subscribeSymbolPlaceholder: '合约（如 AAPL）',
+      subscribeMarketPlaceholder: '市场（如 US）',
+      subscribeSubmit: '订阅',
+      subscribeSubmitting: '提交中…',
+      unsubscribeButton: '退订',
+      evictCacheTitle: '缓存清理',
+      evictCacheButton: '清理本行',
+      evictCacheAllButton: '清空缓存',
+      error: '加载失败',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -501,8 +1710,17 @@ export const messages: Record<LocaleId, Messages> = {
       resetSuccess: 'Password updated — please sign in again.',
       resetTokenInvalid: 'This link is invalid or expired. Please request a new one.',
       resetPasswordMismatch: 'The two passwords do not match.',
+      twoFATitle: 'Two-factor verification',
+      twoFASubtitle: 'Enter the 6-digit code from your authenticator app.',
+      twoFAModeCode: 'Authenticator code',
+      twoFAModeRecovery: 'Recovery code',
+      twoFACodePlaceholder: '6-digit code',
+      twoFARecoveryPlaceholder: 'Recovery code',
+      twoFASubmit: 'Verify and continue',
+      twoFACancel: 'Use a different account',
+      twoFAInvalidCode: 'Invalid code, please try again.',
     },
-    tabs: { home: 'Home', decisions: 'Decisions', memory: 'Memory', team: 'Team', more: 'More' },
+    tabs: { home: 'Home', decisions: 'Decisions', memory: 'Memory', team: 'Team', more: 'More', orders: 'Orders' },
     home: {
       title: 'My funds',
       empty: 'No funds yet; create one in the web app.',
@@ -551,6 +1769,53 @@ export const messages: Record<LocaleId, Messages> = {
       retry: 'Retry',
     },
     team: { title: 'Agent team', empty: 'No agents configured for this fund.', error: 'Failed to load', retry: 'Retry' },
+    orders: {
+      title: 'My orders',
+      empty: 'No open orders.',
+      loadFailed: 'Failed to load orders',
+      retry: 'Retry',
+      actionsLabel: 'Actions',
+      cancel: 'Cancel',
+      replace: 'Modify',
+      cancelling: 'Cancelling…',
+      replacing: 'Saving…',
+      cancelConfirmTitle: 'Cancel order',
+      cancelConfirmBody: 'Cancel this order? It will be recorded in the audit log and cannot be undone.',
+      cancelOk: 'Confirm',
+      cancelOkConfirm: 'Cancel order',
+      cancelDismiss: 'Dismiss',
+      cancelSuccess: 'Order cancelled.',
+      replaceTitle: 'Modify order',
+      replaceQuantity: 'New quantity',
+      replaceLimit: 'New limit price',
+      replaceStop: 'New stop trigger',
+      replaceTrailAmount: 'New trail amount',
+      replaceTrailPercent: 'New trail percent (0-1)',
+      replaceDisplayQty: 'New display qty (iceberg)',
+      replaceNote: 'Reason (optional)',
+      replaceLeaveBlankHint: 'Leave blank to keep the current value.',
+      replaceSubmit: 'Save changes',
+      replaceCancel: 'Cancel',
+      replaceSuccess: 'Order updated.',
+      actionFailed: 'Action failed',
+      stepUpCancelReason: 'Confirm cancel with biometrics',
+      stepUpReplaceReason: 'Confirm replace with biometrics',
+      liveBannerTitle: 'Live trading prerequisites',
+      liveBannerSubtitle: 'This fund is in live mode. All four checks must pass before placing, replacing, or cancelling orders.',
+      liveBannerEnforced: 'Hard gate enabled',
+      liveBannerBypass: 'Hard gate off (dev mode)',
+      livePillarKYC: 'KYC verification',
+      livePillarBrokerLink: 'Broker account link',
+      livePillarTwoFA: '2FA / TOTP',
+      livePillarStepUp: 'Biometric confirmation',
+      livePillarOK: 'Passed',
+      livePillarMissing: 'Action required',
+      liveBlockedKYC: 'Please complete KYC verification first',
+      liveBlockedBrokerLink: 'Please link a broker account first',
+      liveBlockedTwoFA: 'Please enable 2FA / TOTP first',
+      liveBlockedStepUp: 'Please confirm with biometrics first',
+      columns: { symbol: 'Symbol', side: 'Side', qty: 'Qty', price: 'Price', status: 'Status' },
+    },
     more: {
       title: 'More',
       language: 'Language',
@@ -582,6 +1847,565 @@ export const messages: Record<LocaleId, Messages> = {
       sectionLanguage: 'Language',
       sectionDanger: 'Session',
       recentEvents: 'Recent events',
+      twoFATitle: 'Two-factor authentication',
+      twoFAHintLoading: 'Loading status…',
+      twoFAHintEnabled: 'Enabled. Manage in the web account security page.',
+      twoFAHintDisabled: 'Not enabled. Set it up in the web app.',
+      twoFAStatusOn: 'On',
+      twoFAStatusOff: 'Off',
+      stepUpOrders: 'Biometric for orders',
+      stepUpOrdersHint: 'When on, every cancel / replace asks for biometric confirmation.',
+    },
+    brokerLinks: {
+      title: 'Broker account link',
+      subtitle:
+        'Link an external broker account to this fund. New requests start as pending and require a different super_admin to approve (4-eye check) before live trading is unlocked.',
+      formTitle: 'Submit a new link request',
+      formBroker: 'Broker',
+      formAccountId: 'Broker account ID',
+      formAccountIdPlaceholder: 'e.g. U1234567',
+      formSubmit: 'Submit request',
+      formSubmitting: 'Submitting…',
+      formNote:
+        'After submitting, wait for an admin 4-eye approval. Only approved links count toward the live-trading gate.',
+      refresh: 'Refresh',
+      empty: 'No broker links yet',
+      loading: 'Loading…',
+      revoke: 'Revoke',
+      revoking: 'Revoking…',
+      confirmRevoke:
+        'Revoking will immediately block live cancel/replace until a new link is approved. Continue?',
+      statusPending: 'Pending approval',
+      statusActive: 'Active',
+      statusSuspended: 'Suspended',
+      statusRevoked: 'Revoked',
+      errorPrefix: 'Action failed: ',
+    },
+    funding: {
+      title: 'Deposits & withdrawals',
+      subtitle:
+        'Submit a deposit or withdrawal request. The amount only posts to cash_ledger after a different super_admin approves (4-eye).',
+      formTitle: 'New funding request',
+      formDirection: 'Direction',
+      formDirectionDeposit: 'Deposit',
+      formDirectionWithdrawal: 'Withdrawal',
+      formAmount: 'Amount',
+      formAmountPlaceholder: 'e.g. 100000',
+      formCurrency: 'Currency',
+      formMethod: 'Method',
+      formExternalReference: 'External reference',
+      formExternalReferencePlaceholder: 'e.g. wire ref or ACH trace id',
+      formNotes: 'Notes',
+      formNotesPlaceholder: 'Ticket number or context for the approver',
+      formSubmit: 'Submit request',
+      formSubmitting: 'Submitting…',
+      formNote: 'Withdrawals are checked against current_capital at approval time and rejected if insufficient.',
+      methodWire: 'Wire',
+      methodACH: 'ACH',
+      methodSEPA: 'SEPA',
+      methodCheck: 'Check',
+      methodInternal: 'Internal transfer',
+      methodManual: 'Manual',
+      refresh: 'Refresh',
+      empty: 'No funding requests yet',
+      loading: 'Loading…',
+      cancel: 'Cancel',
+      cancelling: 'Cancelling…',
+      confirmCancel:
+        'Cancelling removes this request from the approval queue. You can submit a new one. Continue?',
+      statusPending: 'Pending approval',
+      statusApproved: 'Approved',
+      statusRejected: 'Rejected',
+      statusCancelled: 'Cancelled',
+      statusPosted: 'Posted',
+      rejectionReasonLabel: 'Reason',
+      awaitingApproval: 'Awaiting admin 4-eye approval',
+      errorPrefix: 'Action failed: ',
+      insufficientCash: 'Insufficient cash to approve this withdrawal',
+    },
+    fx: {
+      panelTitle: 'FX rates',
+      panelSubtitle:
+        'The platform fetches USD-anchored pairs from Yahoo every 6 hours; operators can override here. NAV and cash-ledger summaries fall back to the most recent manual / override / yahoo row when converting into the fund\'s base_currency.',
+      listEmpty: 'No FX rates recorded yet.',
+      listLoading: 'Loading…',
+      listError: 'Failed to load FX rates',
+      refresh: 'Refresh',
+      pairLabel: 'Pair',
+      rateLabel: 'Rate',
+      rateAtLabel: 'Observed at',
+      sourceLabel: 'Source',
+      formTitle: 'Manual override',
+      formBase: 'Base',
+      formQuote: 'Quote',
+      formRate: 'Rate (1 base = ? quote)',
+      formRatePlaceholder: 'e.g. 7.18',
+      formSource: 'Source label',
+      formSourceManual: 'manual (operator entered)',
+      formSourceOverride: 'override (replaces a wrong auto fetch)',
+      formNote: 'Note (optional)',
+      formNotePlaceholder: 'Explain the override; lands in the audit chain.',
+      formSubmit: 'Submit',
+      formSubmitting: 'Submitting…',
+      formSuccess: 'Wrote fx_rates and audit log.',
+      sourceManual: 'manual',
+      sourceOverride: 'override',
+      sourceYahoo: 'Yahoo',
+      sourceEod: 'EOD',
+      fundBaseCurrencyLabel: 'Reporting currency',
+      fundBaseCurrencyHint:
+        'Switching to a non-USD base will convert every position and cash bucket via the latest USD-anchored rate before showing NAV.',
+      fundBaseCurrencySaving: 'Saving…',
+      fundBaseCurrencySaved: 'Saved.',
+      fxStaleBanner:
+        'Some currencies have no recent FX rate; balances are counted at face value as a fallback. Treat totals as approximate.',
+    },
+    recon: {
+      panelTitle: 'Daily reconciliation',
+      panelSubtitle:
+        'The platform diffs internal positions / cash / trades against a (mock) broker statement nightly. Breaks land on the audit chain — operators acknowledge or resolve from this panel.',
+      listEmpty: 'No reconciliation runs yet.',
+      listLoading: 'Loading…',
+      listError: 'Failed to load reconciliation runs',
+      refresh: 'Refresh',
+      runDateLabel: 'As-of',
+      triggerSourceLabel: 'Trigger',
+      statusLabel: 'Status',
+      breakCountLabel: 'Breaks',
+      breakCountCriticalLabel: 'Critical',
+      breakCountWarningLabel: 'Warning',
+      breakCountInfoLabel: 'Info',
+      severityCritical: 'critical',
+      severityWarning: 'warning',
+      severityInfo: 'info',
+      statusOpen: 'open',
+      statusAcknowledged: 'acknowledged',
+      statusResolved: 'resolved',
+      statusIgnored: 'ignored',
+      statusPending: 'running',
+      statusCompleted: 'completed',
+      statusFailed: 'failed',
+      triggerSourceManual: 'manual',
+      triggerSourceScheduled: 'scheduled',
+      triggerSourceReplay: 'replay',
+      breakTypePositionQuantity: 'Position quantity mismatch',
+      breakTypePositionAvgCost: 'Position avg-cost mismatch',
+      breakTypePositionMissingInternal: 'Position missing internally',
+      breakTypePositionMissingBroker: 'Position missing on broker',
+      breakTypeCashBalance: 'Cash balance mismatch',
+      breakTypeCashCurrencyMissingInternal: 'Currency missing internally',
+      breakTypeCashCurrencyMissingBroker: 'Currency missing on broker',
+      breakTypeTradeMissingInternal: 'Trade missing internally',
+      breakTypeTradeMissingBroker: 'Trade missing on broker',
+      breakTypeTradeQuantity: 'Trade quantity mismatch',
+      breakTypeTradePrice: 'Trade price mismatch',
+      breakTypeTradeSide: 'Trade side mismatch',
+      triggerRunButton: 'Trigger run',
+      triggerRunDialogTitle: 'Trigger reconciliation run',
+      triggerRunFundIdLabel: 'Fund ID',
+      triggerRunFundIdPlaceholder: 'UUID of the fund to reconcile',
+      triggerRunUseMockLabel: 'Use mock broker statement (only mode supported today)',
+      triggerRunDriftQtyLabel: 'Synthetic position drift (qty)',
+      triggerRunDriftCashLabel: 'Synthetic cash drift',
+      triggerRunDriftPriceLabel: 'Synthetic trade price drift',
+      triggerRunSubmit: 'Submit',
+      triggerRunSubmitting: 'Submitting…',
+      triggerRunSuccess: 'Run completed.',
+      triggerRunError: 'Run failed',
+      breakActionAcknowledge: 'Acknowledge',
+      breakActionResolve: 'Mark resolved',
+      breakActionIgnore: 'Ignore',
+      breakActionReopen: 'Re-open',
+      breakResolveDialogTitle: 'Resolve break',
+      breakResolveNoteLabel: 'Note (recorded on the audit chain)',
+      breakResolveSubmit: 'Confirm',
+      breakResolveSubmitting: 'Submitting…',
+      breakDrillDownTitle: 'Break details',
+      breakDetailInternalValue: 'Internal',
+      breakDetailBrokerValue: 'Broker',
+      breakDetailDiffValue: 'Diff',
+      breakDetailDiffPercent: 'Diff %',
+      breakDetailDescription: 'Description',
+      breakDetailMetadata: 'Metadata',
+      drillDownNoBreaks: 'No breaks for this run.',
+    },
+    surveillance: {
+      panelTitle: 'Trade surveillance',
+      panelSubtitle:
+        'Hourly scan of intraday fills for wash trades, marking-the-close, and self-cross patterns. Hits land on the audit chain — compliance reviews, clears, or escalates from this panel.',
+      listEmpty: 'No surveillance events yet.',
+      listLoading: 'Loading…',
+      listError: 'Failed to load surveillance events',
+      refresh: 'Refresh',
+      detectedAtLabel: 'Detected',
+      ruleCodeLabel: 'Rule',
+      severityLabel: 'Severity',
+      statusLabel: 'Status',
+      symbolLabel: 'Symbol',
+      summaryLabel: 'Summary',
+      triggerScanButton: 'Trigger scan',
+      triggerScanDialogTitle: 'Trigger surveillance scan',
+      triggerScanFundIdLabel: 'Fund ID',
+      triggerScanFundIdPlaceholder: 'UUID of the fund to scan',
+      triggerScanAsOfLabel: 'As-of (YYYY-MM-DD, defaults to today UTC)',
+      triggerScanSessionCloseLabel: 'Session close UTC (HH:MM, defaults to 20:00)',
+      triggerScanSubmit: 'Run scan',
+      triggerScanSubmitting: 'Scanning…',
+      triggerScanSuccess: 'Scan completed.',
+      triggerScanError: 'Scan failed',
+      severityCritical: 'critical',
+      severityWarning: 'warning',
+      severityInfo: 'info',
+      statusOpen: 'open',
+      statusReviewing: 'reviewing',
+      statusCleared: 'cleared',
+      statusEscalated: 'escalated',
+      triggerSourceManual: 'manual',
+      triggerSourceScheduled: 'scheduled',
+      ruleWashTrade: 'Wash trade',
+      ruleMarkingClose: 'Marking the close',
+      ruleSelfTradePair: 'Self-trade pair',
+      ruleRapidFireReversal: 'Rapid-fire reversal',
+      ruleLayeringSuspect: 'Layering suspect',
+      eventActionAcknowledge: 'Start review',
+      eventActionClear: 'Clear',
+      eventActionEscalate: 'Escalate',
+      eventActionReopen: 'Re-open',
+      eventReviewDialogTitle: 'Review surveillance event',
+      eventReviewNoteLabel: 'Review note (recorded on the audit chain)',
+      eventReviewSubmit: 'Confirm',
+      eventReviewSubmitting: 'Submitting…',
+      eventDetailMetadata: 'Detection evidence',
+      eventDetailTradeIDs: 'Contributing trades',
+      eventDetailWindow: 'Detection window',
+      runsSubpanelTitle: 'Recent scan runs',
+      runsTradeCountLabel: 'Trades scanned',
+      runsEventCountLabel: 'Events detected',
+      runsDurationLabel: 'Duration',
+    },
+    drawdown: {
+      panelTitle: 'Drawdown soft circuit breaker',
+      panelSubtitle:
+        'Per-fund tiered DD thresholds evaluated every 5 minutes. Breaches are recorded as proposed trim plans for operator review; tiers flagged auto_execute go straight to the order pipeline (still through risk gates + audit chain).',
+      refresh: 'Refresh',
+      listEmpty: 'No drawdown events.',
+      listLoading: 'Loading…',
+      listError: 'Failed to load drawdown data',
+      fundIdLabel: 'Fund ID',
+      fundIdPlaceholder: 'UUID of the fund to view / configure',
+      loadFundButton: 'Load',
+      statusTitle: 'Current drawdown status',
+      peakNavLabel: 'Peak NAV (lookback)',
+      currentNavLabel: 'Current NAV',
+      currentDDLabel: 'Current drawdown',
+      hasPolicyTrue: 'Policy configured',
+      hasPolicyFalse: 'No policy configured',
+      breachedTierLabel: 'Tier currently breached',
+      triggerCheckButton: 'Run check now',
+      triggerCheckRunning: 'Checking…',
+      triggerCheckNoBreach: 'No tier breached.',
+      triggerCheckBreached: 'Breached:',
+      triggerCheckError: 'Check failed',
+      tiersTitle: 'Tier configuration (max 5, mildest → hardest)',
+      tierLabel: 'Tier',
+      ddPctLabel: 'DD threshold (negative; -0.05 = -5%)',
+      actionLabel: 'Action',
+      trimRatioLabel: 'Trim ratio (used by trim_proportional)',
+      cooldownLabel: 'Cooldown (hours)',
+      autoExecuteLabel: 'Auto-execute',
+      noteLabel: 'Note',
+      addTierButton: 'Add / update tier',
+      saveTierButton: 'Save',
+      saveTierSubmitting: 'Saving…',
+      deleteTierButton: 'Delete',
+      deleteConfirm: 'Delete this tier?',
+      actionTrimProportional: 'Trim proportional',
+      actionFlatten: 'Flatten',
+      actionDefensiveOnly: 'Defensive only (reject new longs)',
+      eventsTitle: 'Drawdown events',
+      detectedAtLabel: 'Detected',
+      statusLabel: 'Status',
+      statusProposed: 'proposed',
+      statusApproved: 'approved',
+      statusExecuted: 'executed',
+      statusDismissed: 'dismissed',
+      statusSuperseded: 'superseded',
+      trimPlanTitle: 'Trim plan',
+      trimPlanEmpty: 'No trim orders for this tier (defensive_only).',
+      eventActionApprove: 'Approve & queue orders',
+      eventActionDismiss: 'Dismiss',
+      eventActionReopen: 'Re-open',
+      reviewDialogTitle: 'Review drawdown event',
+      reviewNoteLabel: 'Note (recorded on the audit chain)',
+      reviewSubmit: 'Confirm',
+      reviewSubmitting: 'Submitting…',
+      reviewError: 'Failed to update',
+    },
+    marketStatus: {
+      panelTitle: 'Market-status gate (halts / price limits / stale quotes / calendar)',
+      panelSubtitle:
+        'Pre-trade reachability gate. Suspended or halted instruments, limit-breaching prices, stale quotes, market-closed and half-day-closed sessions are caught BEFORE the matching engine sees the order. Hard rejects block the trade; soft warnings (e.g. mildly stale quote) ride on the order so attribution can see them later.',
+      refresh: 'Refresh',
+      instrumentsTitle: 'Instrument status',
+      instrumentsEmpty: 'No instruments configured yet.',
+      fieldKey: 'instrument_key',
+      fieldSymbol: 'Symbol',
+      fieldMarket: 'Market',
+      fieldStatus: 'Status',
+      fieldHaltReason: 'Halt reason',
+      fieldHaltUntil: 'Halt until',
+      fieldLower: 'Lower limit',
+      fieldUpper: 'Upper limit',
+      fieldLastQuoteAt: 'Last quote',
+      fieldStalenessBudget: 'Staleness budget (s)',
+      statusTrading: 'Trading',
+      statusHalted: 'Halted',
+      statusSuspended: 'Suspended',
+      haltButton: 'Halt',
+      haltSubmitting: 'Submitting…',
+      haltDialogTitle: 'Halt instrument',
+      haltReasonLabel: 'Reason (required)',
+      haltUntilLabel: 'Halt until (optional RFC3339)',
+      unhaltButton: 'Unhalt',
+      setLimitsButton: 'Set price limits',
+      setLimitsDialogTitle: 'Price limits',
+      upsertDialogTitle: 'Edit instrument',
+      saveButton: 'Save',
+      saveSubmitting: 'Saving…',
+      cancelButton: 'Cancel',
+      eventsTitle: 'Gate events',
+      eventDecision: 'Decision',
+      eventRule: 'Rule',
+      eventSummary: 'Summary',
+      eventDetected: 'When',
+      decisionAllow: 'allow',
+      decisionWarn: 'warn',
+      decisionReject: 'reject',
+      ruleHalted: 'halted',
+      ruleSuspended: 'suspended',
+      rulePriceLimit: 'price-limit',
+      ruleStaleQuote: 'stale quote',
+      ruleMarketClosed: 'market closed',
+      ruleHalfDayClosed: 'half-day closed',
+      calendarTitle: 'Trading calendar',
+      calendarMarketLabel: 'Market (e.g. CN / US / HK)',
+      calendarFromLabel: 'From',
+      calendarToLabel: 'To',
+      calendarLoadButton: 'Load',
+      calendarUpsertTitle: 'Add / edit calendar day',
+      calendarIsOpen: 'Open',
+      calendarHalfDay: 'Half-day',
+      calendarOpenLocal: 'Open local (HH:MM)',
+      calendarCloseLocal: 'Close local (HH:MM)',
+      calendarTZ: 'Timezone',
+      calendarNote: 'Note',
+      error: 'Failed to load',
+    },
+    marketImpact: {
+      panelTitle: 'S6.2 · Market-impact calibration',
+      panelSubtitle:
+        "Per-instrument ADV and volatility used by the simulator's square-root impact model (bps = σ · k · √(Q/ADV) · 10000). Uncalibrated names fall back to asset-class defaults so big orders never silently fill at last.",
+      refresh: 'Refresh',
+      instrumentsTitle: 'Calibration rows',
+      instrumentsEmpty: 'No calibrations yet. Add one below or leave empty to use asset-class defaults.',
+      fieldKey: 'instrument_key',
+      fieldSymbol: 'Symbol',
+      fieldMarket: 'Market',
+      fieldAssetClass: 'Asset class',
+      fieldADV: 'ADV (shares / contracts)',
+      fieldADVNotional: 'ADV (notional)',
+      fieldVolatility: 'Daily volatility σ',
+      fieldImpactCoef: 'Impact coef k',
+      fieldImpactExp: 'Exponent α (default 0.5)',
+      fieldMinBps: 'Min slippage bps',
+      fieldMaxBps: 'Max slippage bps',
+      fieldLastCalibrated: 'Last calibrated',
+      fieldSource: 'Source',
+      upsertButton: 'Upsert',
+      upsertDialogTitle: 'Edit calibration',
+      deleteButton: 'Delete',
+      deleteConfirm: 'Delete this calibration? Future fills will fall back to asset-class defaults.',
+      saveButton: 'Save',
+      saveSubmitting: 'Saving…',
+      cancelButton: 'Cancel',
+      sourceManual: 'Manual entry',
+      sourceHistorical: 'Historical replay',
+      sourceBrokerReported: 'Broker-reported',
+      previewTitle: 'Preview impact',
+      previewSubtitle: 'Run the engine on a probe; nothing is booked. Useful for sanity-checking calibration.',
+      previewSide: 'Side',
+      previewSideBuy: 'Buy',
+      previewSideSell: 'Sell',
+      previewQuantity: 'Quantity',
+      previewReferencePrice: 'Reference price',
+      previewSubmit: 'Run preview',
+      previewSubmitting: 'Running…',
+      previewResult: 'Preview result',
+      previewBps: 'Adverse bps',
+      previewImpliedFill: 'Implied fill',
+      previewImpactCost: 'Impact cost (notional)',
+      previewUsedDefaults: 'Asset-class default',
+      previewUsedADVFallback: 'ADV missing → floor only',
+      cacheTitle: 'In-memory cache',
+      cacheSize: 'Calibration rows',
+      cacheLastRefresh: 'Last refresh',
+      cacheRefreshButton: 'Force refresh',
+      cacheRefreshing: 'Refreshing…',
+      error: 'Failed to load',
+    },
+    lockup: {
+      panelTitle: 'S6.3 · IPO / restricted-share lock-up',
+      panelSubtitle:
+        "Records hold-periods on positions acquired via IPO allocation, private placement, RSU vest, or other restricted channels. The simulator rejects sells whose qty exceeds (position − sum of active locked qty). Operators can early-release with an audited reason.",
+      refresh: 'Refresh',
+      listTitle: 'Lock-up records',
+      listEmpty: 'No lock-up records yet',
+      fieldFund: 'Fund',
+      fieldInstrument: 'instrument_key',
+      fieldSymbol: 'Symbol',
+      fieldQty: 'Locked qty',
+      fieldUntil: 'Locked until',
+      fieldReason: 'Reason',
+      fieldNote: 'Note',
+      fieldStatus: 'Status',
+      fieldSourceLot: 'Source lot',
+      fieldReleasedAt: 'Released at',
+      fieldReleasedReason: 'Released reason',
+      statusActive: 'Active',
+      statusExpired: 'Expired',
+      statusReleased: 'Released',
+      reasonIPO: 'IPO allocation',
+      reasonPrivatePlacement: 'Private placement',
+      reasonRSU: 'RSU vest',
+      reasonRestricted: 'Restricted',
+      reasonEmployeeGrant: 'Employee grant',
+      reasonBlockSale: 'Block sale',
+      reasonOther: 'Other',
+      filterAll: 'All',
+      createButton: 'Add',
+      createDialogTitle: 'Record lock-up',
+      editButton: 'Edit',
+      editDialogTitle: 'Edit lock-up',
+      deleteButton: 'Delete',
+      deleteConfirm:
+        'Hard-deleting loses the audit trail. Are you sure you want to delete instead of "early release"?',
+      releaseButton: 'Early release',
+      releaseDialogTitle: 'Release lock-up early',
+      releaseReasonLabel: 'Release reason (required, will be audit-logged)',
+      saveButton: 'Save',
+      saveSubmitting: 'Saving…',
+      cancelButton: 'Cancel',
+      error: 'Failed to load',
+    },
+    borrow: {
+      panelTitle: 'S6.4 · Securities borrow & locate',
+      panelSubtitle:
+        'Records the annual borrow rate, locate fee and available supply per borrowable instrument. The simulator runs a pre-trade locate gate on SHORT opens; an EOD loop accrues short-borrow fees (qty × close × rate / 365) to the cash_ledger (borrow_fee) and the short-borrow sub-ledger.',
+      refresh: 'Refresh',
+      listTitle: 'Borrow rates',
+      listEmpty: 'No borrow rate calibrations yet',
+      fieldKey: 'instrument_key',
+      fieldSymbol: 'Symbol',
+      fieldMarket: 'Market',
+      fieldRate: 'Annual rate (bps)',
+      fieldLocateFee: 'Locate fee (bps)',
+      fieldAvailability: 'Availability',
+      fieldAvailable: 'Available shares',
+      fieldMinLocate: 'Min locate qty',
+      fieldMaxLocate: 'Max locate qty',
+      fieldSource: 'Source',
+      fieldNote: 'Note',
+      availEasy: 'Easy-to-borrow',
+      availHard: 'Hard-to-borrow',
+      availRestricted: 'Restricted',
+      availUnavailable: 'Unavailable',
+      sourceManual: 'Manual',
+      sourceBrokerQuote: 'Broker quote',
+      sourceAgentLender: 'Agent lender',
+      sourceHistorical: 'Historical calibration',
+      sourcePublicFeed: 'Public feed',
+      upsertButton: 'Save',
+      upsertSubmitting: 'Saving…',
+      deleteButton: 'Delete',
+      cacheTitle: 'In-memory cache',
+      cacheSize: 'Rows',
+      cacheLastRefresh: 'Last refresh',
+      cacheRefreshButton: 'Force refresh',
+      cacheRefreshing: 'Refreshing…',
+      previewTitle: 'Locate preview',
+      previewSubtitle:
+        'Dry-run the locate gate decision (including locate fee) without placing an order.',
+      previewFundLabel: 'Fund ID',
+      previewKeyLabel: 'instrument_key',
+      previewQtyLabel: 'Requested qty',
+      previewPriceLabel: 'Intended price',
+      previewSubmit: 'Preview',
+      previewSubmitting: 'Computing…',
+      previewResultDecision: 'Decision',
+      previewResultRate: 'Annual borrow rate (bps)',
+      previewResultLocateFee: 'Locate fee',
+      previewResultNotional: 'Notional',
+      auditTitle: 'Locate audit log',
+      auditFundFilter: 'Filter by fund',
+      auditDecisionFilter: 'Filter by decision',
+      auditEmpty: 'No locate events recorded',
+      ledgerTitle: 'Borrow-fee ledger',
+      ledgerEmpty: 'No borrow-fee accruals yet',
+      error: 'Failed to load',
+    },
+    wsfeed: {
+      panelTitle: 'S6.5 · Real-time market data (WS)',
+      panelSubtitle:
+        'Replace REST polling on the broker / position-refresh hot paths with pushed ticks. Set WSFEED_ENABLED=true plus a provider; cache misses fall back to REST transparently.',
+      disabled: 'Currently disabled: ',
+      refresh: 'Refresh',
+      reconcile: 'Reconcile subscriptions',
+      reconcileSubmitting: 'Reconciling…',
+      statusEnabled: 'Running',
+      statusHealthyProviders: 'Healthy providers',
+      statusSubscriptions: 'Subscriptions',
+      statusCacheSymbols: 'Cached symbols',
+      statusTotalTicks: 'Total ticks',
+      statusDroppedEvents: 'Dropped events',
+      connectionsTitle: 'Upstream connections',
+      connectionsEmpty: 'No providers registered',
+      colProvider: 'Provider',
+      colState: 'State',
+      colTickCount: 'Ticks',
+      colReconnects: 'Reconnects',
+      colLastTick: 'Last tick',
+      colConnectedAt: 'Connected at',
+      colLastError: 'Last error',
+      stateConnected: 'connected',
+      stateConnecting: 'connecting',
+      stateReconnecting: 'reconnecting',
+      stateBackoff: 'backoff',
+      stateDisconnected: 'disconnected',
+      stateClosed: 'closed',
+      stateUnknown: 'unknown',
+      subscriptionsTitle: 'Active subscriptions',
+      subscriptionsEmpty: 'No active subscriptions',
+      colSymbol: 'Symbol',
+      colMarket: 'Market',
+      colConsumers: 'Consumers',
+      cacheTitle: 'Quote cache',
+      cacheStats: 'Hits / Misses / Stale / Evicts',
+      cacheEmpty: 'Cache is empty',
+      colLast: 'Last',
+      colBid: 'Bid',
+      colAsk: 'Ask',
+      colAsOf: 'As of',
+      colStale: 'Stale',
+      subscribeTitle: 'Manual subscribe',
+      subscribeSymbolPlaceholder: 'Symbol (e.g. AAPL)',
+      subscribeMarketPlaceholder: 'Market (e.g. US)',
+      subscribeSubmit: 'Subscribe',
+      subscribeSubmitting: 'Submitting…',
+      unsubscribeButton: 'Unsubscribe',
+      evictCacheTitle: 'Cache maintenance',
+      evictCacheButton: 'Evict row',
+      evictCacheAllButton: 'Evict all',
+      error: 'Failed to load',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',

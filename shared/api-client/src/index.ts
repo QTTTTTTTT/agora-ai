@@ -76,6 +76,15 @@ interface CallOptions {
   signal?: AbortSignal;
   /** 跳过 401 hook（auth endpoint 自己处理）。 */
   skipUnauthorizedHook?: boolean;
+  /**
+   * Extra headers to merge on top of the default Content-Type +
+   * Authorization. P0-7 uses this to pipe X-Step-Up-Token through
+   * to high-risk endpoints without polluting the function
+   * signature of every wrapper. Existing keys win on collision —
+   * NEVER let a caller override Authorization (the auth layer is
+   * the single source of truth for that).
+   */
+  headers?: Record<string, string>;
 }
 
 export interface ApiClient {
@@ -84,12 +93,93 @@ export interface ApiClient {
 
   // ---- Auth ----
   login(input: LoginInput): Promise<LoginResponse>;
+  // loginOutcome wraps `login` and surfaces the 2FA challenge
+  // response shape — preferred for new callers. Returning the union
+  // here keeps backwards compatibility for old consumers that still
+  // call `login()` and expect a flat LoginResponse.
+  loginOutcome(input: LoginInput): Promise<LoginOutcome>;
   session(): Promise<SessionResponse>;
   logout(): Promise<void>;
   wechatLogin(input: { code: string }): Promise<LoginResponse>;
   forgotPassword(input: { email: string }): Promise<{ ok: boolean }>;
   resetPassword(input: { token: string; new_password: string }): Promise<{ ok: boolean }>;
   changePassword(input: { current_password: string; new_password: string }): Promise<{ ok: boolean }>;
+
+  // ---- 2FA / TOTP (P0-6) ----
+  twoFAStatus(): Promise<TwoFAStatusResponse>;
+  twoFASetup(): Promise<TwoFASetupResponse>;
+  twoFAVerify(input: { code: string }): Promise<{ enabled: boolean }>;
+  twoFADisable(input: { password: string; code?: string; recoveryCode?: string }): Promise<{ disabled: boolean }>;
+  twoFAChallenge(input: { challenge: string; code?: string; recoveryCode?: string }): Promise<LoginResponse>;
+
+  // ---- Step-up (P0-7) ----
+  // Mints a short-lived step-up token following a fresh biometric
+  // assertion on the device. Callers attach the token via
+  // X-Step-Up-Token on subsequent high-risk action requests.
+  stepUp(input?: { biometricKind?: string }): Promise<StepUpResponse>;
+
+  // ---- Live trading hard gate (P0-9) ----
+  // Returns the per-fund readiness picture: which of the four
+  // pillars (KYC, broker_link, 2FA, step-up) currently pass.
+  // The UI uses this to render a checklist on a fund detail page
+  // BEFORE the user attempts a cancel/replace, so a 403 from the
+  // mutation endpoint is rare and recoverable.
+  //
+  // Pass stepUpToken when polling readiness right after a
+  // biometric prompt — the server folds it into the StepUpOK
+  // pillar so the UI can show "all pillars green" without an
+  // extra round-trip.
+  liveReadiness(input: { fundId: string; stepUpToken?: string }): Promise<LiveReadinessResponse>;
+
+  // ---- Broker links (P1-6) ----
+  //
+  // Self-service broker-account binding for the fund owner. New
+  // requests start as 'pending' and only become 'active' after a
+  // super_admin approves them via the admin UI (4-eye check
+  // enforced server-side).
+  //
+  // Concurrency: the server's partial UNIQUE
+  // broker_links_one_active_per_fund_idx guarantees at most one
+  // ACTIVE row per fund, so callers can race two requests
+  // without corrupting state — the second one will fail with
+  // 409.
+  listBrokerLinks(fundId: string): Promise<BrokerLinkRow[]>;
+  requestBrokerLink(input: {
+    fundId: string;
+    brokerId: string;
+    accountId: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ link_id: string; status: BrokerLinkStatus }>;
+  revokeBrokerLink(input: {
+    fundId: string;
+    linkId: string;
+  }): Promise<{ link_id: string; status: BrokerLinkStatus }>;
+
+  // ---- Funding requests (P1-2) ----
+  //
+  // Deposit / withdrawal flow. Self-service create + cancel for
+  // the fund owner; approve/reject are admin-only and live on
+  // /api/admin/funding-requests/* (not surfaced through this
+  // shared client because the admin UI is web-only and uses
+  // web/src/lib/api.ts directly).
+  listFundingRequests(input: {
+    fundId: string;
+    statuses?: FundingStatus[];
+    limit?: number;
+  }): Promise<FundingRequestRow[]>;
+  createFundingRequest(input: {
+    fundId: string;
+    direction: FundingDirection;
+    amount: number;
+    method: FundingMethod;
+    currency?: string;
+    externalReference?: string;
+    notes?: string;
+  }): Promise<{ id: string; status: FundingStatus }>;
+  cancelFundingRequest(input: {
+    fundId: string;
+    requestId: string;
+  }): Promise<{ status: FundingStatus }>;
 
   // ---- Funds + companies ----
   listCompanies(): Promise<CompanyListResponse>;
@@ -116,6 +206,31 @@ export interface ApiClient {
   refreshPlanQuote(planId: string): Promise<PlanDetail>;
   getDecisionTrace(fundId: string, tradingDate: string, planId: string): Promise<DecisionTrace>;
 
+  // ---- Order Cancel / Replace (P0-5) ----
+
+  /** Cancel an open order. Backend rejects terminal orders with 409
+   *  (mapped to ApiError.code 409 here). Reason is one of the
+   *  canonical short tags ("user_requested", "ttl", "risk_breach",
+   *  "system"); anything else is rewritten server-side. */
+  cancelOrder(
+    fundId: string,
+    tradeId: string,
+    options?: { reason?: string; note?: string; stepUpToken?: string },
+  ): Promise<OrderActionResponse>;
+
+  /** Replace one or more modifiable fields of an open order. At
+   *  least one of (quantity, limitPrice, stopPrice, trailAmount,
+   *  trailPercent, displayQty) must be set, or the backend returns
+   *  400. The note field is captured into the audit metadata only;
+   *  it does NOT count as a "field change" so a note-only replace
+   *  is rejected. */
+  replaceOrder(
+    fundId: string,
+    tradeId: string,
+    payload: ReplaceOrderPayload,
+    options?: { stepUpToken?: string },
+  ): Promise<OrderActionResponse>;
+
   // ---- Memory ----
   getMemory(fundId: string, layer?: MemoryLayer): Promise<MemoryListResponse>;
   listReflections(fundId: string, limit?: number): Promise<ReflectionListResponse>;
@@ -123,6 +238,12 @@ export interface ApiClient {
   // ---- Portfolio / NAV ----
   getPortfolio(fundId: string): Promise<PortfolioSnapshot>;
   getNavHistory(fundId: string, days?: number): Promise<NavHistoryResponse>;
+
+  /** Returns the most recent N trades for the fund. Used by the
+   *  Orders screen to surface open / recently-cancelled orders for
+   *  cancel / replace flows. Defaults to 200 and clamped to 1000
+   *  server-side. */
+  listTrades(fundId: string, limit?: number): Promise<TradeListResponse>;
 
   // ---- Corporate actions ----
   /** Returns the per-fund timeline of split / dividend events that
@@ -202,6 +323,10 @@ export function createClient(options: ClientOptions): ApiClient {
         method: opts.method ?? "GET",
         headers: {
           "Content-Type": "application/json",
+          // Caller-supplied headers go BEFORE auth so we cannot
+          // be tricked into overriding our own Authorization
+          // header (the spread order is important).
+          ...(opts.headers ?? {}),
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
@@ -233,6 +358,26 @@ export function createClient(options: ClientOptions): ApiClient {
     // Auth
     login: (input) =>
       request<LoginResponse>("/api/auth/login", { method: "POST", body: input, skipUnauthorizedHook: true }),
+    // loginOutcome surfaces the discriminated union (session vs.
+    // 2FA challenge). Implemented as a wrapper around the same
+    // endpoint so legacy `login()` callers don't break — they
+    // simply see the challenge response throw "missing token" via
+    // their existing error path.
+    loginOutcome: async (input) => {
+      // We deliberately bypass the typed `login` helper here so we
+      // can inspect the raw payload before TS narrows it to
+      // LoginResponse. The server returns one of two shapes
+      // depending on whether 2FA is enabled.
+      const raw = await request<LoginResponse | TwoFAChallengeResponse>(
+        "/api/auth/login",
+        { method: "POST", body: input, skipUnauthorizedHook: true },
+      );
+      if ((raw as TwoFAChallengeResponse).requires_2fa) {
+        const ch = raw as TwoFAChallengeResponse;
+        return { kind: "challenge", challenge: ch.challenge, expiresAt: ch.expires_at };
+      }
+      return { kind: "session", payload: raw as LoginResponse };
+    },
     session: () => request<SessionResponse>("/api/auth/session"),
     logout: async () => {
       await request<void>("/api/auth/logout", { method: "POST", body: {} });
@@ -245,6 +390,20 @@ export function createClient(options: ClientOptions): ApiClient {
       request("/api/auth/reset-password", { method: "POST", body: input, skipUnauthorizedHook: true }),
     changePassword: (input) =>
       request("/api/auth/change-password", { method: "POST", body: input }),
+
+    // ---- 2FA / TOTP ----
+    twoFAStatus: () => request<TwoFAStatusResponse>("/api/auth/2fa/status"),
+    twoFASetup: () => request<TwoFASetupResponse>("/api/auth/2fa/setup", { method: "POST", body: {} }),
+    twoFAVerify: (input) =>
+      request<{ enabled: boolean }>("/api/auth/2fa/verify", { method: "POST", body: input }),
+    twoFADisable: (input) =>
+      request<{ disabled: boolean }>("/api/auth/2fa/disable", { method: "POST", body: input }),
+    twoFAChallenge: (input) =>
+      // skipUnauthorizedHook so a wrong code doesn't drop the user
+      // out of the half-completed login flow. The handler still
+      // surfaces 401, but we leave the on-401 logout path to the
+      // caller's UI.
+      request<LoginResponse>("/api/auth/2fa/challenge", { method: "POST", body: input, skipUnauthorizedHook: true }),
 
     // Companies + funds
     listCompanies: () => request<CompanyListResponse>("/api/companies"),
@@ -270,6 +429,99 @@ export function createClient(options: ClientOptions): ApiClient {
         `/api/funds/${encodeURIComponent(fundId)}/decision-trace?tradingDate=${encodeURIComponent(tradingDate)}&planId=${encodeURIComponent(planId)}`,
       ),
 
+    cancelOrder: async (fundId, tradeId, options) => {
+      const body: Record<string, string> = {};
+      if (options?.reason) body.reason = options.reason;
+      if (options?.note) body.note = options.note;
+      const resp = await request<{ order: OrderActionResponse }>(
+        `/api/funds/${encodeURIComponent(fundId)}/orders/${encodeURIComponent(tradeId)}/cancel`,
+        {
+          method: "POST",
+          body: Object.keys(body).length > 0 ? body : {},
+          headers: options?.stepUpToken ? { "X-Step-Up-Token": options.stepUpToken } : undefined,
+        },
+      );
+      return resp.order;
+    },
+
+    replaceOrder: async (fundId, tradeId, payload, options) => {
+      const resp = await request<{ order: OrderActionResponse }>(
+        `/api/funds/${encodeURIComponent(fundId)}/orders/${encodeURIComponent(tradeId)}/replace`,
+        {
+          method: "POST",
+          body: payload,
+          headers: options?.stepUpToken ? { "X-Step-Up-Token": options.stepUpToken } : undefined,
+        },
+      );
+      return resp.order;
+    },
+
+    stepUp: (input) =>
+      // Body is intentionally optional — the server tolerates a
+      // missing/empty body. The biometricKind hint is a future
+      // hook for audit reporting.
+      request<StepUpResponse>("/api/auth/step-up", {
+        method: "POST",
+        body: input ?? {},
+      }),
+
+    liveReadiness: ({ fundId, stepUpToken }) => {
+      // Honour the step-up token if the caller passed one
+      // (typically right after a fresh biometric prompt). Use
+      // the query param rather than the header so the request
+      // works through caches that strip non-standard headers.
+      const qs = stepUpToken
+        ? `?step_up_token=${encodeURIComponent(stepUpToken)}`
+        : "";
+      return request<LiveReadinessResponse>(
+        `/api/funds/${encodeURIComponent(fundId)}/live-readiness${qs}`,
+      );
+    },
+
+    listBrokerLinks: async (fundId) => {
+      const resp = await request<{ links: BrokerLinkRow[] }>(
+        `/api/funds/${encodeURIComponent(fundId)}/broker-links`,
+      );
+      return resp.links ?? [];
+    },
+    requestBrokerLink: ({ fundId, brokerId, accountId, metadata }) =>
+      request<{ link_id: string; status: BrokerLinkStatus }>(
+        `/api/funds/${encodeURIComponent(fundId)}/broker-links`,
+        {
+          method: "POST",
+          body: { brokerId, accountId, metadata },
+        },
+      ),
+    revokeBrokerLink: ({ fundId, linkId }) =>
+      request<{ link_id: string; status: BrokerLinkStatus }>(
+        `/api/funds/${encodeURIComponent(fundId)}/broker-links/${encodeURIComponent(linkId)}/revoke`,
+        { method: "POST", body: {} },
+      ),
+
+    // ---- Funding requests (P1-2) ----
+    listFundingRequests: async ({ fundId, statuses, limit }) => {
+      const params = new URLSearchParams();
+      if (statuses && statuses.length > 0) {
+        for (const s of statuses) params.append("status", s);
+      }
+      if (limit) params.set("limit", String(limit));
+      const qs = params.toString();
+      const resp = await request<{ requests: FundingRequestRow[] }>(
+        `/api/funds/${encodeURIComponent(fundId)}/funding-requests${qs ? `?${qs}` : ""}`,
+      );
+      return resp.requests;
+    },
+    createFundingRequest: ({ fundId, ...body }) =>
+      request<{ id: string; status: FundingStatus }>(
+        `/api/funds/${encodeURIComponent(fundId)}/funding-requests`,
+        { method: "POST", body },
+      ),
+    cancelFundingRequest: ({ fundId, requestId }) =>
+      request<{ status: FundingStatus }>(
+        `/api/funds/${encodeURIComponent(fundId)}/funding-requests/${encodeURIComponent(requestId)}/cancel`,
+        { method: "POST", body: {} },
+      ),
+
     // Memory
     getMemory: (fundId, layer) =>
       request<MemoryListResponse>(
@@ -287,6 +539,16 @@ export function createClient(options: ClientOptions): ApiClient {
       request<NavHistoryResponse>(
         `/api/funds/${encodeURIComponent(fundId)}/nav${days ? `?days=${days}` : ""}`,
       ),
+
+    listTrades: async (fundId, limit) => {
+      // The server returns a bare array; we wrap it in a typed
+      // envelope so future pagination metadata (page tokens, total)
+      // can be added without churning the consumer.
+      const trades = await request<TradeRecord[]>(
+        `/api/funds/${encodeURIComponent(fundId)}/trades?limit=${limit ?? 200}`,
+      );
+      return { trades: Array.isArray(trades) ? trades : [] };
+    },
 
     // Corporate actions — per-fund timeline of split / dividend
     // events that have been applied to holdings. Read-only, with
@@ -370,6 +632,727 @@ export interface LoginResponse {
   email?: string;
   display_name?: string;
   role?: string;
+}
+
+// TwoFAChallengeResponse is what /api/auth/login returns when the
+// user has 2FA enabled — instead of a session token we get a
+// short-lived challenge that has to be exchanged for a session via
+// /api/auth/2fa/challenge. Lives at the top level so consumers can
+// import it without reaching into nested paths.
+export interface TwoFAChallengeResponse {
+  requires_2fa: true;
+  challenge: string;
+  expires_at: string;
+}
+
+// LoginOutcome is the discriminated union the platform's login
+// helpers return. The `kind` field tells the caller which branch
+// they're on; TS will refuse to compile a missing case.
+export type LoginOutcome =
+  | { kind: "session"; payload: LoginResponse }
+  | { kind: "challenge"; challenge: string; expiresAt: string };
+
+// 2FA enrolment payloads — matched 1:1 to the server's
+// totp_handler.go responses.
+export interface TwoFAStatusResponse {
+  enabled: boolean;
+  enrolmentPending?: boolean;
+  lastVerifiedAt?: string;
+  lastUsedRecoveryAt?: string;
+}
+
+export interface TwoFASetupResponse {
+  secret: string;
+  provisioningUri: string;
+  recoveryCodes: string[];
+  issuer: string;
+  accountLabel: string;
+  digits: number;
+  period: number;
+  algorithm: string;
+}
+
+// StepUpResponse is what /api/auth/step-up returns. Token is the
+// JWT to attach via X-Step-Up-Token; ttl_seconds + expires_at let
+// the client cache the token without round-tripping back here for
+// every action. P0-7.
+export interface StepUpResponse {
+  token: string;
+  expires_at: string;
+  ttl_seconds: number;
+}
+
+// LiveReadinessResponse mirrors GET /api/funds/{fundId}/live-readiness.
+// Trading mode and per-pillar bools come straight from the
+// backend's LiveReadiness struct; first_failing names the first
+// pillar the user must complete (in the natural KYC →
+// broker_link → 2FA → step-up order). gate_enforced=false means
+// either the fund isn't 'live' OR LIVE_TRADING_GATE_ENABLED is
+// off in the deployment — UI should NOT block the user in that
+// case, but MAY surface a soft "would-be" warning. P0-9.
+export interface LiveReadinessResponse {
+  trading_mode: string;
+  ready: boolean;
+  gate_enforced: boolean;
+  kyc_ok: boolean;
+  broker_link_ok: boolean;
+  two_fa_ok: boolean;
+  step_up_ok: boolean;
+  first_failing?: string;
+  broker_link_id?: string;
+  step_up_user_id?: string;
+}
+
+// Broker-link wire types (P1-6). Mirrors the projection in
+// server/cmd/server/broker_link_handler.go — note that
+// `accountId` is ALREADY redacted server-side, so a client
+// printing it directly leaks no PII.
+export type BrokerLinkStatus = "pending" | "active" | "suspended" | "revoked";
+
+export interface BrokerLinkRow {
+  id: string;
+  fundId: string;
+  userId: string;
+  brokerId: string;
+  accountId: string; // redacted (e.g. "••••4567")
+  status: BrokerLinkStatus;
+  approvedBy?: string;
+  approvedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Funding requests (P1-2)
+// ---------------------------------------------------------------------------
+//
+// Deposit / withdrawal queue. Every state-changing operation
+// (create, cancel, approve, reject) is hash-chained into the
+// audit log. UI renders the status badge with these constants —
+// keeping them as a TS union means a typo at the call site fails
+// the type check.
+
+export type FundingDirection = "deposit" | "withdrawal";
+
+export type FundingStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "cancelled"
+  | "posted";
+
+export type FundingMethod =
+  | "wire"
+  | "ach"
+  | "sepa"
+  | "check"
+  | "internal_transfer"
+  | "manual";
+
+export interface FundingRequestRow {
+  id: string;
+  fundId: string;
+  direction: FundingDirection;
+  amount: number;
+  currency: string;
+  method: FundingMethod;
+  externalReference?: string;
+  status: FundingStatus;
+  requestedBy: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectedBy?: string;
+  rejectedAt?: string;
+  rejectionReason?: string;
+  cancelledAt?: string;
+  cashLedgerEntryId?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// FXRateRow is the on-wire shape returned by GET /api/admin/fx-rates
+// (P1-4). One row per (base, quote, rate_at, source) tuple.
+//
+// Mirrors fxAdminWire on the server side. Note the on-wire snake_case
+// for rate_at to match the rest of the admin surface; everything else
+// stays camelCase for parity with positions/orders.
+export interface FXRateRow {
+  base: string;
+  quote: string;
+  rate: number;
+  rate_at: string;
+  source: string;
+}
+
+// Closed vocabulary the server's funds.base_currency CHECK accepts.
+// Kept here so fund-settings UIs can render a <select> without an
+// extra round-trip. If the server's allowlist grows, bump this.
+export const SUPPORTED_BASE_CURRENCIES = [
+  "USD",
+  "CNY",
+  "HKD",
+  "EUR",
+  "JPY",
+  "GBP",
+  "SGD",
+] as const;
+
+export type SupportedBaseCurrency = (typeof SUPPORTED_BASE_CURRENCIES)[number];
+
+// ReconciliationRun is the on-wire shape returned by
+// GET /api/admin/reconciliation/runs (P1-3). One row per executed
+// diff. break_count_* fields let the UI render a roll-up without
+// pulling the full break list.
+export interface ReconciliationRun {
+  id: string;
+  fund_id: string;
+  statement_id: string;
+  run_date: string; // YYYY-MM-DD
+  triggered_by?: string;
+  trigger_source: "manual" | "scheduled" | "replay";
+  status: "pending" | "completed" | "failed";
+  break_count_total: number;
+  break_count_critical: number;
+  break_count_warning: number;
+  break_count_info: number;
+  summary?: Record<string, unknown>;
+  started_at: string; // RFC3339
+  completed_at?: string;
+  error_message?: string;
+}
+
+// ReconciliationBreak is the on-wire shape for one diff break.
+// internal_value / broker_value / diff_value are nullable because
+// some break types only have one side (e.g. position_missing_internal
+// has broker_value but no internal_value), and diff_percent is null
+// when the divisor would be zero.
+export interface ReconciliationBreak {
+  id: string;
+  run_id: string;
+  fund_id: string;
+  break_type: ReconciliationBreakType;
+  severity: "info" | "warning" | "critical";
+  symbol?: string;
+  currency?: string;
+  internal_value?: number | null;
+  broker_value?: number | null;
+  diff_value?: number | null;
+  diff_percent?: number | null;
+  description?: string;
+  metadata?: Record<string, unknown>;
+  status: "open" | "acknowledged" | "resolved" | "ignored";
+  resolution_note?: string;
+  resolved_by?: string;
+  resolved_at?: string;
+  created_at: string;
+}
+
+// ReconciliationBreakType is the closed vocabulary the engine
+// emits. Matches `recon.BreakType` on the server side.
+export type ReconciliationBreakType =
+  | "position_quantity_mismatch"
+  | "position_avg_cost_mismatch"
+  | "position_missing_internal"
+  | "position_missing_broker"
+  | "cash_balance_mismatch"
+  | "cash_currency_missing_internal"
+  | "cash_currency_missing_broker"
+  | "trade_missing_internal"
+  | "trade_missing_broker"
+  | "trade_quantity_mismatch"
+  | "trade_price_mismatch"
+  | "trade_side_mismatch";
+
+// SurveillanceEvent is the on-wire shape returned by
+// GET /api/admin/surveillance/events (P1-7). One row per pattern
+// detection. trade_ids are the contributing trade_executions ids
+// (same shape as the audit chain references). metadata is
+// rule-specific — the UI renders the keys it knows and falls
+// back to a JSON dump otherwise.
+export interface SurveillanceEvent {
+  id: string;
+  fund_id: string;
+  rule_code: SurveillanceRuleCode;
+  severity: "info" | "warning" | "critical";
+  symbol?: string;
+  instrument_key?: string;
+  window_start: string;
+  window_end: string;
+  trade_ids: string[];
+  summary: string;
+  metadata?: Record<string, unknown>;
+  status: SurveillanceEventStatus;
+  review_note?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  detected_at: string;
+  detector_version?: string;
+  fingerprint: string;
+}
+
+// SurveillanceEventStatus is the lifecycle vocabulary; matches
+// the CHECK on `surveillance_events.status`.
+export type SurveillanceEventStatus =
+  | "open"
+  | "reviewing"
+  | "cleared"
+  | "escalated";
+
+// SurveillanceRuleCode is the closed rule vocabulary. Adding a
+// new rule requires updating BOTH this union AND the
+// surveillance_events_rule_chk on the DB; mismatch means the
+// frontend will render an unknown rule with the raw string.
+export type SurveillanceRuleCode =
+  | "wash_trade"
+  | "marking_close"
+  | "self_trade_pair"
+  | "rapid_fire_reversal"
+  | "layering_suspect";
+
+// SurveillanceRun is the bookkeeping row from
+// GET /api/admin/surveillance/runs. One per scan invocation;
+// event_count_* fields let the UI render a roll-up without
+// pulling the full events list.
+export interface SurveillanceRun {
+  id: string;
+  fund_id?: string;
+  triggered_by?: string;
+  trigger_source: "manual" | "scheduled" | "replay";
+  window_start: string;
+  window_end: string;
+  trade_count: number;
+  event_count_total: number;
+  event_count_critical: number;
+  event_count_warning: number;
+  event_count_info: number;
+  duration_ms: number;
+  status: "pending" | "completed" | "failed";
+  error_message?: string;
+  summary?: Record<string, unknown>;
+  started_at: string;
+  completed_at?: string;
+}
+
+// DrawdownAction is the closed action vocabulary the engine emits.
+// Matches `drawdown.Action` on the server side.
+export type DrawdownAction =
+  | "trim_proportional"
+  | "flatten"
+  | "defensive_only";
+
+// DrawdownEventStatus mirrors `drawdown.Status`.
+export type DrawdownEventStatus =
+  | "proposed"
+  | "approved"
+  | "executed"
+  | "dismissed"
+  | "superseded";
+
+// DrawdownTier is one row of `drawdown_policies` (P3-5).
+// dd_pct is a NEGATIVE fraction, e.g. -0.05 for "fire when DD
+// reaches -5%".
+export interface DrawdownTier {
+  tier: number;
+  dd_pct: number;
+  action: DrawdownAction;
+  trim_ratio: number;
+  cooldown_hours: number;
+  auto_execute: boolean;
+  note?: string;
+}
+
+// DrawdownPolicy is the per-fund tier list.
+export interface DrawdownPolicy {
+  fund_id: string;
+  tiers: DrawdownTier[];
+}
+
+// DrawdownTrimPlanItem mirrors `drawdown.TrimPlanItem`. Always
+// side="sell" today; defensive_only emits an empty plan.
+export interface DrawdownTrimPlanItem {
+  symbol: string;
+  instrument_key?: string;
+  side: "sell";
+  quantity: number;
+  reason: string;
+}
+
+// DrawdownEvent is the on-wire shape returned by
+// GET /api/admin/drawdown/events. One row per detected breach.
+export interface DrawdownEvent {
+  id: string;
+  fund_id: string;
+  tier: number;
+  current_dd_pct: number;
+  peak_nav: number;
+  current_nav: number;
+  action: DrawdownAction;
+  trim_plan: DrawdownTrimPlanItem[];
+  trade_ids?: string[];
+  status: DrawdownEventStatus;
+  review_note?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  nav_snapshot_id?: string;
+  detected_at: string;
+  detector_version?: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+}
+
+// DrawdownStatus is the live preview returned by
+// GET /api/admin/drawdown/funds/{fundId}/status. Combines the
+// current peak/NAV/DD with the configured tiers and an optional
+// "what would the engine fire right now" preview.
+export interface DrawdownStatus {
+  fund_id: string;
+  peak_nav: number;
+  current_nav: number;
+  current_dd_pct: number;
+  has_policy: boolean;
+  tiers: DrawdownTier[];
+  breached_tier?: number;
+  breached_action?: DrawdownAction;
+  would_emit?: DrawdownEvent;
+}
+
+// MarketStatusInstrumentState is the closed status vocabulary
+// for `instrument_market_status.status` (S6.1).
+export type MarketStatusInstrumentState =
+  | "trading"
+  | "halted"
+  | "suspended";
+
+// MarketStatusRuleCode mirrors `marketstatus.RuleCode`.
+export type MarketStatusRuleCode =
+  | "halted"
+  | "suspended"
+  | "price_limit"
+  | "stale_quote"
+  | "market_closed"
+  | "half_day_closed";
+
+// MarketStatusDecision mirrors `marketstatus.Decision`.
+export type MarketStatusDecision = "allow" | "warn" | "reject";
+
+// MarketStatusInstrument is one row of `instrument_market_status`.
+export interface MarketStatusInstrument {
+  instrument_key: string;
+  symbol: string;
+  market: string;
+  status: MarketStatusInstrumentState;
+  halt_reason?: string;
+  halt_started_at?: string;
+  halt_until?: string;
+  lower_limit?: number;
+  upper_limit?: number;
+  last_quote_at?: string;
+  last_quote_price?: number;
+  asset_class: string;
+  staleness_budget_seconds?: number;
+  note?: string;
+  updated_at: string;
+}
+
+// MarketStatusCalendarDay is one row of `trading_calendar`.
+export interface MarketStatusCalendarDay {
+  market: string;
+  trading_date: string;
+  is_open: boolean;
+  open_local: string;
+  close_local: string;
+  market_tz: string;
+  half_day: boolean;
+  note?: string;
+}
+
+// MarketStatusEvent is one row of `marketstatus_events` —
+// the audit trail of every reject / warn the gate emitted.
+export interface MarketStatusEvent {
+  id: string;
+  fund_id?: string;
+  instrument_key: string;
+  symbol?: string;
+  decision: MarketStatusDecision;
+  rule_code: MarketStatusRuleCode;
+  summary?: string;
+  metadata?: Record<string, unknown>;
+  client_order_id?: string;
+  detected_at: string;
+}
+
+// MarketImpactCalibrationSource mirrors `instrument_liquidity.calibration_source`.
+export type MarketImpactCalibrationSource =
+  | "manual"
+  | "historical"
+  | "broker_reported";
+
+// MarketImpactInstrument is one row of `instrument_liquidity`
+// (S6.2). All adv/volatility fields are optional because a
+// partially-calibrated row is valid — the engine fills missing
+// fields from asset-class defaults.
+export interface MarketImpactInstrument {
+  instrument_key: string;
+  symbol: string;
+  market: string;
+  asset_class: string;
+  adv_shares?: number;
+  adv_notional?: number;
+  adv_window_days: number;
+  daily_volatility?: number;
+  impact_coefficient: number;
+  impact_exponent: number;
+  min_slippage_bps: number;
+  max_slippage_bps: number;
+  last_calibrated_at?: string;
+  calibration_source: MarketImpactCalibrationSource;
+  note?: string;
+  updated_at: string;
+}
+
+// MarketImpactEstimate mirrors `marketimpact.Estimate`. UI
+// surfaces it on the preview panel and on per-fill rows.
+export interface MarketImpactEstimate {
+  adverse_bps: number;
+  temp_impact_bps: number;
+  perm_impact_bps?: number;
+  used_defaults: boolean;
+  used_adv_fallback: boolean;
+  reason?: string;
+  detector_version?: string;
+  applied_at?: string;
+}
+
+// MarketImpactPreviewResponse is what POST /preview returns.
+export interface MarketImpactPreviewResponse {
+  estimate: MarketImpactEstimate;
+  reference_px: number;
+  implied_fill: number;
+  notional: number;
+  impact_cost: number;
+  impact_cost_pct: number;
+}
+
+// MarketImpactCacheStats is what GET /cache returns.
+export interface MarketImpactCacheStats {
+  size: number;
+  last_refresh?: string;
+}
+
+// LockupReason mirrors `lockup.LockupReason`.
+export type LockupReason =
+  | "ipo"
+  | "private_placement"
+  | "rsu"
+  | "restricted"
+  | "employee_grant"
+  | "block_sale"
+  | "other";
+
+// LockupStatus is the derived state the admin handler attaches
+// for UI filtering — saves the frontend from re-implementing
+// the active/expired/released classification.
+export type LockupStatus = "active" | "expired" | "released";
+
+// ----- Securities-borrow / locate (S6.4) -----
+
+// BorrowAvailability mirrors the SQL CHECK enum.
+export type BorrowAvailability = "easy" | "hard" | "restricted" | "unavailable";
+
+// BorrowCalibrationSource matches the source enum.
+export type BorrowCalibrationSource =
+  | "manual"
+  | "broker_quote"
+  | "agent_lender"
+  | "historical_calibration"
+  | "public_feed";
+
+// BorrowRate is one row of security_borrow_rates.
+export interface BorrowRate {
+  instrument_key: string;
+  symbol: string;
+  market: string;
+  asset_class: string;
+  borrow_rate_bps_annual: number;
+  locate_fee_bps: number;
+  availability: BorrowAvailability;
+  available_shares?: number;
+  min_locate_qty?: number;
+  max_locate_qty?: number;
+  source: BorrowCalibrationSource;
+  last_calibrated_at: string;
+  note?: string;
+  updated_at: string;
+}
+
+// BorrowLocateDecisionKind matches the closed verdict enum.
+export type BorrowLocateDecisionKind =
+  | "allow"
+  | "reject_unavailable"
+  | "reject_insufficient"
+  | "reject_below_min"
+  | "reject_above_max"
+  | "no_calibration"
+  | "fail_open";
+
+// BorrowLocatePreviewResponse is what /locate/preview returns.
+export interface BorrowLocatePreviewResponse {
+  decision: BorrowLocateDecisionKind;
+  allowed: boolean;
+  requested_qty: number;
+  intended_price: number;
+  notional: number;
+  borrow_rate_bps: number;
+  locate_fee_bps: number;
+  locate_fee_amount: number;
+  available_shares?: number;
+  reason: string;
+  source: BorrowCalibrationSource;
+}
+
+// BorrowLocateEvent is one audit-log row.
+export interface BorrowLocateEvent {
+  id: string;
+  fund_id: string;
+  instrument_key: string;
+  symbol: string;
+  requested_qty: number;
+  decision: BorrowLocateDecisionKind;
+  rate_bps_annual?: number;
+  locate_fee_bps?: number;
+  locate_fee_amount?: number;
+  intended_price?: number;
+  notional?: number;
+  reason?: string;
+  client_order_id?: string;
+  created_at: string;
+}
+
+// BorrowLedgerEntry is one daily fee row.
+export interface BorrowLedgerEntry {
+  id: string;
+  fund_id: string;
+  instrument_key: string;
+  symbol: string;
+  accrual_date: string;
+  short_qty: number;
+  market_price: number;
+  notional: number;
+  rate_bps_annual: number;
+  day_count_basis: number;
+  fee_amount: number;
+  cash_ledger_entry_id?: string;
+  created_at: string;
+}
+
+// BorrowCacheStats is what GET /cache returns.
+export interface BorrowCacheStats {
+  size: number;
+  last_refresh?: string;
+}
+
+// ----- WebSocket real-time market data (S6.5) -----
+
+// WSFeedState mirrors the closed enum from internal/wsfeed.
+// Order matches StateUnknown → StateClosed in the Go source.
+export type WSFeedState =
+  | "unknown"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "backoff"
+  | "disconnected"
+  | "closed";
+
+// WSFeedStatus is the GET /api/admin/wsfeed/status response.
+// Used by the dashboard cards.
+export interface WSFeedStatus {
+  enabled: boolean;
+  reason?: string; // present when enabled=false
+  healthy_providers: number;
+  total_providers: number;
+  subscriptions: number;
+  cache_symbols: number;
+  dropped_events: number;
+  total_ticks: number;
+}
+
+// WSFeedConnection is one row from
+// GET /api/admin/wsfeed/connections.
+export interface WSFeedConnection {
+  provider: string;
+  state: WSFeedState;
+  connected_at?: string;
+  disconnected_at?: string;
+  last_tick_at?: string;
+  tick_count: number;
+  reconnect_count: number;
+  last_error?: string;
+  subscriptions: number;
+}
+
+// WSFeedSubscription is one row from
+// GET /api/admin/wsfeed/subscriptions.
+export interface WSFeedSubscription {
+  symbol: string;
+  market?: string;
+  consumers: number;
+  last_tick_at?: string;
+}
+
+// WSFeedCacheSnapshot is one row from
+// GET /api/admin/wsfeed/cache (and the body returned by
+// GET /api/admin/wsfeed/cache/{symbol}, less the surrounding
+// envelope).
+export interface WSFeedCacheSnapshot {
+  symbol: string;
+  display?: string;
+  market?: string;
+  provider?: string;
+  last: number;
+  bid: number;
+  ask: number;
+  volume: number;
+  as_of?: string;
+  received_at?: string;
+  update_kind?: string;
+  stale?: boolean;
+}
+
+// WSFeedCacheListResponse is the full body of
+// GET /api/admin/wsfeed/cache. Stats live alongside the rows
+// so the UI doesn't need a second call to populate the
+// hit/miss/stale counters.
+export interface WSFeedCacheListResponse {
+  snapshots: WSFeedCacheSnapshot[];
+  stats: {
+    symbols: number;
+    hits: number;
+    misses: number;
+    stales: number;
+    evicts: number;
+  };
+}
+
+// LockupRecord is one row of `position_lockups` (S6.3).
+export interface LockupRecord {
+  id: string;
+  fund_id: string;
+  instrument_key: string;
+  symbol: string;
+  locked_qty: number;
+  locked_until: string;
+  reason: LockupReason;
+  source_lot_id?: string;
+  note?: string;
+  released_at?: string;
+  released_reason?: string;
+  released_by?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  status: LockupStatus;
 }
 
 // SessionResponse mirrors GET /api/auth/session. Every field is
@@ -472,6 +1455,53 @@ export interface DecisionTrace {
   cited_blocks?: string[];
 }
 
+// ---------------------------------------------------------------------------
+// Order cancel / replace (P0-5)
+// ---------------------------------------------------------------------------
+
+/**
+ * OrderActionResponse mirrors the trim wire shape returned by the
+ * cancel/replace endpoints (cmd/server/order_actions_handler.go
+ * orderResponse). Numeric fields are 0 when unset on the underlying
+ * order — UIs should treat 0 as "no value" and only render the row
+ * when truthy.
+ */
+export interface OrderActionResponse {
+  id: string;
+  fundId: string;
+  symbol: string;
+  side: string;
+  orderType: string;
+  status: string;
+  quantity: number;
+  filledQty: number;
+  limitPrice?: number;
+  stopPrice?: number;
+  trailAmount?: number;
+  trailPercent?: number;
+  displayQty?: number;
+  cancelReason?: string;
+  replaceCount: number;
+}
+
+/**
+ * ReplaceOrderPayload — every numeric field is optional; nil-as-no-
+ * change at the wire. The server enforces (a) at least one numeric
+ * change is set, (b) each numeric is > 0, and (c) trailPercent is
+ * in (0, 1). The note field is captured into the audit metadata
+ * only and does NOT count as a field change for the "at least one
+ * change" rule.
+ */
+export interface ReplaceOrderPayload {
+  quantity?: number;
+  limitPrice?: number;
+  stopPrice?: number;
+  trailAmount?: number;
+  trailPercent?: number;
+  displayQty?: number;
+  note?: string;
+}
+
 // MemoryLayer mirrors the server-side CHECK constraint on
 // memories.layer (see migrations/039_attribution_memory_layer.sql
 // and wiring_adapters.go). Adding a layer here without adding the
@@ -535,6 +1565,52 @@ export interface PortfolioSnapshot {
   available_cash: number;
   positions: PortfolioPosition[];
   as_of: string;
+}
+
+/**
+ * TradeRecord mirrors the api.Trade shape returned by
+ * GET /api/funds/{fundId}/trades. Lifecycle / order-action fields
+ * (status, replaceCount, cancelReason) are present in the JSON
+ * even when the underlying row hasn't been touched, so the Orders
+ * UI can decide based on status alone whether to render the
+ * Cancel / Modify buttons.
+ *
+ * Field naming is camelCase here to match the JSON encoder; the
+ * legacy mobile screens use snake_case (e.g. trading_date) so we
+ * deliberately keep TradeRecord on its own naming style rather
+ * than retro-fitting older types.
+ */
+export interface TradeRecord {
+  id: string;
+  fundId: string;
+  symbol: string;
+  instrumentKey?: string;
+  side: string;
+  orderType: string;
+  status: string;
+  quantity: number;
+  filledQty: number;
+  price: number;
+  filledPrice?: number;
+  amount?: number;
+  tradingMode: string;
+  executedAt?: string;
+  createdAt: string;
+  market?: string;
+  exchange?: string;
+  feeCommission?: number;
+  feeStampTax?: number;
+  feeTransfer?: number;
+  stopPrice?: number;
+  trailAmount?: number;
+  trailPercent?: number;
+  displayQty?: number;
+  cancelReason?: string;
+  replaceCount?: number;
+}
+
+export interface TradeListResponse {
+  trades: TradeRecord[];
 }
 
 export interface NavPoint {

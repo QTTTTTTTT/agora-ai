@@ -1,6 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { ApiError, fetchSession, formatApiError, loginWithPassword, registerWithPassword } from "../lib/api";
+import {
+  ApiError,
+  exchangeTwoFAChallenge,
+  fetchSession,
+  formatApiError,
+  loginWithPassword,
+  registerWithPassword,
+} from "../lib/api";
 import { useAppPreferences } from "../lib/preferences";
 
 type AuthMode = "login" | "register";
@@ -55,6 +62,14 @@ const Login: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
+  // P0-6 — when the server responds with `requires_2fa` we stash
+  // the challenge here and flip the form into the 2FA prompt step.
+  // The `mode` toggle (login / register) is hidden during the
+  // challenge to keep the user focused.
+  const [twoFAChallenge, setTwoFAChallenge] = useState<string | null>(null);
+  const [twoFACode, setTwoFACode] = useState("");
+  const [twoFARecovery, setTwoFARecovery] = useState("");
+  const [twoFAMode, setTwoFAMode] = useState<"code" | "recovery">("code");
 
   const copy = useMemo(
     () =>
@@ -107,6 +122,18 @@ const Login: React.FC = () => {
             ],
             backHome: "Back to home",
             forgotPassword: "Forgot your password?",
+            twoFA: {
+              title: "Two-factor verification",
+              subtitle: "Enter the 6-digit code from your authenticator app to finish signing in.",
+              codePlaceholder: "6-digit code",
+              recoveryPlaceholder: "Recovery code",
+              modeCode: "Authenticator code",
+              modeRecovery: "Recovery code",
+              submit: "Verify and continue",
+              submitting: "Verifying...",
+              cancel: "Use a different account",
+              failed: "Invalid code, please try again.",
+            },
           }
         : {
             checkingSession: "正在检查现有登录会话...",
@@ -156,6 +183,18 @@ const Login: React.FC = () => {
             ],
             backHome: "返回首页",
             forgotPassword: "忘记密码？",
+            twoFA: {
+              title: "二次验证",
+              subtitle: "请输入身份验证器 App 中显示的 6 位验证码以完成登录。",
+              codePlaceholder: "6 位验证码",
+              recoveryPlaceholder: "恢复码",
+              modeCode: "验证器代码",
+              modeRecovery: "恢复码",
+              submit: "验证并登录",
+              submitting: "验证中...",
+              cancel: "更换账号",
+              failed: "验证码无效，请重试。",
+            },
           },
     [language],
   );
@@ -229,10 +268,21 @@ const Login: React.FC = () => {
     setError(null);
     try {
       if (mode === "login") {
-        await loginWithPassword({
+        const outcome = await loginWithPassword({
           email: form.email.trim(),
           password: form.password,
         });
+        // Server may demand a second factor — flip into the 2FA
+        // step. The challenge token expires server-side; if the
+        // user dawdles they'll get a 401 and we'll bounce them
+        // back to the password step via handleCancelTwoFA.
+        if (outcome.kind === "challenge") {
+          setTwoFAChallenge(outcome.challenge);
+          setTwoFACode("");
+          setTwoFARecovery("");
+          setTwoFAMode("code");
+          return;
+        }
       } else {
         await registerWithPassword({
           email: form.email.trim(),
@@ -256,9 +306,102 @@ const Login: React.FC = () => {
     }
   }
 
+  async function handle2FASubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!twoFAChallenge) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await exchangeTwoFAChallenge({
+        challenge: twoFAChallenge,
+        code: twoFAMode === "code" ? twoFACode.trim() : undefined,
+        recoveryCode: twoFAMode === "recovery" ? twoFARecovery.trim() : undefined,
+      });
+      navigate(redirectTo, { replace: true });
+    } catch (err) {
+      const message = err instanceof ApiError ? formatApiError(err, copy.twoFA.failed) : copy.twoFA.failed;
+      setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleCancelTwoFA() {
+    setTwoFAChallenge(null);
+    setTwoFACode("");
+    setTwoFARecovery("");
+    setError(null);
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-950 px-6 py-12 text-white">
       <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/5 p-8 shadow-2xl backdrop-blur">
+        {twoFAChallenge ? (
+          <div>
+            <div className="mb-8">
+              <p className="text-sm font-medium text-indigo-300">FundAI</p>
+              <h1 className="mt-2 text-3xl font-semibold">{copy.twoFA.title}</h1>
+              <p className="mt-3 text-sm leading-6 text-slate-300">{copy.twoFA.subtitle}</p>
+            </div>
+            <form className="space-y-5" onSubmit={handle2FASubmit}>
+              <div className="grid grid-cols-2 rounded-2xl border border-white/10 bg-slate-900/60 p-1 text-sm">
+                <button
+                  type="button"
+                  onClick={() => setTwoFAMode("code")}
+                  className={`rounded-xl px-4 py-2 transition ${twoFAMode === "code" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"}`}
+                >
+                  {copy.twoFA.modeCode}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTwoFAMode("recovery")}
+                  className={`rounded-xl px-4 py-2 transition ${twoFAMode === "recovery" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"}`}
+                >
+                  {copy.twoFA.modeRecovery}
+                </button>
+              </div>
+              {twoFAMode === "code" ? (
+                <input
+                  autoFocus
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={8}
+                  value={twoFACode}
+                  onChange={(e) => setTwoFACode(e.target.value.replace(/[^0-9]/g, ""))}
+                  placeholder={copy.twoFA.codePlaceholder}
+                  className="w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-center font-mono text-2xl tracking-widest text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                />
+              ) : (
+                <input
+                  autoFocus
+                  type="text"
+                  value={twoFARecovery}
+                  onChange={(e) => setTwoFARecovery(e.target.value.toUpperCase())}
+                  placeholder={copy.twoFA.recoveryPlaceholder}
+                  className="w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-center font-mono text-lg tracking-widest text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                />
+              )}
+              {error ? (
+                <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>
+              ) : null}
+              <button
+                type="submit"
+                disabled={submitting || (twoFAMode === "code" ? twoFACode.length < 6 : !twoFARecovery.trim())}
+                className="w-full rounded-2xl bg-indigo-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {submitting ? copy.twoFA.submitting : copy.twoFA.submit}
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelTwoFA}
+                className="w-full rounded-2xl border border-white/10 bg-transparent px-4 py-3 text-sm text-slate-300 transition hover:border-white/20"
+              >
+                {copy.twoFA.cancel}
+              </button>
+            </form>
+          </div>
+        ) : (
+          <>
         <div className="mb-8">
           <p className="text-sm font-medium text-indigo-300">FundAI</p>
           <h1 className="mt-2 text-3xl font-semibold">{mode === "login" ? copy.titleLogin : copy.titleRegister}</h1>
@@ -398,6 +541,8 @@ const Login: React.FC = () => {
             {copy.backHome}
           </Link>
         </div>
+          </>
+        )}
       </div>
     </div>
   );

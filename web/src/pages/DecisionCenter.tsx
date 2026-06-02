@@ -13,6 +13,7 @@ import {
   type PortfolioQuote,
   type PortfolioQuotesFrame,
 } from "../lib/api";
+import LiveReadinessBanner from "../components/LiveReadinessBanner";
 import {
   formatDateForLanguage,
   formatDateTimeForLanguage,
@@ -1464,6 +1465,9 @@ const DecisionCenter: React.FC = () => {
   return (
     <div className="space-y-6">
       <NextRunBanner fundId={fundId} language={language} />
+      {fundId ? (
+        <LiveReadinessBanner fundId={fundId} language={language} />
+      ) : null}
       <div className="flex flex-col gap-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div className="flex items-center gap-3">

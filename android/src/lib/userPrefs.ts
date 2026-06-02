@@ -24,6 +24,11 @@
 const STORE_ID = 'fundai-prefs';
 const KEY_BIOMETRIC = 'biometricEnabled';
 const KEY_PUSH = 'pushEnabled';
+// P0-7: per-action step-up gating for orders. Default true so the
+// out-of-the-box install requires biometric confirmation on
+// cancel/replace. Power users on dev devices can flip it off in
+// MoreScreen, which voids any cached step-up token immediately.
+const KEY_STEP_UP_ORDERS = 'stepUpRequiredForOrders';
 
 interface MmkvLike {
   getString(key: string): string | undefined;
@@ -84,4 +89,17 @@ export function isPushEnabled(): boolean {
 
 export function setPushPreference(enabled: boolean): void {
   writeBool(KEY_PUSH, enabled);
+}
+
+// isStepUpRequiredForOrders gates the per-action biometric prompt
+// on cancel / replace. Defaults to true. The MoreScreen toggle
+// flips this and additionally clears the cached step-up token via
+// stepUp.clearStepUpCache() — keeping a "stale" token around after
+// the user explicitly opted out would defeat the purpose.
+export function isStepUpRequiredForOrders(): boolean {
+  return readBool(KEY_STEP_UP_ORDERS, true);
+}
+
+export function setStepUpRequiredForOrders(enabled: boolean): void {
+  writeBool(KEY_STEP_UP_ORDERS, enabled);
 }

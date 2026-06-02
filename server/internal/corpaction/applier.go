@@ -249,6 +249,30 @@ func ApplyEvent(ctx context.Context, db txBeginner, evt Event, fundID string) (R
 		); err != nil {
 			return Result{}, fmt.Errorf("corpaction: credit fund cash: %w", err)
 		}
+		// P1-1 — also append a cash_ledger row inside the same
+		// transaction so funds.current_capital and the journal
+		// stay in lock-step. Idempotency key is keyed off
+		// (corp_action_id, fund_id) so re-running ApplyEvent for
+		// the same event collapses cleanly. We deliberately use
+		// raw SQL here (instead of CashLedgerRepo) to keep the
+		// applier package free of the repository import — the
+		// corpaction module is intentionally narrow.
+		idem := fmt.Sprintf("corp:%s:%s", evt.ID, fundID)
+		desc := fmt.Sprintf("dividend %s @ %.4f × %.0f", evt.InstrumentKey, evt.CashDividend, pre.quantity)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO cash_ledger
+			    (fund_id, posted_at, entry_type, amount, currency,
+			     corp_action_id, description, metadata, idempotency_key)
+			 VALUES ($1, NOW(), 'dividend_cash', $2, 'USD',
+			         NULLIF($3, '')::uuid, $4, $5::jsonb, $6)
+			 ON CONFLICT (fund_id, idempotency_key)
+			   WHERE idempotency_key IS NOT NULL DO NOTHING`,
+			fundID, cashCredit, evt.ID, desc,
+			fmt.Sprintf(`{"instrument_key":%q,"shares_basis":%g}`, evt.InstrumentKey, pre.quantity),
+			idem,
+		); err != nil {
+			return Result{}, fmt.Errorf("corpaction: append cash_ledger: %w", err)
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx,

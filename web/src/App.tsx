@@ -42,6 +42,7 @@ const AuditLog = lazyWithRetry(() => import("./pages/AuditLog"));
 const MemoryCenter = lazyWithRetry(() => import("./pages/MemoryCenter"));
 const TradeHistory = lazyWithRetry(() => import("./pages/TradeHistory"));
 const FundSettings = lazyWithRetry(() => import("./pages/FundSettings"));
+const CashLedger = lazyWithRetry(() => import("./pages/CashLedger"));
 const Subscription = lazyWithRetry(() => import("./pages/Subscription"));
 const ModelConfig = lazyWithRetry(() => import("./pages/ModelConfig"));
 const Usage = lazyWithRetry(() => import("./pages/Usage"));
@@ -194,6 +195,7 @@ const AppRoutes: React.FC = () => {
               <Route path="lineage" element={<AgentLineage />} />
               <Route path="memory" element={<MemoryCenter />} />
               <Route path="trades" element={<TradeHistory />} />
+              <Route path="cash-ledger" element={<CashLedger />} />
               <Route path="settings" element={<FundSettings />} />
               <Route path="subscription" element={<Subscription />} />
               <Route path="models" element={<ModelConfig />} />

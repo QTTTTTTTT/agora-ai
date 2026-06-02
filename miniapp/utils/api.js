@@ -269,6 +269,21 @@ const api = {
   getTrades: function (fundId, params) {
     return get('/api/funds/' + fundId + '/trades', params || { limit: 100, offset: 0 });
   },
+  // P0-5 — 取消订单。reason 为可空，默认 user_requested；服务端
+  // 会重写非法值。terminal 单返回 409，调用方应弹出 "已成交，无法
+  // 取消" 提示。返回 { order: ... } 中的 order 字段即新状态。
+  cancelOrder: function (fundId, tradeId, reason, note) {
+    var body = {};
+    if (reason) body.reason = reason;
+    if (note) body.note = note;
+    return post('/api/funds/' + fundId + '/orders/' + tradeId + '/cancel', body);
+  },
+  // P0-5 — 改单。payload 字段全部可选（quantity / limitPrice /
+  // stopPrice / trailAmount / trailPercent / displayQty / note），
+  // 至少一个数字字段必填，仅传 note 服务端会拒绝。
+  replaceOrder: function (fundId, tradeId, payload) {
+    return post('/api/funds/' + fundId + '/orders/' + tradeId + '/replace', payload || {});
+  },
   getPositions: function (fundId) {
     return get('/api/funds/' + fundId + '/portfolio');
   },

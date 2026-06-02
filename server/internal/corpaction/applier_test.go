@@ -68,6 +68,10 @@ func TestApplyEvent_HappyPath_TenSongSi(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE funds")).
 		WithArgs(fundID, 47.396).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// P1-1 — cash_ledger row co-commits inside the same tx.
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO cash_ledger")).
+		WithArgs(fundID, 47.396, evt.ID, sqlmock.AnyArg(), sqlmock.AnyArg(), "corp:"+evt.ID+":"+fundID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	// cash_credit = 289 × 0.164 = 47.396
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO corp_action_applications")).
 		WithArgs(evt.ID, fundID, 289.0, 404.6, 335.20, 239.42857143, 47.396).

@@ -442,10 +442,7 @@ func TestHandleGetAccountKYCIncludesDocumentURLs(t *testing.T) {
 		WithArgs(userID, 10).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "kyc_level", "status", "full_name", "id_document_type", "id_document_number", "document_image_urls", "rejection_reason", "created_at", "updated_at"}).
 			AddRow(appID, userID, "tier1_basic", "pending", "Alice Doe", "passport", "P123456", []byte(`["https://example.test/passport.png"]`), "", now, now))
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO data_access_log (actor_user_id, action, resource_type, resource_id, details)
-			 VALUES ($1, $2, $3, $4, $5)`)).
-		WithArgs(userID, "read", "account_kyc", userID, sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAccessLogInsert(mock, userID, "read", "account_kyc", userID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/account/kyc", nil)
 	req = req.WithContext(api.WithAuthenticatedUserID(req.Context(), userID))
@@ -500,10 +497,7 @@ func TestHandleSubmitAccountKYCRecordsApplicationAndAudit(t *testing.T) {
 		WithArgs(userID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO data_access_log (actor_user_id, action, resource_type, resource_id, details)
-			 VALUES ($1, $2, $3, $4, $5)`)).
-		WithArgs(userID, "submit", "kyc_application", appID, sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAccessLogInsert(mock, userID, "submit", "kyc_application", appID)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/account/kyc", strings.NewReader(`{"kyc_level":"tier2_advanced","full_name":"Alice Doe","id_document_type":"passport","id_document_number":"P123456","document_image_urls":["https://example.test/passport.png"]}`))
 	req = req.WithContext(api.WithAuthenticatedUserID(req.Context(), userID))
@@ -925,11 +919,41 @@ func TestRuntimeTradingEngineExecutePlanActionOpensFuturesLong(t *testing.T) {
 	defer db.Close()
 
 	now := time.Now().UTC()
-	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO trade_executions
-		   (fund_id, plan_id, plan_action_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, side, position_side, open_close, order_type, quantity, price, amount,
-		    trading_mode, broker_order_id, mcp_server_id, status, executed_at, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
-		 RETURNING id`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`
+		WITH ins AS (
+			INSERT INTO trade_executions (
+				fund_id, plan_id, plan_action_id, instrument_key, symbol,
+				market, exchange, asset_class, instrument_type, side,
+				position_side, open_close, order_type, quantity, price, amount,
+				trading_mode, broker_order_id, mcp_server_id, status, executed_at,
+				quote_currency, settlement_currency, margin_mode, leverage,
+				contract_multiplier, expiry_date, reduce_only,
+				stop_price, trail_amount, trail_percent, display_qty,
+				time_in_force, good_till_date, parent_trade_id,
+				client_idempotency_key
+			)
+			VALUES (
+				$1, $2, $3, $4, $5,
+				$6, $7, $8, $9, $10,
+				$11, $12, $13, $14, $15, $16,
+				$17, $18, $19, $20, $21,
+				$22, $23, $24, $25,
+				$26, $27, $28,
+				$29, $30, $31, $32,
+				$33, $34, $35,
+				$36
+			)
+			ON CONFLICT (client_idempotency_key)
+				WHERE client_idempotency_key IS NOT NULL
+				DO NOTHING
+			RETURNING id
+		)
+		SELECT id FROM ins
+		UNION ALL
+		SELECT id FROM trade_executions
+			WHERE client_idempotency_key = $36
+				AND $36 IS NOT NULL
+		LIMIT 1`)).
 		WithArgs(
 			"fund-1",
 			sqlmock.AnyArg(),
@@ -959,6 +983,9 @@ func TestRuntimeTradingEngineExecutePlanActionOpensFuturesLong(t *testing.T) {
 			sql.NullFloat64{Float64: 10, Valid: true},
 			sql.NullTime{Time: now, Valid: true},
 			sql.NullBool{Bool: true, Valid: true},
+			sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{},
+			sql.NullString{}, sql.NullTime{}, sql.NullString{},
+			sql.NullString{String: "trade:action-1:buy:2", Valid: true},
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("trade-1"))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE trade_executions
@@ -1021,11 +1048,41 @@ func TestRuntimeTradingEngineExecutePlanActionClosesFuturesShort(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
 
-	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO trade_executions
-		   (fund_id, plan_id, plan_action_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, side, position_side, open_close, order_type, quantity, price, amount,
-		    trading_mode, broker_order_id, mcp_server_id, status, executed_at, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
-		 RETURNING id`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`
+		WITH ins AS (
+			INSERT INTO trade_executions (
+				fund_id, plan_id, plan_action_id, instrument_key, symbol,
+				market, exchange, asset_class, instrument_type, side,
+				position_side, open_close, order_type, quantity, price, amount,
+				trading_mode, broker_order_id, mcp_server_id, status, executed_at,
+				quote_currency, settlement_currency, margin_mode, leverage,
+				contract_multiplier, expiry_date, reduce_only,
+				stop_price, trail_amount, trail_percent, display_qty,
+				time_in_force, good_till_date, parent_trade_id,
+				client_idempotency_key
+			)
+			VALUES (
+				$1, $2, $3, $4, $5,
+				$6, $7, $8, $9, $10,
+				$11, $12, $13, $14, $15, $16,
+				$17, $18, $19, $20, $21,
+				$22, $23, $24, $25,
+				$26, $27, $28,
+				$29, $30, $31, $32,
+				$33, $34, $35,
+				$36
+			)
+			ON CONFLICT (client_idempotency_key)
+				WHERE client_idempotency_key IS NOT NULL
+				DO NOTHING
+			RETURNING id
+		)
+		SELECT id FROM ins
+		UNION ALL
+		SELECT id FROM trade_executions
+			WHERE client_idempotency_key = $36
+				AND $36 IS NOT NULL
+		LIMIT 1`)).
 		WithArgs(
 			"fund-1",
 			sqlmock.AnyArg(),
@@ -1055,6 +1112,9 @@ func TestRuntimeTradingEngineExecutePlanActionClosesFuturesShort(t *testing.T) {
 			sql.NullFloat64{Float64: 10, Valid: true},
 			sql.NullTime{},
 			sql.NullBool{},
+			sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{},
+			sql.NullString{}, sql.NullTime{}, sql.NullString{},
+			sql.NullString{String: "trade:action-2:buy:2", Valid: true},
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("trade-2"))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE trade_executions
@@ -1596,16 +1656,24 @@ func TestRuntimeMemorySystemBuildLearningContextUsesRequestedTradingDate(t *test
 		WithArgs("plan-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "plan_id", "instrument_key", "symbol", "market", "exchange", "asset_class", "instrument_type", "action", "position_side", "open_close", "quantity", "price", "amount", "stop_loss", "take_profit", "reasoning", "confidence", "supported_by", "opposed_by", "execution_status", "sort_order", "quote_currency", "settlement_currency", "margin_mode", "leverage", "contract_multiplier", "expiry_date", "reduce_only", "quote_refreshed_at", "auto_executed_at", "sleeve", "regime_tag", "signal_source", "exit_reason", "strategy"}).
 			AddRow("action-1", "plan-1", "NVDA", "NVDA", sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, "buy", sql.NullString{}, sql.NullString{}, sql.NullFloat64{Float64: 10, Valid: true}, sql.NullFloat64{Float64: 100, Valid: true}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullString{}, sql.NullFloat64{}, pq.Array([]string{}), pq.Array([]string{}), "pending", 1, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullTime{}, sql.NullBool{}, sql.NullTime{}, sql.NullTime{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{}))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, fund_id, plan_id, plan_action_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, side, position_side, open_close, order_type, quantity,
-		        price, amount, filled_qty, filled_price, fee_commission, fee_stamp_tax,
-		        fee_transfer, trading_mode, broker_order_id, mcp_server_id, status,
-		        executed_at, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, slippage_pct, created_at
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT 
+	id, fund_id, plan_id, plan_action_id, instrument_key, symbol,
+	market, exchange, asset_class, instrument_type, side, position_side,
+	open_close, order_type, quantity, price, amount, filled_qty,
+	filled_price, fee_commission, fee_stamp_tax, fee_transfer,
+	trading_mode, broker_order_id, mcp_server_id, status, executed_at,
+	quote_currency, settlement_currency, margin_mode, leverage,
+	contract_multiplier, expiry_date, reduce_only, slippage_pct,
+	stop_price, trail_amount, trail_percent, display_qty,
+	time_in_force, good_till_date, parent_trade_id,
+	client_idempotency_key, created_at,
+	cancelled_at, cancel_reason, replaced_at, replace_count
 		 FROM trade_executions
 		 WHERE plan_id = $1
 		 ORDER BY created_at DESC, id DESC`)).
 		WithArgs("plan-1").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "fund_id", "plan_id", "plan_action_id", "instrument_key", "symbol", "market", "exchange", "asset_class", "instrument_type", "side", "position_side", "open_close", "order_type", "quantity", "price", "amount", "filled_qty", "filled_price", "fee_commission", "fee_stamp_tax", "fee_transfer", "trading_mode", "broker_order_id", "mcp_server_id", "status", "executed_at", "quote_currency", "settlement_currency", "margin_mode", "leverage", "contract_multiplier", "expiry_date", "reduce_only", "slippage_pct", "created_at"}).
-			AddRow("trade-1", "fund-1", sql.NullString{String: "plan-1", Valid: true}, sql.NullString{String: "action-1", Valid: true}, "NVDA", "NVDA", sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, "buy", sql.NullString{}, sql.NullString{}, "limit", 10.0, sql.NullFloat64{Float64: 100, Valid: true}, sql.NullFloat64{}, 10.0, sql.NullFloat64{Float64: 100, Valid: true}, 0.0, 0.0, 0.0, "simulation", sql.NullString{}, sql.NullString{}, "filled", sql.NullTime{Time: targetDate.Add(15 * time.Hour), Valid: true}, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullTime{}, sql.NullBool{}, sql.NullFloat64{}, now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "fund_id", "plan_id", "plan_action_id", "instrument_key", "symbol", "market", "exchange", "asset_class", "instrument_type", "side", "position_side", "open_close", "order_type", "quantity", "price", "amount", "filled_qty", "filled_price", "fee_commission", "fee_stamp_tax", "fee_transfer", "trading_mode", "broker_order_id", "mcp_server_id", "status", "executed_at", "quote_currency", "settlement_currency", "margin_mode", "leverage", "contract_multiplier", "expiry_date", "reduce_only", "slippage_pct", "stop_price", "trail_amount", "trail_percent", "display_qty", "time_in_force", "good_till_date", "parent_trade_id", "client_idempotency_key", "created_at", "cancelled_at", "cancel_reason", "replaced_at", "replace_count"}).
+			AddRow("trade-1", "fund-1", sql.NullString{String: "plan-1", Valid: true}, sql.NullString{String: "action-1", Valid: true}, "NVDA", "NVDA", sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, "buy", sql.NullString{}, sql.NullString{}, "limit", 10.0, sql.NullFloat64{Float64: 100, Valid: true}, sql.NullFloat64{}, 10.0, sql.NullFloat64{Float64: 100, Valid: true}, 0.0, 0.0, 0.0, "simulation", sql.NullString{}, sql.NullString{}, "filled", sql.NullTime{Time: targetDate.Add(15 * time.Hour), Valid: true}, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullTime{}, sql.NullBool{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullString{}, sql.NullTime{}, sql.NullString{}, sql.NullString{}, now, sql.NullTime{}, sql.NullString{}, sql.NullTime{}, 0))
 
 	system := &runtimeMemorySystem{
 		fundRepo:     repository.NewFundRepo(db),

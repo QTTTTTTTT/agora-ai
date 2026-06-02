@@ -33,17 +33,29 @@ import (
 
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
+	"github.com/fundai/server/internal/broker"
+	"github.com/fundai/server/internal/fx"
 	"github.com/fundai/server/internal/lotbackfill"
 	"github.com/fundai/server/internal/mailer"
 	"github.com/fundai/server/internal/marketdata"
+	"github.com/fundai/server/internal/marketimpact"
 	"github.com/fundai/server/internal/marketplace"
 	"github.com/fundai/server/internal/promotion"
 	"github.com/fundai/server/internal/recall"
+	"github.com/fundai/server/internal/drawdown"
+	"github.com/fundai/server/internal/lockup"
+	"github.com/fundai/server/internal/marketstatus"
+	"github.com/fundai/server/internal/securitiesborrow"
+	"github.com/fundai/server/internal/recon"
+	"github.com/fundai/server/internal/surveillance"
 	"github.com/fundai/server/internal/repository"
 	"github.com/fundai/server/internal/scheduler"
 	"github.com/fundai/server/internal/quota"
 	"github.com/fundai/server/internal/secrets"
+	"github.com/fundai/server/internal/stoptrigger"
 	"github.com/fundai/server/internal/subscription"
+	"github.com/fundai/server/internal/quotecache"
+	"github.com/fundai/server/internal/wsfeed"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -553,6 +565,19 @@ type Services struct {
 	PositionQuoteRefresher *positionQuoteRefresher
 	LeaseManager           *scheduler.LeaseManager
 	MarketDataService      *marketdata.Service
+	BrokerSimulator        *broker.Simulator
+	MarketImpactRepo       *marketimpact.Repo
+	MarketImpactCache      *marketimpact.Cache
+	MarketImpactAdapter    *marketimpact.SlippageAdapter
+	LockupRepo             *lockup.Repo
+	BorrowRepo             *securitiesborrow.Repo
+	BorrowCache            *securitiesborrow.Cache
+	WSFeedConfig           wsFeedConfig
+	WSFeedManager          *wsfeed.Manager
+	WSFeedCache            *quotecache.Cache
+	WSFeedBridge           *wsFeedSubscriptionBridge
+	StopTriggerEngine      *stoptrigger.Engine
+	StopTriggerPoller      *stopTriggerPoller
 	PromotionAdapter       *promotionServiceAdapter
 	PromotionResolver      *promotion.Resolver
 	PromotionDecayLoop     *promotionDecayLoop
@@ -599,6 +624,18 @@ func (s *Services) Stop() {
 	}
 	if s.CorpActionIngestLoop != nil {
 		s.CorpActionIngestLoop.Stop()
+	}
+	if s.StopTriggerPoller != nil {
+		s.StopTriggerPoller.Stop()
+	}
+	// Stop the WS subscription bridge before the manager so
+	// the manager doesn't see stale reconcile calls during
+	// shutdown.
+	if s.WSFeedBridge != nil {
+		s.WSFeedBridge.Stop()
+	}
+	if s.WSFeedManager != nil {
+		s.WSFeedManager.Stop()
 	}
 	if s.LeaseManager != nil {
 		s.LeaseManager.Stop()
@@ -682,6 +719,73 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		slog.Warn("mailer: SMTP not configured, using in-memory recorder (dev only)")
 	}
 
+	// S6.1 — pre-trade market-status gate (halt / suspended /
+	// price-limit / stale-quote / calendar). Wired through the
+	// broker simulator's optional MarketStatusGate hook. The
+	// gate falls open on any internal error so a DB hiccup never
+	// turns into a trading halt.
+	marketStatusRepo := marketstatus.NewRepo(db)
+	marketStatusGate := newMarketStatusGate(marketStatusRepo, metrics, slogLeveledLogger{})
+
+	// S6.2 — size-aware slippage. Calibration rows live in
+	// instrument_liquidity, are cached in-memory by
+	// marketimpact.Cache (refreshed every 5 min and after every
+	// admin write), and are consumed via a matching.SlippageModel
+	// adapter plugged into the simulator's matching engine.
+	// Missing rows / missing ADV degrade gracefully to
+	// asset-class defaults so the simulator never returns
+	// silently-zero slippage.
+	marketImpactRepo := marketimpact.NewRepo(db)
+	marketImpactCache, marketImpactAdapter := newMarketImpactStack(context.Background(), marketImpactRepo, metrics)
+	marketImpactEngine := newMatchingEngineWithImpact(marketImpactAdapter)
+
+	// S6.3 — IPO / pre-IPO / restricted-share lock-up gate.
+	// Sells of locked qty are rejected with ErrLockupRejected;
+	// the gate falls open on internal errors (DB hiccup, missing
+	// position row), matching the market-status gate's posture.
+	lockupRepo := lockup.NewRepo(db)
+	lockupGateImpl := newLockupGate(db, metrics, slogLeveledLogger{})
+
+	// S6.4 — securities-borrow gate + daily accrual loop.
+	// The cache is hot-path; admin writes call ApplyChange to
+	// install fresh rows immediately. The accrual loop is
+	// leader-gated and idempotent on (fund, instrument, day).
+	borrowRepo := securitiesborrow.NewRepo(db)
+	borrowCache := securitiesborrow.NewCache(securitiesborrow.CacheConfig{
+		Repo:            borrowRepo,
+		RefreshInterval: 5 * time.Minute,
+		OnError: func(err error) {
+			slog.Warn("securitiesborrow cache refresh error", "err", err)
+		},
+	})
+	if err := borrowCache.Start(context.Background()); err != nil {
+		slog.Warn("securitiesborrow cache initial refresh failed", "err", err)
+	}
+	borrowGateImpl := newBorrowGate(db, borrowRepo, borrowCache, metrics, slogLeveledLogger{})
+
+	// S6.5 — WebSocket real-time market data. The cache sits
+	// between the manager (which fans out raw ticks) and the
+	// broker hot path. When WSFEED_ENABLED is false the cache
+	// stays nil and the broker uses the unwrapped REST quote
+	// fn — byte-identical to pre-S6.5.
+	wsFeedCfg := wsFeedConfigFromEnv(os.Getenv)
+	var (
+		wsFeedManager *wsfeed.Manager
+		wsFeedCache   *quotecache.Cache
+		wsFeedBridge  *wsFeedSubscriptionBridge
+		brokerQuoteFn = newMarketDataQuoteFn(marketDataService)
+	)
+	if wsFeedCfg.Enabled {
+		wsFeedCache = newQuoteCache(wsFeedCfg)
+		wsFeedManager = newWSFeedManager(wsFeedCfg, wsFeedCache, metrics)
+		if err := wsFeedManager.Start(context.Background()); err != nil {
+			slog.Warn("wsfeed manager start failed", "err", err)
+		}
+		wsFeedBridge = newWSFeedSubscriptionBridge(db, wsFeedManager, wsFeedCfg, metrics)
+		wsFeedBridge.Start(context.Background())
+		brokerQuoteFn = newCacheAwareQuoteFn(wsFeedCache, brokerQuoteFn, metrics)
+	}
+
 	services := &Services{
 		DB:                    db,
 		SubscriptionService:   subscriptionService,
@@ -692,6 +796,23 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		MarketplaceReconciler: marketplaceReconciler,
 		LeaseManager:          leaseManager,
 		MarketDataService:     marketDataService,
+		BrokerSimulator: broker.NewSimulator(
+			brokerQuoteFn,
+			broker.WithMarketStatusGate(marketStatusGate),
+			broker.WithMatchEngine(marketImpactEngine),
+			broker.WithLockupGate(lockupGateImpl),
+			broker.WithBorrowGate(borrowGateImpl),
+		),
+		MarketImpactRepo:    marketImpactRepo,
+		MarketImpactCache:   marketImpactCache,
+		MarketImpactAdapter: marketImpactAdapter,
+		LockupRepo:          lockupRepo,
+		BorrowRepo:          borrowRepo,
+		BorrowCache:         borrowCache,
+		WSFeedConfig:        wsFeedCfg,
+		WSFeedManager:       wsFeedManager,
+		WSFeedCache:         wsFeedCache,
+		WSFeedBridge:        wsFeedBridge,
 		Mailer:                mailerInstance,
 		SubscriptionHandler: api.NewSubscriptionHandler(
 			newSubscriptionServiceAdapter(subscriptionService),
@@ -700,6 +821,24 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 			llmRuntime,
 			newWalletServiceAdapter(db),
 		),
+	}
+	// P0-3: stop-trigger engine. Constructed AFTER the BrokerSimulator
+	// is created so we can pass it as the venue. Idempotent on a nil
+	// simulator — falls through to nil and downstream callers skip
+	// quote-tick fan-out.
+	services.StopTriggerEngine = newStopTriggerEngine(services.BrokerSimulator)
+
+	// P1-5: order replay. Re-seed the simulator from open trade rows
+	// persisted before the last shutdown. Runs synchronously so the
+	// HTTP server cannot accept a Cancel/Replace against an order the
+	// simulator hasn't seen yet. Best-effort: a per-row projection
+	// failure is logged and skipped (see order_replay.go); only a
+	// bona-fide DB error returns and is logged below.
+	if services.BrokerSimulator != nil && db != nil {
+		if _, err := replayOpenOrders(context.Background(), services.BrokerSimulator, repository.NewTradeRepo(db), slog.Default()); err != nil {
+			slog.Default().Warn("order replay failed at boot — open orders may not be addressable until next restart",
+				"err", err.Error())
+		}
 	}
 	marketplaceAdapter := newMarketplaceServiceAdapter(db, modelConfigService, subscriptionService, llmRuntime)
 	auctionAdapter := newMarketplaceAuctionAdapter(marketplaceAdapter)
@@ -823,6 +962,9 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		// depend on these extremes being populated by the time
 		// the next decision slot runs.
 		positionRefresher.SetLotRepo(repository.NewLotRepo(db))
+		// S6.5: WS-feed cache overlay. When a symbol has a
+		// fresh WS snapshot we prefer it over the REST quote.
+		positionRefresher.SetWSCache(newQuoteCacheLookup(wsFeedCache))
 		// Allow operators to dial cadence at runtime without code
 		// changes. Defaults match the plan: 30s / 5min.
 		positionRefresher.SetIntervals(
@@ -867,6 +1009,29 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		corpActionIngest.SetMetrics(metrics)
 		corpActionIngest.Start()
 		services.CorpActionIngestLoop = corpActionIngest
+
+		// P0-3: stop-trigger poller. Walks every pending stop /
+		// stop_limit / trailing_stop on the in-process broker
+		// simulator at a fixed cadence, fetches a quote per
+		// unique instrument, and forwards into the trigger
+		// engine. Trailing stops ratchet, breached stops fire.
+		// Skipped silently when the simulator or quote pipeline
+		// isn't wired (e.g. unit-test boots without market
+		// data).
+		if services.StopTriggerEngine != nil && services.BrokerSimulator != nil && marketDataService != nil {
+			pollerInterval := envDuration("STOP_TRIGGER_INTERVAL", 5*time.Second)
+			stopPoller := newStopTriggerPoller(
+				services.StopTriggerEngine,
+				services.BrokerSimulator,
+				newMarketDataQuoteFn(marketDataService),
+				pollerInterval,
+				slog.Default(),
+			)
+			if stopPoller != nil {
+				stopPoller.Start()
+				services.StopTriggerPoller = stopPoller
+			}
+		}
 
 		// L3: pgvector backfill + read service. Only spins up when
 		// OPENAI_API_KEY (or an OpenAI-compatible drop-in) is
@@ -942,6 +1107,17 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	mux.HandleFunc("POST /api/auth/forgot-password", handleForgotPassword(svc, cfg))
 	mux.HandleFunc("POST /api/auth/reset-password", handleResetPassword(svc, cfg))
 	mux.HandleFunc("POST /api/auth/change-password", handleChangePassword(svc, cfg))
+	// P0-6: 2FA / TOTP — registered conditionally on
+	// TOTP_ENCRYPTION_KEY being set (see newTOTPHandler).
+	if h := newTOTPHandler(svc, cfg); h != nil {
+		h.RegisterRoutes(mux)
+	}
+	// P0-7: per-action biometric step-up. The endpoint is always
+	// registered (no special key required); the verifier on order
+	// handlers treats absence as "no proof" rather than "fail".
+	if h := newStepUpHandler(cfg); h != nil {
+		h.RegisterRoutes(mux)
+	}
 	mux.HandleFunc("GET /api/account/kyc", handleGetAccountKYC(svc))
 	mux.HandleFunc("POST /api/account/kyc", handleSubmitAccountKYC(svc))
 
@@ -963,6 +1139,58 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	}
 	if adminHandler != nil {
 		adminHandler.RegisterRoutes(mux)
+	}
+	// P0-8 — audit log hash chain verifier (super-admin only).
+	// Mounted independently of adminHandler so an admin handler
+	// outage doesn't take the verifier offline.
+	if verifyHandler := newAuditVerifyHandler(svc); verifyHandler != nil {
+		verifyHandler.RegisterRoutes(mux)
+	}
+	// P0-3 — stop-trigger observability (super-admin only).
+	if stopHandler := newStopTriggerStatusHandler(svc); stopHandler != nil {
+		stopHandler.RegisterRoutes(mux)
+	}
+	// P0-5 — order Cancel / Replace API.
+	// P0-9 — wire the live-trading hard gate. We construct it once
+	// and pass into the order-actions handler. The kill switch is
+	// LIVE_TRADING_GATE_ENABLED (default true) — see
+	// loadLiveTradingGateEnabled.
+	gateEnabled := loadLiveTradingGateEnabled()
+	gate := newLiveTradingGate(svc, cfg, gateEnabled)
+	if !gateEnabled {
+		slog.Warn("LIVE_TRADING_GATE_ENABLED=false — live trading hard gate is OFF (dev/test posture only)")
+	}
+	if orderHandler := newOrderActionsHandlerWithGate(svc, cfg, gate); orderHandler != nil {
+		orderHandler.RegisterRoutes(mux)
+	}
+	// P0-9 — read-only readiness endpoint that the UI hits to
+	// render a per-fund "live trading checklist". Registers under
+	// /api/funds/{fundId}/live-readiness; nil-safe on missing svc.
+	if rh := newLiveReadinessHandler(svc, cfg, gate); rh != nil {
+		rh.RegisterRoutes(mux)
+	}
+	// P1-6 — broker-link self-service for the fund owner. Admin
+	// approval routes are added as part of newAdminHandler below.
+	if blh := newBrokerLinkHandler(svc); blh != nil {
+		blh.RegisterRoutes(mux)
+	}
+	// P1-1 — fund cash-ledger read endpoint. Powers the
+	// "Cash movements" tab on the fund-detail page and the
+	// reconciliation pipeline.
+	if clh := newCashLedgerHandler(svc); clh != nil {
+		clh.RegisterRoutes(mux)
+	}
+	// P1-2 — funding request self-service (deposit / withdrawal).
+	// Admin approve/reject lives in admin_funding.go and is
+	// registered as part of newAdminHandler below.
+	if fh := newFundingHandler(svc); fh != nil {
+		fh.RegisterRoutes(mux)
+	}
+	// Fund-level settings (base_currency, …; P1-4). Hosted in its
+	// own handler so adding more per-fund settings later doesn't
+	// keep ballooning a single file.
+	if fs := newFundSettingsHandler(svc); fs != nil {
+		fs.RegisterRoutes(mux)
 	}
 
 	// ---- SPA fallback: serve React static files ----
@@ -1198,6 +1426,32 @@ func handleLogin(svc *Services, cfg *Config) http.HandlerFunc {
 			}
 			writeJSON(w, status, map[string]any{"error": message, "detail": detail, "request_id": requestID})
 			return
+		}
+		// P0-6: if the user has 2FA enabled, do NOT mint a session
+		// here. Instead hand back a short-lived challenge token the
+		// frontend forwards to /api/auth/2fa/challenge alongside
+		// the user's TOTP code. We deliberately tolerate a nil
+		// totp handler (TOTP_ENCRYPTION_KEY not set) and a nil
+		// repo (legacy / dev installs without the table) — both
+		// cases fall through to the regular session mint below.
+		if svc != nil && svc.DB != nil {
+			repo := repository.NewUserTOTPRepo(svc.DB)
+			row, lookupErr := repo.GetByUserID(r.Context(), user.ID)
+			if lookupErr == nil && row != nil && row.IsEnabled() {
+				challenge, expiresAt, mintErr := issueTwoFAChallenge(user.ID, cfg)
+				if mintErr != nil {
+					slog.Error("failed to issue 2fa challenge", "request_id", requestID, "user_id", user.ID, "error", mintErr)
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to issue 2fa challenge", "request_id": requestID})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"requires_2fa": true,
+					"challenge":    challenge,
+					"expires_at":   expiresAt.UTC().Format(time.RFC3339),
+					"request_id":   requestID,
+				})
+				return
+			}
 		}
 		writeAuthSuccess(w, cfg, requestID, user)
 	}
@@ -2126,7 +2380,8 @@ func isPublicRoute(path string) bool {
 	if strings.HasPrefix(path, "/api/") {
 		switch path {
 		case "/api/health", "/api/version", "/api/metrics", "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/session",
-			"/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/wechat-login":
+			"/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/wechat-login",
+			"/api/auth/2fa/challenge":
 			return true
 		default:
 			return false
@@ -2423,6 +2678,14 @@ func clearSessionCookie(w http.ResponseWriter) {
 	})
 }
 
+// slogLeveledLogger adapts log/slog to the leveledLogger interface
+// the FX loop expects (P1-4). Centralised here so any future loop
+// using leveledLogger reuses the same adapter.
+type slogLeveledLogger struct{}
+
+func (slogLeveledLogger) Info(msg string, kv ...any) { slog.Info(msg, kv...) }
+func (slogLeveledLogger) Warn(msg string, kv ...any) { slog.Warn(msg, kv...) }
+
 type serverMetrics struct {
 	mu                            sync.Mutex
 	httpRequestsTotal             map[string]int64
@@ -2445,6 +2708,117 @@ type serverMetrics struct {
 	// so the histogram surfaces "which instruments are silently
 	// drifting".
 	lotLedgerFailures             map[string]int64
+	// P1-1 cash ledger write failures. Same model as
+	// lotLedgerFailures: trade flow stays unchanged on failure,
+	// but a counter surfaces drift so a reconciliation job can
+	// re-run the missed entries. Keyed by entry_type so
+	// dashboards can answer "is the commission leg silently
+	// failing?" without scrolling through trade ids.
+	cashLedgerWriteFailures       map[string]int64
+	// P1-2 — funding-request lifecycle counters. Keyed by event
+	// = approved | rejected | cancelled | created so the ops
+	// dashboard can show "how many deposits got approved this
+	// week" without joining audit logs. Failures are reported
+	// through the regular http_5xx counters; this map only
+	// records terminal-state transitions.
+	fundingRequestEvents          map[string]int64
+	// fxEvents counts FX-related lifecycle hits (P1-4):
+	//   upsert_manual / upsert_override — operator wrote a rate
+	//   fetch_ok / fetch_error          — scheduler tried Yahoo
+	//   convert_stale                   — NAV / cash summary
+	//                                     hit a missing rate
+	// Exported as fundai_fx_events_total{event="..."}.
+	fxEvents                      map[string]int64
+	// reconEvents counts reconciliation lifecycle hits (P1-3):
+	//   ingest_ok / ingest_duplicate / ingest_error — broker
+	//                                                 statement ingest path
+	//   run_ok / run_failed                          — daily diff
+	//                                                 outcome
+	//   break_<break_type>                           — bumped per break
+	//                                                 emitted by the engine
+	//   resolve_<status>                             — operator resolved
+	//                                                 a break
+	// Exported as fundai_recon_events_total{event="..."}.
+	reconEvents                   map[string]int64
+	// surveillanceEvents counts trade-surveillance lifecycle hits
+	// (P1-7):
+	//   run_ok / run_failed             — scan run outcome
+	//   event_<rule_code>               — bumped per persisted event
+	//   severity_<severity>             — secondary cardinality view
+	//   review_<status>                 — operator review action
+	//   insert_error                    — DB write failed for one event
+	//                                     (snapshot loaded but persist
+	//                                     failed; engine output kept
+	//                                     for the run row)
+	// Exported as fundai_surveillance_events_total{event="..."}.
+	surveillanceEvents            map[string]int64
+	// drawdownEvents counts soft-circuit-breaker lifecycle hits
+	// (P3-5):
+	//   check_ok / check_failed                — scheduler /
+	//                                            on-demand evaluation
+	//   breach_tier_<tier>                     — engine emitted a
+	//                                            breach event for this tier
+	//   action_<action>                        — distribution by
+	//                                            action (trim_proportional / flatten / defensive_only)
+	//   review_<status>                        — operator approve /
+	//                                            dismiss / re-open
+	//   auto_executed                          — auto_execute path
+	//                                            submitted orders
+	//   policy_upsert / policy_delete          — admin tier edits
+	// Exported as fundai_drawdown_events_total{event="..."}.
+	drawdownEvents                map[string]int64
+	// marketStatusEvents counts every pre-trade gate decision
+	// emitted by the market-status engine (S6.1):
+	//   allow                                — order passed all rules
+	//   reject_<rule>                        — short-circuit reject by halt / suspended /
+	//                                          price_limit / market_closed /
+	//                                          half_day_closed
+	//   warn_<rule>                          — advisory (e.g. stale_quote)
+	//   lookup_failed / calendar_lookup_failed / persist_failed / evaluate_failed —
+	//                                          internal hiccups; gate falls open
+	//   admin_*                              — operator UI mutations (halt,
+	//                                          unhalt, set_limits, calendar)
+	// Exported as fundai_marketstatus_events_total{event="..."}.
+	marketStatusEvents            map[string]int64
+	// marketImpactEvents counts size-aware slippage estimator
+	// usage (S6.2):
+	//   estimate                              — every FillPrice probe
+	//   used_defaults                         — engine fell back to asset-class defaults (no row)
+	//   used_adv_fallback                     — calibration row present but ADV missing
+	//   bucket_<asset_class>_<bucket>         — adverse-bps bucket histogram
+	//   admin_upsert / admin_delete           — operator UI mutations
+	//   cache_refresh_ok / cache_refresh_err  — periodic loader outcome
+	// Exported as fundai_marketimpact_events_total{event="..."}.
+	marketImpactEvents            map[string]int64
+	// lockupEvents counts S6.3 IPO lock-up gate hits:
+	//   check_allow / check_reject_locked / check_reject_no_position
+	//   check_allow_non_sell / check_allow_no_lockup / check_no_repo
+	//   gate_lookup_failed / position_lookup_failed
+	//   admin_create / admin_update / admin_release / admin_delete
+	// Exported as fundai_lockup_events_total{event="..."}.
+	lockupEvents                  map[string]int64
+	// borrowEvents counts S6.4 securities-borrow gate + daily
+	// accrual loop hits:
+	//   check_allow_short / check_allow_no_borrow / check_allow_non_sell
+	//   check_reject_unavailable / check_reject_insufficient
+	//   check_reject_below_min / check_reject_above_max
+	//   no_calibration / position_lookup_failed / audit_log_failed
+	//   accrual_booked / accrual_skipped_* / book_failed
+	//   scan_failed / scan_row_failed / run_completed
+	//   admin_upsert_rate / admin_delete_rate
+	// Exported as fundai_borrow_events_total{event="..."}.
+	borrowEvents                  map[string]int64
+	// wsFeedEvents counts S6.5 WebSocket real-time market
+	// data plumbing events:
+	//   tick_applied / quote_cache_hit / quote_miss_fallback_ok
+	//   quote_stale_fallback_ok / quote_stale_served_on_error
+	//   quote_miss_fallback_err
+	//   state_connected / state_reconnecting / state_disconnected
+	//   reconcile_ok / reconcile_added / reconcile_removed
+	//   reconcile_query_err / reconcile_subscribe_err / reconcile_unsubscribe_err
+	//   manager_error / admin_force_reconnect
+	// Exported as fundai_wsfeed_events_total{event="..."}.
+	wsFeedEvents                  map[string]int64
 	// PR-3 position-quote refresher counters. Exported via /api/metrics
 	// as fundai_marketdata_position_refresh_total /
 	// fundai_marketdata_position_refresh_rows / _duration_seconds_sum.
@@ -2570,6 +2944,17 @@ func newServerMetrics() *serverMetrics {
 		marketplaceReconciliationLast: make(map[string]int64),
 		hardRiskRejections:            make(map[string]int64),
 		lotLedgerFailures:             make(map[string]int64),
+		cashLedgerWriteFailures:       make(map[string]int64),
+		fundingRequestEvents:          make(map[string]int64),
+		fxEvents:                      make(map[string]int64),
+		reconEvents:                   make(map[string]int64),
+		surveillanceEvents:            make(map[string]int64),
+		drawdownEvents:                make(map[string]int64),
+		marketStatusEvents:            make(map[string]int64),
+		marketImpactEvents:            make(map[string]int64),
+		lockupEvents:                  make(map[string]int64),
+		borrowEvents:                  make(map[string]int64),
+		wsFeedEvents:                  make(map[string]int64),
 		decisionInputBlocks:           make(map[string]int64),
 		decisionExposureBreaches:      make(map[string]int64),
 		decisionCooldownVetos:         make(map[string]int64),
@@ -2909,6 +3294,232 @@ func (m *serverMetrics) RecordLotLedgerFailure(side, symbol string) {
 	m.lotLedgerFailures[key]++
 }
 
+// RecordCashLedgerWriteFailure increments the cash-ledger drift
+// counter for a single entry_type. Surfaced through Prometheus
+// as fundai_cash_ledger_write_failures_total — paired with a
+// reconciliation alert (sum of cash_ledger != funds.current_capital)
+// it tells operators which leg is silently failing.
+func (m *serverMetrics) RecordCashLedgerWriteFailure(entryType string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(entryType) == "" {
+		entryType = "unknown"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cashLedgerWriteFailures[entryType]++
+}
+
+// RecordFundingRequestEvent bumps the per-state funding lifecycle
+// counter (P1-2). event ∈ {created, cancelled, approved, rejected}.
+// Surfaced through Prometheus as
+// fundai_funding_request_events_total{event="..."} so dashboards
+// can answer "how many deposits hit approved last week" without
+// running the admin filter UI.
+func (m *serverMetrics) RecordFundingRequestEvent(event string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(event) == "" {
+		event = "unknown"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fundingRequestEvents[event]++
+}
+
+// RecordFXEvent bumps the per-event FX counter (P1-4). event ∈
+// {upsert_manual, upsert_override, fetch_ok, fetch_error,
+//  convert_stale}. Surfaced through Prometheus as
+// fundai_fx_events_total{event="..."} so dashboards can answer
+// "is the daily fetch loop healthy" + "is NAV using stale rates"
+// without grepping logs.
+func (m *serverMetrics) RecordFXEvent(event string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(event) == "" {
+		event = "unknown"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fxEvents[event]++
+}
+
+// RecordReconEvent bumps the per-event recon counter (P1-3). event ∈
+// {ingest_ok, ingest_duplicate, ingest_error, run_ok, run_failed,
+//  break_<break_type>, resolve_<status>, scheduled_skip}.
+// Surfaced through Prometheus as
+// fundai_recon_events_total{event="..."} so dashboards can answer
+// "did last night's recon land?" + "how many breaks are still
+// open?" without scraping the DB.
+func (m *serverMetrics) RecordReconEvent(event string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(event) == "" {
+		event = "unknown"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconEvents[event]++
+}
+
+// RecordSurveillanceEvent bumps the per-event surveillance counter
+// (P1-7). event ∈
+//
+//	{run_ok, run_failed, event_<rule_code>, severity_<severity>,
+//	 review_<status>, insert_error, scheduled_skip}
+//
+// Exported through Prometheus as
+// fundai_surveillance_events_total{event="..."} so dashboards can
+// answer "how many wash-trade events fired this week?" or "are any
+// criticals still open?" without scraping the DB.
+func (m *serverMetrics) RecordSurveillanceEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.surveillanceEvents == nil {
+		m.surveillanceEvents = make(map[string]int64)
+	}
+	m.surveillanceEvents[event]++
+}
+
+// RecordDrawdownEvent bumps the per-event drawdown counter (P3-5).
+// event ∈
+//
+//	{check_ok, check_failed, breach_tier_<n>, action_<action>,
+//	 review_<status>, auto_executed, policy_upsert, policy_delete,
+//	 scheduled_skip}
+//
+// Exported via Prometheus as
+// fundai_drawdown_events_total{event="..."} so dashboards can
+// answer "how many funds breached tier 2 today?" or "is the loop
+// running?" without scraping the DB.
+func (m *serverMetrics) RecordDrawdownEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.drawdownEvents == nil {
+		m.drawdownEvents = make(map[string]int64)
+	}
+	m.drawdownEvents[event]++
+}
+
+// RecordMarketStatusEvent bumps the per-event market-status
+// gate counter (S6.1). event is one of:
+//
+//	{allow, reject_<rule>, warn_<rule>, lookup_failed,
+//	 calendar_lookup_failed, evaluate_failed, persist_failed,
+//	 admin_halt, admin_unhalt, admin_set_limits,
+//	 admin_calendar_upsert, admin_calendar_delete}
+//
+// Exported as fundai_marketstatus_events_total{event="..."}.
+func (m *serverMetrics) RecordMarketStatusEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.marketStatusEvents == nil {
+		m.marketStatusEvents = make(map[string]int64)
+	}
+	m.marketStatusEvents[event]++
+}
+
+// RecordMarketImpactEvent bumps the per-event counter for the
+// size-aware slippage estimator (S6.2). Exported as
+// fundai_marketimpact_events_total{event="..."}.
+func (m *serverMetrics) RecordMarketImpactEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.marketImpactEvents == nil {
+		m.marketImpactEvents = make(map[string]int64)
+	}
+	m.marketImpactEvents[event]++
+}
+
+// RecordLockupEvent bumps the per-event counter for the
+// IPO lock-up gate (S6.3). Exported as
+// fundai_lockup_events_total{event="..."}.
+func (m *serverMetrics) RecordLockupEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lockupEvents == nil {
+		m.lockupEvents = make(map[string]int64)
+	}
+	m.lockupEvents[event]++
+}
+
+// RecordBorrowEvent bumps the per-event counter for the
+// securities-borrow gate + daily accrual loop (S6.4). Exported
+// as fundai_borrow_events_total{event="..."}.
+func (m *serverMetrics) RecordBorrowEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.borrowEvents == nil {
+		m.borrowEvents = make(map[string]int64)
+	}
+	m.borrowEvents[event]++
+}
+
+// RecordWSFeedEvent bumps the per-event counter for the
+// WebSocket real-time market data plumbing (S6.5). Exported as
+// fundai_wsfeed_events_total{event="..."}.
+func (m *serverMetrics) RecordWSFeedEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.wsFeedEvents == nil {
+		m.wsFeedEvents = make(map[string]int64)
+	}
+	m.wsFeedEvents[event]++
+}
+
 func (m *serverMetrics) ExportPrometheus() string {
 	if m == nil {
 		return ""
@@ -3009,6 +3620,83 @@ func (m *serverMetrics) ExportPrometheus() string {
 	)
 	for _, key := range sortedMetricKeys(m.lotLedgerFailures) {
 		lines = append(lines, fmt.Sprintf("fundai_lot_ledger_failures_total{%s} %d", prometheusLabels(key), m.lotLedgerFailures[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_cash_ledger_write_failures_total Total cash ledger row insert failures by entry_type (trade still completed; reconcile via re-run).",
+		"# TYPE fundai_cash_ledger_write_failures_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.cashLedgerWriteFailures) {
+		lines = append(lines, fmt.Sprintf("fundai_cash_ledger_write_failures_total{entry_type=%q} %d", key, m.cashLedgerWriteFailures[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_funding_request_events_total Funding-request lifecycle events by terminal state (created/cancelled/approved/rejected). Divide approved by created over the same window for the approval rate.",
+		"# TYPE fundai_funding_request_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.fundingRequestEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_funding_request_events_total{event=%q} %d", key, m.fundingRequestEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_fx_events_total FX (foreign-exchange) lifecycle events by phase (P1-4). upsert_manual/override = operator wrote a rate; fetch_ok/error = scheduler attempted Yahoo; convert_stale = NAV / cash summary hit a missing rate. ",
+		"# TYPE fundai_fx_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.fxEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_fx_events_total{event=%q} %d", key, m.fxEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_recon_events_total Total reconciliation lifecycle events (ingest, run, break, resolve).",
+		"# TYPE fundai_recon_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.reconEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_recon_events_total{event=%q} %d", key, m.reconEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_surveillance_events_total Total trade surveillance lifecycle events (run, event_<rule>, severity, review).",
+		"# TYPE fundai_surveillance_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.surveillanceEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_surveillance_events_total{event=%q} %d", key, m.surveillanceEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_drawdown_events_total Total drawdown soft-circuit-breaker events (check, breach, action, review, policy edits).",
+		"# TYPE fundai_drawdown_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.drawdownEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_drawdown_events_total{event=%q} %d", key, m.drawdownEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_marketstatus_events_total Total market-status pre-trade gate events (allow/reject/warn/admin/internal-failures).",
+		"# TYPE fundai_marketstatus_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.marketStatusEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_marketstatus_events_total{event=%q} %d", key, m.marketStatusEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_marketimpact_events_total Total size-aware slippage estimator events (estimate, used_defaults, used_adv_fallback, bucket_*, admin_*, cache_refresh_*).",
+		"# TYPE fundai_marketimpact_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.marketImpactEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_marketimpact_events_total{event=%q} %d", key, m.marketImpactEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_lockup_events_total Total IPO / private-placement / restricted-share lock-up gate events.",
+		"# TYPE fundai_lockup_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.lockupEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_lockup_events_total{event=%q} %d", key, m.lockupEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_borrow_events_total Total securities-borrow gate + daily accrual events.",
+		"# TYPE fundai_borrow_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.borrowEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_borrow_events_total{event=%q} %d", key, m.borrowEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_wsfeed_events_total Total WebSocket real-time market-data plumbing events (S6.5).",
+		"# TYPE fundai_wsfeed_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.wsFeedEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_wsfeed_events_total{event=%q} %d", key, m.wsFeedEvents[key]))
 	}
 	lines = append(lines,
 		"# HELP fundai_decision_input_calls_total Total PM decision inputs assembled (one per fund-day decision).",
@@ -3627,6 +4315,127 @@ func main() {
 			errCh <- err
 		}
 	}()
+
+	// Daily FX-rate fetch loop (P1-4). Runs in-process with the
+	// rest of the server because the supported pair list is small
+	// (6 pairs / 6h) and standing up a separate worker for it
+	// would dwarf the work it actually performs. Leader election
+	// is currently single-replica trust — when we promote to
+	// multi-replica deployments, gate the loop on the same
+	// schedulerLeader flag the workflow scheduler uses.
+	{
+		fxRepo := fx.NewRepo(db)
+		fxProvider := fx.NewYahooProvider(fx.YahooProviderOptions{})
+		fxLoopHandle := newFXLoop(fxRepo, fxProvider, svc.Metrics, slogLeveledLogger{}, fxLoopOptions{})
+		go func() {
+			fxLoopHandle.Run(context.Background())
+		}()
+	}
+
+	// Daily reconciliation loop (P1-3). Diffs internal positions /
+	// cash / trades against a (mock) broker statement and writes
+	// reconciliation_runs + reconciliation_breaks. The mock
+	// provider produces a perfect-mirror statement so a healthy
+	// platform yields zero breaks; it's the scaffolding that lets
+	// the dashboard and the hash-chained audit trail exist BEFORE
+	// real broker statement loaders land. When the first real
+	// loader lands (CSV / FIX), it replaces the mock provider
+	// here without touching the rest of the loop.
+	{
+		reconRepo := recon.NewRepo(db)
+		snapshotBuilder := newReconSnapshotBuilder(db)
+		fundRepo := repository.NewFundRepo(db)
+		reconLoopHandle := newReconLoop(reconRepo, snapshotBuilder, svc.Metrics, slogLeveledLogger{}, reconLoopOptions{
+			FundLister: func(ctx context.Context) ([]string, error) {
+				funds, err := fundRepo.ListActive(ctx)
+				if err != nil {
+					return nil, err
+				}
+				ids := make([]string, 0, len(funds))
+				for _, f := range funds {
+					ids = append(ids, f.ID)
+				}
+				return ids, nil
+			},
+		})
+		go func() {
+			reconLoopHandle.Run(context.Background())
+		}()
+	}
+
+	// P1-7 — trade surveillance scheduler. Hourly intraday scan
+	// of every active fund's day-of trades. The same fundRepo is
+	// re-used; we don't re-construct it because the wiring above
+	// already declares it inside that block.
+	{
+		surveillanceRepo := surveillance.NewRepo(db)
+		surveillanceBuilder := newSurveillanceSnapshotBuilder(db)
+		surveillanceFundRepo := repository.NewFundRepo(db)
+		surveillanceLoopHandle := newSurveillanceLoop(surveillanceRepo, surveillanceBuilder, svc.Metrics, slogLeveledLogger{}, surveillanceLoopOptions{
+			FundLister: func(ctx context.Context) ([]string, error) {
+				funds, err := surveillanceFundRepo.ListActive(ctx)
+				if err != nil {
+					return nil, err
+				}
+				ids := make([]string, 0, len(funds))
+				for _, f := range funds {
+					ids = append(ids, f.ID)
+				}
+				return ids, nil
+			},
+		})
+		go func() {
+			surveillanceLoopHandle.Run(context.Background())
+		}()
+	}
+
+	// P3-5 — drawdown soft circuit breaker. 5min scan of every
+	// active fund's drawdown vs configured tier policy. Re-uses
+	// the fund_repo; auto-execute path is left unwired (nil
+	// handler) until the order pipeline integration lands. With
+	// nil handler the loop persists every breach as 'proposed'
+	// for operator review — this is the safe default for a soft
+	// breaker that proposes but does not execute.
+	{
+		ddRepo := drawdown.NewRepo(db)
+		ddBuilder := newDrawdownSnapshotBuilder(db, ddRepo)
+		ddFundRepo := repository.NewFundRepo(db)
+		ddLoopHandle := newDrawdownLoop(ddRepo, ddBuilder, svc.Metrics, slogLeveledLogger{}, drawdownLoopOptions{
+			FundLister: func(ctx context.Context) ([]string, error) {
+				funds, err := ddFundRepo.ListActive(ctx)
+				if err != nil {
+					return nil, err
+				}
+				ids := make([]string, 0, len(funds))
+				for _, f := range funds {
+					ids = append(ids, f.ID)
+				}
+				return ids, nil
+			},
+		})
+		go func() {
+			ddLoopHandle.Run(context.Background())
+		}()
+	}
+
+	// S6.4 borrow accrual loop. Runs once per day at 23:55 UTC
+	// (HourOfDay=23 + tick interval 1h → fires inside the 23rd
+	// hour window). Leader-gated so multi-instance deployments
+	// don't double-book.
+	if svc.BorrowRepo != nil {
+		accrualLoop := newBorrowAccrualLoop(borrowAccrualConfig{
+			DB:         svc.DB,
+			BorrowRepo: svc.BorrowRepo,
+			Cache:      svc.BorrowCache,
+			CashRepo:   repository.NewCashLedgerRepo(svc.DB),
+			Metrics:    svc.Metrics,
+			Logger:     slog.Default(),
+			Interval:   1 * time.Hour,
+			HourOfDay:  23,
+			DayCount:   365,
+		})
+		accrualLoop.Start(context.Background())
+	}
 
 	// Wait for shutdown signal.
 	quit := make(chan os.Signal, 1)

@@ -35,11 +35,16 @@ interface Props {
 
 export default function LoginScreen({ onForgotPassword }: Props): JSX.Element {
   const { t } = useTranslation();
-  const { state, login } = useAuth();
+  const { state, login, submitTwoFA, cancelTwoFA } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // P0-6 — 2FA prompt state. We keep both fields locally so the
+  // user can flip between code and recovery without losing input.
+  const [twoFACode, setTwoFACode] = useState('');
+  const [twoFARecovery, setTwoFARecovery] = useState('');
+  const [twoFAMode, setTwoFAMode] = useState<'code' | 'recovery'>('code');
 
   function isProbablyEmail(value: string): boolean {
     return /.+@.+\..+/.test(value.trim());
@@ -77,6 +82,111 @@ export default function LoginScreen({ onForgotPassword }: Props): JSX.Element {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleSubmitTwoFA() {
+    setError(null);
+    if (twoFAMode === 'code' && twoFACode.trim().length < 6) {
+      setError(t('auth.twoFAInvalidCode'));
+      return;
+    }
+    if (twoFAMode === 'recovery' && !twoFARecovery.trim()) {
+      setError(t('auth.twoFAInvalidCode'));
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await submitTwoFA({
+        code: twoFAMode === 'code' ? twoFACode.trim() : undefined,
+        recoveryCode: twoFAMode === 'recovery' ? twoFARecovery.trim() : undefined,
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 401) {
+        setError(t('auth.twoFAInvalidCode'));
+      } else {
+        setError(t('auth.errorGeneric'));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Render the 2FA prompt when the AuthProvider has flipped into
+  // challenge_pending. The split-up render lets us keep the
+  // password form untouched and reuse the same Card / styles.
+  if (state.status === 'challenge_pending') {
+    return (
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.container}
+      >
+        <View style={styles.card}>
+          <Text style={styles.title}>{t('auth.twoFATitle')}</Text>
+          <Text style={styles.subtitle}>{t('auth.twoFASubtitle')}</Text>
+          <View style={styles.modeRow}>
+            <TouchableOpacity
+              onPress={() => setTwoFAMode('code')}
+              style={[styles.modeBtn, twoFAMode === 'code' ? styles.modeBtnActive : null]}
+              accessibilityRole="button"
+            >
+              <Text style={twoFAMode === 'code' ? styles.modeBtnLabelActive : styles.modeBtnLabel}>
+                {t('auth.twoFAModeCode')}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setTwoFAMode('recovery')}
+              style={[styles.modeBtn, twoFAMode === 'recovery' ? styles.modeBtnActive : null]}
+              accessibilityRole="button"
+            >
+              <Text style={twoFAMode === 'recovery' ? styles.modeBtnLabelActive : styles.modeBtnLabel}>
+                {t('auth.twoFAModeRecovery')}
+              </Text>
+            </TouchableOpacity>
+          </View>
+          {twoFAMode === 'code' ? (
+            <TextInput
+              autoFocus
+              placeholder={t('auth.twoFACodePlaceholder') ?? ''}
+              keyboardType="number-pad"
+              maxLength={8}
+              style={[styles.input, styles.codeInput]}
+              value={twoFACode}
+              onChangeText={(v) => setTwoFACode(v.replace(/[^0-9]/g, ''))}
+              editable={!submitting}
+              accessibilityLabel="2FA code"
+            />
+          ) : (
+            <TextInput
+              autoFocus
+              placeholder={t('auth.twoFARecoveryPlaceholder') ?? ''}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              style={[styles.input, styles.codeInput]}
+              value={twoFARecovery}
+              onChangeText={(v) => setTwoFARecovery(v.toUpperCase())}
+              editable={!submitting}
+              accessibilityLabel="recovery code"
+            />
+          )}
+          {error ? <Text style={styles.error}>{error}</Text> : null}
+          <TouchableOpacity
+            onPress={handleSubmitTwoFA}
+            disabled={submitting}
+            accessibilityRole="button"
+            style={[styles.button, submitting ? styles.buttonDisabled : null]}
+          >
+            {submitting ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.buttonLabel}>{t('auth.twoFASubmit')}</Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={cancelTwoFA} style={styles.linkRow} accessibilityRole="link">
+            <Text style={styles.link}>{t('auth.twoFACancel')}</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    );
   }
 
   return (
@@ -177,6 +287,30 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginBottom: 16,
     textAlign: 'center',
+  },
+  subtitle: {
+    fontSize: 13,
+    color: '#6b7280',
+    marginBottom: 16,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  modeRow: {
+    flexDirection: 'row',
+    backgroundColor: '#f3f4f6',
+    borderRadius: 8,
+    padding: 4,
+    marginBottom: 12,
+  },
+  modeBtn: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
+  modeBtnActive: { backgroundColor: '#4f46e5' },
+  modeBtnLabel: { color: '#374151', fontSize: 13 },
+  modeBtnLabelActive: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  codeInput: {
+    fontSize: 22,
+    letterSpacing: 6,
+    textAlign: 'center',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   input: {
     borderWidth: 1,

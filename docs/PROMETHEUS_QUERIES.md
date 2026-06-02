@@ -524,6 +524,713 @@ groups:
 
 ---
 
+## 10. 资金账本 (Cash ledger, P1-1)
+
+### 10.1 cash-ledger 写入失败率
+
+**场景**: 每笔成交本应在 cash_ledger 留下 4 条记录（本金 + 佣金 + 过户费 + 印花税），dividend 留 1 条。
+失败时 trade 仍然提交（不阻塞下单），但 funds.current_capital 与 SUM(cash_ledger.amount)
+会出现偏差，需要由对账作业重跑补齐。
+
+```promql
+sum(increase(fundai_cash_ledger_write_failures_total[1h]))
+```
+
+**解读**: 任意大于 0 的值都需要立刻处理。
+- 关注 `entry_type=` 标签：如果只有 `trade_*_commission` 涨说明手续费列写挂了，不是 schema 问题。
+- 配套：在每日 reconcile 跑 `SELECT id, current_capital, (SELECT COALESCE(SUM(amount),0) FROM cash_ledger WHERE fund_id = funds.id) FROM funds`，差值 > 0.01 报警。
+
+### 10.2 报警建议
+
+```yaml
+groups:
+- name: cash-ledger
+  rules:
+  - alert: CashLedgerWriteFailing
+    expr: sum(increase(fundai_cash_ledger_write_failures_total[15m])) > 0
+    for: 5m
+    labels: { severity: page }
+    annotations:
+      summary: "cash_ledger 写入失败 — 资金对账风险"
+      runbook: "检查 server log 关键字 'cash_ledger: append failed'，确认 DB 是否仍可写。失败的行可通过相同 idempotency_key 重放。"
+```
+
+---
+
+## 11. 出入金 (Funding requests, P1-2)
+
+`fundai_funding_request_events_total{event}` 记录出入金请求生命周期：
+
+- `event=created` 用户提交一笔新请求
+- `event=cancelled` 提交人撤回 pending 请求
+- `event=approved` 不同 super_admin 通过审批，cash_ledger + funds.current_capital 已写入
+- `event=rejected` 不同 super_admin 拒绝（带 reason）
+
+### 关键 PromQL
+
+| 名字           | 用途                                    | 表达式                                                                                                                                                                  |
+| -------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 审批通过率     | 24h 内 `approved / created`             | `sum(increase(fundai_funding_request_events_total{event="approved"}[24h])) / sum(increase(fundai_funding_request_events_total{event="created"}[24h]))` |
+| 拒绝率         | 24h 拒绝占比                            | `sum(increase(fundai_funding_request_events_total{event="rejected"}[24h])) / sum(increase(fundai_funding_request_events_total{event="created"}[24h]))` |
+| Pending 长尾   | 卡在审批队列里的请求 (用 access log 推算) | `sum(rate(fundai_funding_request_events_total{event="created"}[6h])) - sum(rate(fundai_funding_request_events_total{event=~"approved\|rejected\|cancelled"}[6h]))`     |
+
+### 推荐告警
+
+```yaml
+- alert: FundingApprovalStuck
+  expr: |
+    sum(increase(fundai_funding_request_events_total{event="created"}[6h]))
+      -
+    sum(increase(fundai_funding_request_events_total{event=~"approved|rejected|cancelled"}[6h])) > 5
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: "5+ funding requests pending more than ~6h"
+    runbook: "/api/admin/funding-requests?status=pending 查看队列；超过 24h 的应通知 ops。"
+```
+
+---
+
+## 12. FX 汇率（FX rates / cross-currency NAV，P1-4）
+
+`fundai_fx_events_total{event}` 记录 FX 模块的生命周期事件：
+
+- `event=fetch_ok` — 调度器从 Yahoo 抓到一次新汇率（每 6h 一轮，6 个对，所以稳定状态下 24 / round-trip）
+- `event=fetch_error` — Yahoo 返回 429 / 5xx / 0 价格 / 网络超时
+- `event=upsert_manual` — 操作员人工录入一笔 fx_rates
+- `event=upsert_override` — 操作员覆盖之前抓到的错误值
+- `event=convert_stale` — NAV 或 cash_ledger summary 在折算时遇到了缺失的汇率（保留原币种数值，前端渲染 `≈`）
+
+| 场景             | 含义                                        | PromQL                                                                                                |
+| ---------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 抓取健康度       | 24h 内 `fetch_ok / (ok + error)`            | `sum(increase(fundai_fx_events_total{event="fetch_ok"}[24h])) / clamp_min(sum(increase(fundai_fx_events_total{event=~"fetch_ok|fetch_error"}[24h])), 1)` |
+| 抓取量基线       | 6h 期望抓 6 次成功（≈ 24/24h）              | `sum(increase(fundai_fx_events_total{event="fetch_ok"}[6h]))`                                         |
+| 人工干预频次     | 24h 人工 upsert + override 总数             | `sum(increase(fundai_fx_events_total{event=~"upsert_manual|upsert_override"}[24h]))`                  |
+| NAV 折算"陈旧"占比 | 5m 内 convert_stale 比例                  | `sum(increase(fundai_fx_events_total{event="convert_stale"}[5m]))`                                    |
+
+### 推荐告警
+
+```yaml
+- alert: FXFetchUnhealthy
+  expr: |
+    sum(increase(fundai_fx_events_total{event="fetch_ok"}[6h])) < 1
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: "FX scheduler 6h 内一次成功抓取都没有"
+    runbook: "/api/admin/fx-rates 查看最新行；如缺失关键 USD 主导对，操作员可点击 'manual' 录入临时值。"
+
+- alert: FXManualOverridesSpiking
+  expr: |
+    sum(increase(fundai_fx_events_total{event="upsert_override"}[1h])) > 5
+  for: 15m
+  labels:
+    severity: info
+  annotations:
+    summary: "1h 内 >5 笔 override，请确认是否 Yahoo 输出异常"
+    runbook: "对照 /api/admin/fx-rates?source=yahoo 与历史值，必要时切换备用 provider。"
+```
+
+注：cross-rate（如 CNY/HKD）一律通过 USD 三角化得到，因此监控只要看 USD 主导对（USD/CNY、USD/HKD、USD/EUR、USD/JPY、USD/GBP、USD/SGD）即可。
+
+---
+
+## 13. 日终对账（Reconciliation，P1-3）
+
+`fundai_recon_events_total{event}` 记录 reconciliation 模块的生命周期事件。事件按"摄入 → 运行 → 差异 → 解决"分四组：
+
+- 摄入：`event=ingest_ok` / `ingest_duplicate` / `ingest_error`
+  分别对应一份 broker_statement 成功落库、命中去重哈希被忽略、或写入失败。
+- 运行：`event=run_ok` / `run_failed`
+  对应一次 reconciliation_run 完整跑完（包括 break 写库）/ 中途失败。
+  `event=scheduled_skip` 表示日终 loop 拿不到 fund 列表，整轮跳过（目前只有 nil-FundLister 兜底场景会触发）。
+- 差异：`event=break_<break_type>` 每条 break 各计一次。closed vocabulary 列在
+  `internal/recon.BreakType`：
+  `break_position_quantity_mismatch` /
+  `break_position_avg_cost_mismatch` /
+  `break_position_missing_internal` /
+  `break_position_missing_broker` /
+  `break_cash_balance_mismatch` /
+  `break_cash_currency_missing_internal` /
+  `break_cash_currency_missing_broker` /
+  `break_trade_missing_internal` /
+  `break_trade_missing_broker` /
+  `break_trade_quantity_mismatch` /
+  `break_trade_price_mismatch` /
+  `break_trade_side_mismatch`
+- 解决：`event=resolve_acknowledged` / `resolve_resolved` / `resolve_ignored` / `resolve_open`（重开）
+
+| 场景             | 含义                                                    | PromQL                                                                                                            |
+| ---------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 日终运行健康度   | 24h 内 `run_ok / (ok + failed)`                          | `sum(increase(fundai_recon_events_total{event="run_ok"}[24h])) / clamp_min(sum(increase(fundai_recon_events_total{event=~"run_ok\|run_failed"}[24h])), 1)` |
+| 严重 break 速率  | 24h 内出现的 critical break 总数（含 sym/trade 各类）    | `sum(increase(fundai_recon_events_total{event=~"break_position_missing_internal\|break_position_quantity_mismatch\|break_trade_side_mismatch\|break_trade_missing_internal\|break_trade_missing_broker\|break_cash_currency_missing_internal"}[24h]))` |
+| 操作员处理速度   | 1h 内 acknowledge + resolve 总数                         | `sum(increase(fundai_recon_events_total{event=~"resolve_acknowledged\|resolve_resolved\|resolve_ignored"}[1h]))`  |
+| 重复摄入频次     | 24h 内命中重复哈希的次数（健康，多源摄入 mock 时常见）   | `sum(increase(fundai_recon_events_total{event="ingest_duplicate"}[24h]))`                                         |
+
+### 推荐告警
+
+```yaml
+- alert: ReconDailyRunMissing
+  expr: |
+    sum(increase(fundai_recon_events_total{event="run_ok"}[36h])) < 1
+  for: 1h
+  labels:
+    severity: critical
+  annotations:
+    summary: "36h 内一次成功的 reconciliation 都没有"
+    runbook: "1) /api/admin/reconciliation/runs 查看最新运行；2) 检查 fund_repo.ListActive 是否仍然返回基金；3) 必要时手动 POST /api/admin/reconciliation/runs 触发一次。"
+
+- alert: ReconCriticalBreakBacklog
+  expr: |
+    sum(increase(fundai_recon_events_total{event=~"break_position_missing_internal|break_position_quantity_mismatch|break_trade_side_mismatch|break_trade_missing_internal|break_trade_missing_broker"}[24h]))
+      - sum(increase(fundai_recon_events_total{event=~"resolve_resolved|resolve_ignored"}[24h])) > 5
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: "24h 内未处理的 critical break 累计 >5"
+    runbook: "/api/admin/reconciliation/breaks?status=open&severity=critical"
+
+- alert: ReconRunFailing
+  expr: |
+    sum(increase(fundai_recon_events_total{event="run_failed"}[1h])) > 3
+  for: 15m
+  labels:
+    severity: warning
+  annotations:
+    summary: "1h 内 >3 次 run_failed"
+    runbook: "看日志中 'recon loop:' 前缀；常见原因：DB 不可达 / fund_id 越权 / 序列化问题。"
+```
+
+注：mock provider 阶段产生的 break 数量通常为 0（perfect mirror）。一旦真实 broker 适配器（CSV/FIX/REST）落地，这些指标就直接成为日终运维的主面板。
+
+---
+
+## 14. 交易监控（Trade Surveillance，P1-7）
+
+`fundai_surveillance_events_total{event}` 记录监控模块每次 hourly 扫描以及合规复核动作的生命周期事件。
+事件按"扫描运行 → 命中（按规则 / 按级别） → 复核动作"三组：
+
+| 维度       | 事件标签                                                | 含义                                                                 |
+| ---        | ---                                                     | ---                                                                  |
+| 扫描运行   | `run_ok`、`run_failed`、`scheduled_skip`、`insert_error`| 单次扫描 wave 的成败 / 跳过 / 单事件写入失败                          |
+| 命中（规则）| `event_wash_trade`、`event_marking_close`、`event_self_trade_pair`、`event_rapid_fire_reversal`、`event_layering_suspect` | 扫描产出某个规则的命中事件（每条新事件 +1，dedupe 不计）             |
+| 命中（级别）| `severity_critical`、`severity_warning`、`severity_info`| 维度补充，让 dashboard 可以按级别画堆叠图                            |
+| 复核动作   | `review_open`、`review_reviewing`、`review_cleared`、`review_escalated` | 操作员把某事件改成对应 status；用于分析复核 SLA                     |
+
+### 推荐 PromQL
+
+| 想看              | PromQL                                                                                                        |
+| ---               | ---                                                                                                           |
+| 扫描健康度        | `sum(increase(fundai_surveillance_events_total{event="run_ok"}[24h])) / clamp_min(sum(increase(fundai_surveillance_events_total{event=~"run_ok|run_failed"}[24h])), 1)` |
+| 当日命中速率      | `sum(increase(fundai_surveillance_events_total{event=~"event_.*"}[24h]))`                                     |
+| 严重命中速率      | `sum(increase(fundai_surveillance_events_total{event="severity_critical"}[24h]))`                              |
+| 待复核积压（粗估）| 抓 DB `surveillance_events.status='open'` 的 count；指标只跟踪状态 *变化*，不跟踪当前积压                     |
+| 复核效率          | `sum(increase(fundai_surveillance_events_total{event=~"review_cleared|review_escalated"}[1h]))`                |
+
+### 推荐告警
+
+```yaml
+
+- alert: SurveillanceLoopMissing
+  expr: |
+    sum(increase(fundai_surveillance_events_total{event="run_ok"}[3h])) < 1
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: "3h 内没有 surveillance run_ok（loop 应每小时跑一次）"
+    runbook: "看 server 日志的 `surveillance loop:` 前缀；常见原因：DB 连接 / fund 列表为空 / panic。"
+
+- alert: SurveillanceCriticalSpike
+  expr: |
+    sum(increase(fundai_surveillance_events_total{event="severity_critical"}[1h])) > 5
+  for: 10m
+  labels:
+    severity: critical
+  annotations:
+    summary: "1h 内 >5 起 critical 监控事件"
+    runbook: "立刻打开 /admin → 交易监控 面板；critical = self-trade 或 marking-close 同时命中尺寸+VWAP；优先 escalate。"
+
+- alert: SurveillanceInsertErrorBurst
+  expr: |
+    sum(increase(fundai_surveillance_events_total{event="insert_error"}[15m])) > 10
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "15min 内 >10 次 surveillance insert_error"
+    runbook: "通常是 DB 写入失败（约束 / 连接超时）。检查 `surveillance_events` 表当前是否被锁。"
+```
+
+注：监控事件命中本身 *不是* alert——命中是日常工作量。Alert 跟踪的是命中"突发"（severity_critical 暴涨）和系统层（loop 没跑、insert 失败）。
+
+---
+
+## 15. 回撤软熔断（Drawdown soft circuit breaker，P3-5）
+
+`fundai_drawdown_events_total{event}` 记录每次 5 分钟 DD 扫描以及操作员处置动作的生命周期事件。
+
+| event 标签                | 含义                                                                                  |
+| ---                        | ---                                                                                   |
+| `check_ok`                | 单基金扫描完成（含 evaluate）                                                          |
+| `check_failed`            | 扫描或写入失败（snapshot / evaluate / insert）                                         |
+| `breach_tier_1` … `_5`    | 命中第 N 档阈值                                                                        |
+| `action_trim_proportional` | 命中事件的处置动作分布（冗余维度，配合 tier 看采纳率）                                  |
+| `action_flatten`          | 命中事件的处置动作分布                                                                |
+| `action_defensive_only`   | 命中事件的处置动作分布                                                                |
+| `auto_executed`           | auto_execute=true 的档位通过 handler 成功挂单                                          |
+| `review_approved`         | 操作员批准建议（可被 auto-execute 替代）                                              |
+| `review_dismissed`        | 操作员驳回                                                                             |
+| `review_superseded`       | 后续更深档位事件接管，前面建议被废止                                                   |
+| `review_proposed`         | 操作员重开历史事件（事件维护用）                                                       |
+| `policy_upsert`           | 任意档位被 upsert（含新增/修改）                                                      |
+| `policy_delete`           | 删除一档                                                                              |
+| `scheduled_skip`          | scheduler 没有 fund lister 或 lister 报错时的兜底标识                                  |
+
+### 关键 PromQL
+
+| 用途              | 表达式                                                                                                                                                              |
+| ---               | ---                                                                                                                                                                 |
+| 扫描健康度        | `sum(increase(fundai_drawdown_events_total{event="check_ok"}[1h]))`                                                                                                |
+| 命中速率          | `sum(increase(fundai_drawdown_events_total{event=~"breach_tier_.*"}[24h]))`                                                                                        |
+| 各档位命中分布    | `sum by (event) (increase(fundai_drawdown_events_total{event=~"breach_tier_.*"}[24h]))`                                                                            |
+| 自动执行成功率    | `sum(increase(fundai_drawdown_events_total{event="auto_executed"}[24h])) / clamp_min(sum(increase(fundai_drawdown_events_total{event=~"breach_tier_.*"}[24h])), 1)`|
+| 拒绝率            | `sum(increase(fundai_drawdown_events_total{event="review_dismissed"}[7d])) / clamp_min(sum(increase(fundai_drawdown_events_total{event=~"breach_tier_.*"}[7d])), 1)`|
+
+### 推荐告警
+
+```yaml
+- alert: DrawdownLoopStalled
+  expr: |
+    sum(increase(fundai_drawdown_events_total{event="check_ok"}[30m])) < 1
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: "30min 内未观测到任何 drawdown 检查 ok"
+    runbook: "确认 scheduler 进程正在运行，检查 fund_repo.ListActive 是否报错。"
+
+- alert: DrawdownDeepTierBurst
+  expr: |
+    sum(increase(fundai_drawdown_events_total{event=~"breach_tier_3|breach_tier_4|breach_tier_5"}[15m])) > 3
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "15min 内 >3 次深档位 (>=3) 回撤事件"
+    runbook: "有可能多只基金同时被市场剧烈波动击穿，确认是否需要人工统一处置。"
+
+- alert: DrawdownAutoExecuteFailures
+  expr: |
+    sum(increase(fundai_drawdown_events_total{event="check_failed"}[15m])) > 5
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "15min 内 >5 次 drawdown check_failed"
+    runbook: "通常是 snapshot / DB 写失败；也可能是 auto-execute handler 报错。查看 fundai_drawdown 日志。"
+```
+
+注：跟 P1-7 类似，普通 breach 事件本身不是 alert——配置回撤阈值的目的就是希望它们触发。Alert 关心的是异常突发（深档位短时间集中）和系统层（loop 不跑、写入失败）。
+
+---
+
+## 16. 市场状态门控（Market-status gate，S6.1）
+
+`fundai_marketstatus_events_total{event}` 记录每次订单进入撮合引擎前的可达性检查（停牌 / 涨跌停 / 陈旧报价 / 交易日历）以及操作员对状态/日历的修改动作。
+
+| event 标签                       | 含义                                                                            |
+| ---                              | ---                                                                              |
+| `allow`                          | 订单通过所有规则                                                                |
+| `reject_halted`                  | 因停牌被拒                                                                      |
+| `reject_suspended`               | 因长期暂停被拒                                                                  |
+| `reject_price_limit`             | 限价超出涨跌停被拒                                                              |
+| `reject_market_closed`           | 当日市场未开 / 已收盘被拒                                                       |
+| `reject_half_day_closed`         | 半天市早盘后被拒                                                                |
+| `warn_stale_quote`               | 报价过陈旧告警（订单仍放行，警告附在 Order.Warnings）                          |
+| `warn_half_day_closed`           | 仍处于半天市时段告警                                                            |
+| `warn_market_closed`             | 时区配置异常导致无法判定，降级为告警                                            |
+| `lookup_failed`                  | 标的状态查表失败（fail-open）                                                   |
+| `calendar_lookup_failed`         | 日历查表失败（fail-open）                                                       |
+| `evaluate_failed`                | 引擎报错（fail-open）                                                           |
+| `persist_failed`                 | 事件持久化失败（best-effort，不改变判定）                                       |
+| `admin_halt`/`admin_unhalt`      | 操作员便捷接口动作                                                              |
+| `admin_set_limits`               | 设置涨跌停                                                                      |
+| `admin_upsert`                   | 通用 upsert                                                                     |
+| `admin_calendar_upsert`          | 日历日维度 upsert                                                               |
+
+### 关键 PromQL
+
+| 用途              | 表达式                                                                                                                                                                |
+| ---               | ---                                                                                                                                                                   |
+| 拒单速率          | `sum(increase(fundai_marketstatus_events_total{event=~"reject_.*"}[1h]))`                                                                                            |
+| 通过率            | `sum(increase(fundai_marketstatus_events_total{event="allow"}[24h])) / clamp_min(sum(increase(fundai_marketstatus_events_total{event=~"allow|reject_.*|warn_.*"}[24h])), 1)` |
+| 告警速率（陈旧报价主因） | `sum(increase(fundai_marketstatus_events_total{event=~"warn_.*"}[1h]))`                                                                                              |
+| 内部失败          | `sum(increase(fundai_marketstatus_events_total{event=~"lookup_failed|calendar_lookup_failed|evaluate_failed|persist_failed"}[15m]))`                                  |
+
+### 推荐告警
+
+```yaml
+- alert: MarketStatusInternalFailures
+  expr: |
+    sum(increase(fundai_marketstatus_events_total{event=~"lookup_failed|calendar_lookup_failed|evaluate_failed|persist_failed"}[15m])) > 50
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "15min 内 >50 次 marketstatus 门控内部失败"
+    runbook: "确认 instrument_market_status / trading_calendar 表是否可达；该路径默认 fail-open，所以堆积不会立刻拒单，但已影响审计完整性。"
+
+- alert: MarketStatusRejectBurst
+  expr: |
+    sum(increase(fundai_marketstatus_events_total{event=~"reject_.*"}[5m])) > 100
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "5min 内 >100 次门控拒单"
+    runbook: "通常是某个标的被错误标为 halted 或涨跌停设置错误。在 admin UI -> 市场状态门控 中检查最近 admin_* 修改。"
+
+- alert: MarketStatusStaleQuoteSurge
+  expr: |
+    sum(increase(fundai_marketstatus_events_total{event="warn_stale_quote"}[5m])) > 200
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "5min 内 >200 条 stale_quote 警告"
+    runbook: "市场数据 ingest 可能落后；检查 marketdata 进程与 quote_metadata 写入速率。"
+```
+
+注：拒单本身不是异常——配置涨跌停/停牌的目的就是希望命中。Alert 跟踪的是异常突发（短时间集中拒单）和系统层（fail-open 路径在持续兜底）。
+
+## 17. 市场冲击 / 大单滑点（Market-impact, S6.2）
+
+S6.2 把模拟器的 slippage 由固定 bps 升级为带 ADV / σ 的平方根冲击模型。每个标的可在 admin UI 录入校准（`instrument_liquidity`），也可空缺让引擎走资产类别默认值。
+
+### 主要指标
+
+```
+fundai_marketimpact_events_total{event="..."}
+```
+
+`event` 子集与含义：
+
+| event | 含义 |
+|---|---|
+| `estimate` | 引擎被调用一次（每笔下单都会 +1） |
+| `used_defaults` | 该标的没有校准行，引擎使用资产类别默认 |
+| `used_adv_fallback` | 校准行存在但 ADV 缺失，引擎只返回 `min_bps` |
+| `bucket_<asset>_<bps_bucket>` | 估算结果落入哪一档（`0_5`/`5_20`/`20_50`/`50_100`/`100_250`/`250_plus`） |
+| `admin_upsert` | admin 在 UI 录入或修改一行校准 |
+| `admin_delete` | admin 删除一行校准 |
+| `admin_preview` | admin 跑了一次预演（不下单） |
+| `admin_cache_refresh` | admin 强制刷新内存缓存 |
+| `cache_refresh_ok` / `cache_refresh_err` | 启动 + 周期性 5min 刷新结果 |
+
+### 推荐查询
+
+```promql
+# 每秒 estimate 调用速率（应该 ≈ 下单速率）
+sum(rate(fundai_marketimpact_events_total{event="estimate"}[5m]))
+
+# 默认值占比（比例越高说明覆盖率越低，需要继续校准）
+sum(rate(fundai_marketimpact_events_total{event="used_defaults"}[1h]))
+  / clamp_min(sum(rate(fundai_marketimpact_events_total{event="estimate"}[1h])), 1)
+
+# ADV 回退占比（行有但 ADV 缺）
+sum(rate(fundai_marketimpact_events_total{event="used_adv_fallback"}[1h]))
+  / clamp_min(sum(rate(fundai_marketimpact_events_total{event="estimate"}[1h])), 1)
+
+# 大单（>100 bps）占比 by 资产类别
+sum by (event)(rate(fundai_marketimpact_events_total{event=~"bucket_.*_(100_250|250_plus)"}[1h]))
+  / clamp_min(sum(rate(fundai_marketimpact_events_total{event="estimate"}[1h])), 1)
+
+# 缓存刷新失败（应当为 0）
+increase(fundai_marketimpact_events_total{event="cache_refresh_err"}[1h])
+```
+
+### 推荐告警
+
+```yaml
+- alert: MarketImpactDefaultsHigh
+  expr: |
+    (sum(rate(fundai_marketimpact_events_total{event="used_defaults"}[1h])) /
+     clamp_min(sum(rate(fundai_marketimpact_events_total{event="estimate"}[1h])), 1))
+     > 0.6
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: "60% 以上的下单仍走资产类别默认值"
+    runbook: "大量标的还没有校准行；运营需要继续往 instrument_liquidity 里录入 ADV/波动率。"
+
+- alert: MarketImpactCacheRefreshErrors
+  expr: |
+    increase(fundai_marketimpact_events_total{event="cache_refresh_err"}[10m]) > 3
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "marketimpact cache 周期刷新连续失败"
+    runbook: "通常是 DB 连接抖动；检查 cmd/server 日志中的 cache_refresh_err 记录与 fundai_db_* 健康。短期撮合仍可继续——cache 持有最后一次成功刷新的行。"
+
+- alert: MarketImpactRunawayBps
+  expr: |
+    sum(increase(fundai_marketimpact_events_total{event=~"bucket_.*_250_plus"}[15m])) > 50
+  for: 15m
+  labels:
+    severity: warning
+  annotations:
+    summary: "15min 内 >50 笔订单冲击 ≥ 250 bps"
+    runbook: "可能是 (1) 某只标的 ADV 配置错误（数量级偏小） 或 (2) 撮合策略生成了远超 ADV 的大单。点开 admin UI > 大单冲击模型，按 bucket_ 过滤近期 estimate。"
+```
+
+### 触发条件
+
+冲击模型在以下时点被调用：
+
+- 模拟器 `PlaceOrder` 撮合每一笔订单时（adapter 在 `FillPrice` 入口收集 metric）。
+- admin UI 的 `Preview` 按钮点击（不下单，仅算 bps）。
+- 强制 `cache/refresh` 后会刷新 `cache_refresh_ok`，下一次 estimate 仍会正常计数。
+
+
+---
+
+## 18. IPO / 受限股 lock-up 门控（Lock-up gate, S6.3）
+
+S6.3 给 broker 模拟器接了第二个 pre-trade gate：当 SELL 数量超过
+(`持仓 - 活跃 lock-up qty`) 时拒单（`broker.ErrLockupRejected`）。
+buy 永不触发；DB hiccup 全部 fail-open。
+
+### 18.1 当前 1 小时内：lock-up 拒单次数
+
+```promql
+increase(fundai_lockup_events_total{event="check_reject_locked"}[1h])
+```
+
+预期 `0` 或个位数。突然飙升 → admin 把锁定期或 qty 配多了；用 admin UI 的
+`released_at` 面板回放最近的提前释放是否漏发。
+
+### 18.2 fail-open 比例 = lookup 失败次数 ÷ 总检查次数
+
+```promql
+sum(rate(fundai_lockup_events_total{event=~"gate_lookup_failed|position_lookup_failed"}[15m]))
+  /
+sum(rate(fundai_lockup_events_total{event=~"check_.*"}[15m]))
+```
+
+阈值 `> 0.005`（0.5% 的下单触发了 fail-open）→ DB / position table 异常，
+立即调查；门控当前已经放行，可能漏挡受限卖单。
+
+### 18.3 SELL 中受 lock-up 影响的比例
+
+```promql
+sum(rate(fundai_lockup_events_total{event=~"check_reject_locked|check_allow"}[24h]))
+  /
+sum(rate(fundai_lockup_events_total{event!~"check_allow_non_sell|admin_.*"}[24h]))
+```
+
+> 0 但合理；持续 0 通常意味着 lock-up 表是空的（基金没有任何 IPO/RSU 配置），
+检查是否漏建。
+
+### 18.4 admin 写操作 24h 节奏
+
+```promql
+sum by (event) (
+  increase(fundai_lockup_events_total{event=~"admin_.*"}[24h])
+)
+```
+
+按 event 拆分能看到 `admin_create / admin_update / admin_release / admin_delete`
+的节奏。`admin_release` 集中爆发 → 接近批量解锁日（IPO 锁定期到期），合预期；
+`admin_delete` 应当 ≈ 0（删除是 typo-fix 的兜底，UI 强制走 release 路径）。
+
+### 18.5 推荐告警
+
+| 名称                       | 表达式                                                                                        | for | 说明                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------- | --- | --------------------------------------------- |
+| `LockupFailOpenRateHigh`   | `sum(rate(fundai_lockup_events_total{event=~"gate_lookup_failed|position_lookup_failed"}[15m])) / sum(rate(fundai_lockup_events_total{event=~"check_.*"}[15m])) > 0.005` | 5m  | DB 抖动 → 门控变形同虚设，立即排查            |
+| `LockupHardDeleteSpike`    | `increase(fundai_lockup_events_total{event="admin_delete"}[1h]) > 5`                          | 5m  | 短时间多次 hard-delete → 通常是误操作或脚本   |
+| `LockupRejectsBurst`       | `increase(fundai_lockup_events_total{event="check_reject_locked"}[5m]) > 50`                  | 5m  | 5 分钟内 50 + 单被拒 → 配置错误（qty / until），通知 PM |
+
+### 触发条件
+
+锁定期门控会在以下时点写 metric：
+
+- broker `PlaceOrder` 收到 SELL：`check_allow / check_reject_locked / check_reject_no_position / check_allow_no_lockup`。
+- broker `PlaceOrder` 收到 BUY：`check_allow_non_sell`（短路，不查 DB）。
+- admin REST 写操作：`admin_create / admin_update / admin_release / admin_delete`。
+- 故障路径：`gate_lookup_failed / position_lookup_failed / check_no_repo`（fail-open 已生效）。
+
+
+---
+
+## 19. 借券 / locate 费（Securities-borrow gate + accrual, S6.4）
+
+S6.4 给 broker 增加了第三个 pre-trade gate（继 marketstatus / lockup
+之后）并新增一个 EOD 日终循环：
+
+- pre-trade locate gate：SHORT 开仓时按 `instrument_key` 查
+  `security_borrow_rates`，若 `availability='unavailable'`
+  或 `available_shares < requested_qty` 直接拒单
+  （`broker.ErrBorrowRejected`），HTB 时附带 fee 提示。
+- daily accrual loop：每天 23 时启动一次，扫所有
+  `holding_positions.quantity < 0` 的短仓，按
+  `notional × rate / 365` 写一条 `borrow_fee` 到 cash_ledger
+  并 upsert 一条短仓借券台账（fund×instrument×day 唯一）。
+
+两条链路共用同一个 metric 名：`fundai_borrow_events_total{event="..."}`。
+event 命名约定：`check_*` 是 gate 路径，`accrual_*` 是日终循环路径，
+`admin_*` 是 admin REST 路径。
+
+### 19.1 当前 1 小时内：locate 拒单次数（按原因拆）
+
+```promql
+sum by (event) (
+  increase(fundai_borrow_events_total{event=~"check_reject_.*"}[1h])
+)
+```
+
+`check_reject_unavailable` 突增 → 通常是 admin 把某些 ticker 切到
+`unavailable`；`check_reject_insufficient` 突增 → 计划仓位超过了
+agent lender 当日可融券规模。
+
+### 19.2 fail-open 比例 = 失败次数 ÷ 所有 short check 次数
+
+```promql
+sum(rate(fundai_borrow_events_total{event=~"position_lookup_failed|audit_log_failed|no_calibration"}[15m]))
+  /
+sum(rate(fundai_borrow_events_total{event=~"check_.*"}[15m]))
+```
+
+阈值 `> 0.01` → 短仓没有真正被借券 gate 约束，需要立刻排查
+（DB 抖动、calibration 表为空）。
+
+### 19.3 当日 borrow_fee 累计（USD）
+
+```promql
+sum(increase(fundai_borrow_events_total{event="accrual_booked"}[24h]))
+```
+
+注意这是「次数」，不是金额；金额查 cash_ledger
+（`SELECT SUM(amount) FROM cash_ledger_entries WHERE entry_type='borrow_fee' AND posted_at >= NOW() - INTERVAL '1 day'`）。
+
+如果次数为 0 而存在 active 短仓 → 日终循环没跑（leader 抢锁失败 / 启动
+小时配错了）；优先看 `run_completed` 和 `scan_failed`。
+
+### 19.4 admin 操作 24h 节奏
+
+```promql
+sum by (event) (
+  increase(fundai_borrow_events_total{event=~"admin_.*"}[24h])
+)
+```
+
+`admin_upsert_rate` 集中 → 是 calibration 批量刷新；
+`admin_delete_rate` 应当 ≈ 0（删除等价于 unavailable，谁会真的删）。
+
+### 19.5 推荐告警
+
+| 名称                          | 表达式                                                                                          | for | 说明                                                       |
+| ----------------------------- | ----------------------------------------------------------------------------------------------- | --- | ---------------------------------------------------------- |
+| `BorrowFailOpenHigh`          | `sum(rate(fundai_borrow_events_total{event=~"position_lookup_failed|audit_log_failed|no_calibration"}[15m])) / sum(rate(fundai_borrow_events_total{event=~"check_.*"}[15m])) > 0.01` | 5m  | 借券 gate 失灵；短仓没有 locate 约束                       |
+| `BorrowAccrualMissed`         | `absent_over_time(fundai_borrow_events_total{event="run_completed"}[26h])`                       | 26h | 24h+ 没有跑过一次日终；leader 抢锁失败或调度死循环         |
+| `BorrowRejectsBurst`          | `increase(fundai_borrow_events_total{event=~"check_reject_.*"}[5m]) > 50`                       | 5m  | 5 分钟内 50+ 单短仓被拒；通常是 calibration 突然改成 HTB   |
+| `BorrowCacheRefreshErrors`    | `increase(fundai_borrow_events_total{event="admin_cache_refresh"}[1h])` _without alerting_      |     | 仅用于审计：admin 手动 refresh 次数（不报警，看趋势）      |
+
+### 触发条件
+
+- broker `PlaceOrder` 进入 borrow gate：`check_allow_short / check_allow_no_borrow / check_allow_non_sell / check_reject_*`。
+- borrow gate 内部异常路径：`position_lookup_failed / audit_log_failed / no_calibration`。
+- 日终 loop：`run_completed / scan_failed / scan_row_failed / accrual_booked / accrual_skipped_* / book_failed`。
+- admin REST：`admin_upsert_rate / admin_delete_rate / admin_cache_refresh`。
+
+
+---
+
+## 20. WebSocket 实时行情（S6.5）
+
+### 全部事件名
+
+`fundai_wsfeed_events_total{event="..."}`。
+
+按链路分类：
+
+| 链路 | 事件 |
+| --- | --- |
+| 报价 / 撮合热路径 | `tick_applied`、`quote_cache_hit`、`quote_miss_fallback_ok`、`quote_miss_fallback_err`、`quote_stale_fallback_ok`、`quote_stale_served_on_error` |
+| Provider 生命周期 | `state_connecting`、`state_connected`、`state_reconnecting`、`state_backoff`、`state_disconnected`、`state_closed`、`state_unknown`、`manager_error` |
+| 订阅 bridge | `reconcile_ok`、`reconcile_added`、`reconcile_removed`、`reconcile_query_err`、`reconcile_subscribe_err`、`reconcile_unsubscribe_err` |
+| Admin | `admin_subscribe`、`admin_unsubscribe`、`admin_cache_evict`、`admin_reconcile`、`admin_force_reconnect` |
+
+### 1) WS 是否真的在分担 REST 压力
+
+```promql
+sum(rate(fundai_wsfeed_events_total{event="quote_cache_hit"}[5m]))
+/
+sum(rate(fundai_wsfeed_events_total{event=~"quote_(cache_hit|miss_.*|stale_.*)"}[5m]))
+```
+
+预期：WS 配通后，活跃交易时段命中率 > 80%。低于 50% 通常意味着订阅没追上持仓（看下 `reconcile_added`）或 staleAfter 设得太短。
+
+### 2) Provider 是否健康
+
+```promql
+# 当前每个 provider 的状态（来自 admin /status；这里用 reconnect count 做近似）
+increase(fundai_wsfeed_events_total{event=~"state_(reconnecting|disconnected|backoff)"}[1h])
+```
+
+告警建议：单 provider 1h 内 reconnect ≥ 3 → 翻一下网络 / 上游凭证。
+
+### 3) 同步订阅的 bridge 是不是在干活
+
+```promql
+sum(rate(fundai_wsfeed_events_total{event="reconcile_ok"}[5m]))
+```
+
+bridge 默认每 30s 一次 → 5m 期望 ≈ 10。降到 0 → bridge 没起来（看 startup 日志）。
+
+```promql
+sum(increase(fundai_wsfeed_events_total{event="reconcile_query_err"}[15m]))
+```
+
+DB 抖动会让 reconcile 失败；非 0 时去看 holding_positions 查询性能。
+
+### 4) Fan-out 有没有丢
+
+```promql
+sum(rate(fundai_wsfeed_events_total{event="manager_error"}[15m]))
+```
+
+通常 ≈ 0。> 0 意味着 handler panic（已 recover，但日志里会看到 stack）。
+
+`/api/admin/wsfeed/status` 的 `dropped_events` gauge 也建议接进 Grafana：>0 表示有 handler 太慢吞掉了 inbound channel buffer。
+
+### 5) Stale 服务
+
+```promql
+sum(rate(fundai_wsfeed_events_total{event="quote_stale_served_on_error"}[15m]))
+```
+
+当 REST 也挂掉 + cache 已过期时，broker 会 serve stale price 而不是拒单。这条 > 0 是个软告警：实盘场景下需要评估是否要切到「stale 一定拒单」策略（broker 侧未来可加 flag）。
+
+### 6) 报警阈值清单
+
+| 告警 | 表达式 | 严重度 |
+| --- | --- | --- |
+| WS 完全没在分担 REST | 30 min 命中率 < 5% 且 `total_ticks > 0` | warning |
+| Provider 飞速重连 | `increase(fundai_wsfeed_events_total{event="state_reconnecting"}[10m]) > 5` | warning |
+| Bridge 卡死 | `rate(fundai_wsfeed_events_total{event="reconcile_ok"}[10m]) == 0` 且服务运行 > 5 min | warning |
+| Handler panic | `rate(fundai_wsfeed_events_total{event="manager_error"}[5m]) > 0` | critical |
+| Dropped events 持续上涨 | `delta(<status.dropped_events>[10m]) > 100` | critical |
+
+
+---
+
 ## 附 A. 命名约定备忘
 
 | 前缀                              | 含义                                       |
@@ -539,6 +1246,16 @@ groups:
 | `fundai_marketdata_*`             | Market-data provider 健康 + 位价刷新       |
 | `fundai_corp_action_ingest_*`     | Corp-action 12h 摄入循环（Card G 引入）    |
 | `fundai_ab_shadow_llm_calls_total`| AB shadow B-side LLM 调用计数（Card K-5 引入） |
+| `fundai_cash_ledger_*`            | 基金资金账本写入健康（P1-1 引入）          |
+| `fundai_funding_request_events_total` | 出入金审批生命周期（P1-2 引入）        |
+| `fundai_recon_events_total`       | 日终对账 ingest / run / break / resolve（P1-3 引入） |
+| `fundai_surveillance_events_total`| 交易监控 run / event / severity / review（P1-7 引入）|
+| `fundai_drawdown_events_total`    | 回撤软熔断 check / breach / review / policy（P3-5 引入）|
+| `fundai_marketstatus_events_total`| 市场状态门控 allow / reject / warn / admin（S6.1 引入）|
+| `fundai_marketimpact_events_total`| 大单冲击模型 estimate / bucket / admin（S6.2 引入）|
+| `fundai_lockup_events_total`      | IPO / 受限股 lock-up 门控（S6.3 引入）              |
+| `fundai_borrow_events_total`      | 借券 locate gate + 日终计费（S6.4 引入）             |
+| `fundai_lot_ledger_failures_total`| FIFO lot ledger 写入失败（Phase 3A-1 引入）|
 
 ## 附 B. 后续可加的指标 (TODO)
 

@@ -20,6 +20,7 @@ import { I18nextProvider } from 'react-i18next';
 import { i18n } from './i18n';
 import HomeScreen from './screens/HomeScreen';
 import DecisionsScreen from './screens/DecisionsScreen';
+import OrdersScreen from './screens/OrdersScreen';
 import MemoryScreen from './screens/MemoryScreen';
 import TeamScreen from './screens/TeamScreen';
 import MoreScreen from './screens/MoreScreen';
@@ -48,6 +49,7 @@ function MainTabs(): JSX.Element {
     >
       <Tab.Screen name="Home" component={HomeScreen} options={{ title: i18n.t('tabs.home') }} />
       <Tab.Screen name="Decisions" component={DecisionsScreen} options={{ title: i18n.t('tabs.decisions') }} />
+      <Tab.Screen name="Orders" component={OrdersScreen} options={{ title: i18n.t('tabs.orders') }} />
       <Tab.Screen name="Memory" component={MemoryScreen} options={{ title: i18n.t('tabs.memory') }} />
       <Tab.Screen name="Team" component={TeamScreen} options={{ title: i18n.t('tabs.team') }} />
       <Tab.Screen name="More" component={MoreScreen} options={{ title: i18n.t('tabs.more') }} />

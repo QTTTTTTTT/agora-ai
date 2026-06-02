@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { apiGet, apiPut, formatApiError } from "../lib/api";
 import { formatMoneyForDisplay, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
+import BrokerLinksSection from "../components/BrokerLinksSection";
+import FundingSection from "../components/FundingSection";
+import FundBaseCurrencySection from "../components/FundBaseCurrencySection";
 
 type TradingMode = "simulation" | "live" | "paper";
 type FundStatus = "active" | "paused" | "closed";
@@ -1305,6 +1308,29 @@ const FundSettings: React.FC = () => {
           </div>
         </aside>
       </div>
+
+      {fundId ? (
+        <BrokerLinksSection
+          fundId={fundId}
+          language={language}
+          defaultExpanded={fund.tradingMode === "live"}
+        />
+      ) : null}
+      {fundId ? (
+        <FundBaseCurrencySection
+          fundId={fundId}
+          currentBaseCurrency={fund.baseCurrency || "USD"}
+          language={language}
+          onSaved={(next) => setFund((f) => (f ? { ...f, baseCurrency: next } : f))}
+        />
+      ) : null}
+      {fundId ? (
+        <FundingSection
+          fundId={fundId}
+          language={language}
+          defaultExpanded={fund.tradingMode === "live"}
+        />
+      ) : null}
     </div>
   );
 };

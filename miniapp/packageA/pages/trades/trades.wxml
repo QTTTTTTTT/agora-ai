@@ -20,6 +20,12 @@
     </view>
   </view>
 
+  <!-- P0-5 操作反馈 -->
+  <view wx:if="{{actionMessage}}" class="action-banner banner-{{actionMessage.tone}}" bindtap="onDismissActionMessage">
+    <text>{{actionMessage.text}}</text>
+    <text class="banner-close">×</text>
+  </view>
+
   <!-- 交易统计 -->
   <view class="stats-bar">
     <view class="stat-item">
@@ -82,6 +88,11 @@
           <text class="detail-label">子订单数</text>
           <text class="detail-value">{{item.subOrders}}</text>
         </view>
+        <!-- P0-5 — 仅在订单仍可改/撤时渲染按钮。已成交/已取消等终态隐藏。 -->
+        <view class="detail-actions" wx:if="{{item.canModify}}">
+          <button class="action-btn action-replace" size="mini" loading="{{busyOrderId === item.id}}" disabled="{{busyOrderId && busyOrderId !== item.id}}" bindtap="onOpenReplace" data-id="{{item.id}}">改单</button>
+          <button class="action-btn action-cancel" size="mini" loading="{{busyOrderId === item.id}}" disabled="{{busyOrderId && busyOrderId !== item.id}}" bindtap="onCancelOrder" data-id="{{item.id}}">取消订单</button>
+        </view>
       </view>
     </view>
 
@@ -99,6 +110,51 @@
     <view class="bottom-stat">
       <text class="bottom-label">总手续费</text>
       <text class="bottom-value">¥{{totalFees}}</text>
+    </view>
+  </view>
+
+  <!-- P0-5 改单弹窗 — 仅修改的字段会发送给服务端，空字段不传，服务端
+       负责拒绝全空 payload / quantity < filledQty 等非法情况。 -->
+  <view wx:if="{{replaceVisible}}" class="modal-mask" catchtap="onCloseReplace">
+    <view class="modal-card" catchtap="">
+      <view class="modal-header">
+        <text class="modal-title">修改订单 {{replaceForm.stockCode}}</text>
+        <text class="modal-close" bindtap="onCloseReplace">×</text>
+      </view>
+      <view class="modal-body">
+        <view class="modal-row">
+          <text class="modal-label">数量</text>
+          <input class="modal-input" type="digit" value="{{replaceForm.quantity}}" placeholder="保留则不修改" data-field="quantity" bindinput="onReplaceFieldInput" />
+        </view>
+        <view class="modal-row">
+          <text class="modal-label">限价</text>
+          <input class="modal-input" type="digit" value="{{replaceForm.limitPrice}}" placeholder="保留则不修改" data-field="limitPrice" bindinput="onReplaceFieldInput" />
+        </view>
+        <view class="modal-row">
+          <text class="modal-label">止损价</text>
+          <input class="modal-input" type="digit" value="{{replaceForm.stopPrice}}" placeholder="可空" data-field="stopPrice" bindinput="onReplaceFieldInput" />
+        </view>
+        <view class="modal-row">
+          <text class="modal-label">移动止损 ¥</text>
+          <input class="modal-input" type="digit" value="{{replaceForm.trailAmount}}" placeholder="可空" data-field="trailAmount" bindinput="onReplaceFieldInput" />
+        </view>
+        <view class="modal-row">
+          <text class="modal-label">移动止损 %</text>
+          <input class="modal-input" type="digit" value="{{replaceForm.trailPercent}}" placeholder="可空" data-field="trailPercent" bindinput="onReplaceFieldInput" />
+        </view>
+        <view class="modal-row">
+          <text class="modal-label">显露数量</text>
+          <input class="modal-input" type="digit" value="{{replaceForm.displayQty}}" placeholder="iceberg 才有" data-field="displayQty" bindinput="onReplaceFieldInput" />
+        </view>
+        <view class="modal-row">
+          <text class="modal-label">备注</text>
+          <input class="modal-input" value="{{replaceForm.note}}" placeholder="可空" data-field="note" bindinput="onReplaceFieldInput" />
+        </view>
+      </view>
+      <view class="modal-actions">
+        <button class="modal-btn modal-cancel" size="mini" bindtap="onCloseReplace">取消</button>
+        <button class="modal-btn modal-confirm" size="mini" type="primary" loading="{{busyOrderId === replaceForm.id}}" bindtap="onSubmitReplace">提交修改</button>
+      </view>
     </view>
   </view>
 </view>
