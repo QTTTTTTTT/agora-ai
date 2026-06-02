@@ -47,6 +47,7 @@ import (
 	"github.com/fundai/server/internal/marketcalendar"
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketplace"
+	"github.com/fundai/server/internal/modelab"
 	"github.com/fundai/server/internal/newsrecall"
 	"github.com/fundai/server/internal/ohlc"
 	"github.com/fundai/server/internal/pairspread"
@@ -231,6 +232,7 @@ type llmRuntime struct {
 	budgetService       *subscription.BudgetService
 	metrics             *serverMetrics
 	systemAPIKeys       map[llm.Provider]string
+	tierDefaults        map[llm.ModelTier]*llm.ModelConfig
 	syncedUsers         map[string]struct{}
 	// agentRepo is the SECOND source of truth for an agent's model
 	// preference. The router previously only honoured user_model_configs
@@ -241,6 +243,13 @@ type llmRuntime struct {
 	// default provider. Set via SetAgentRepo before any SyncAll call.
 	// nil = legacy behaviour (test wiring).
 	agentRepo agentModelLister
+
+	// modelABResolver is the Sprint 10.1 model A/B hook source.
+	// AttachModelABResolver installs it on the router; storing
+	// the resolver here lets the admin handlers invalidate the
+	// cache when an experiment's status flips. nil = no model
+	// A/B (legacy / tests without DB).
+	modelABResolver *modelab.Resolver
 }
 
 // agentModelLister narrows repository.AgentRepo to the two methods
@@ -258,6 +267,41 @@ func (r *llmRuntime) SetAgentRepo(repo agentModelLister) {
 		return
 	}
 	r.agentRepo = repo
+}
+
+// AttachModelABResolver wires the Sprint 10.1 model A/B engine
+// onto the router so every Chat() call passes through the
+// resolver before falling back to per-user / per-agent defaults.
+//
+// Safe to call before or after SyncAll, but should be called
+// AFTER the router exists (i.e. after newLLMRuntime returns).
+// A nil resolver detaches any previously attached hook so tests
+// can swap implementations cleanly.
+func (r *llmRuntime) AttachModelABResolver(resolver *modelab.Resolver) {
+	if r == nil || r.router == nil {
+		return
+	}
+	r.modelABResolver = resolver
+	if resolver == nil {
+		r.router.SetModelABHook(nil)
+		return
+	}
+	hc := modelab.HookContext{
+		SystemAPIKeys: r.systemAPIKeys,
+		TierDefaults:  r.tierDefaults,
+	}
+	r.router.SetModelABHook(resolver.AsLLMHook(hc))
+}
+
+// ModelABResolver returns the currently attached resolver. Used
+// by the admin CRUD handlers to invalidate the cache after a
+// status change (start / pause / complete). Returns nil when no
+// resolver has been attached.
+func (r *llmRuntime) ModelABResolver() *modelab.Resolver {
+	if r == nil {
+		return nil
+	}
+	return r.modelABResolver
 }
 
 type llmEffectivePlan struct {
@@ -369,6 +413,7 @@ func newLLMRuntime(ctx context.Context, modelConfigs *subscription.ModelConfigSe
 		subscriptionService: subscriptionService,
 		metrics:             metrics,
 		systemAPIKeys:       systemKeys,
+		tierDefaults:        defaultModels,
 		syncedUsers:         make(map[string]struct{}),
 	}
 	router := llm.NewModelRouter(systemKeys, defaultModels, newUsageRecorderAdapter(usageTracker), runtime)
@@ -15039,9 +15084,18 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	recentLessons := a.collectRecentLessonContexts(ctx, fundID, tradingDate)
 	longTermReflections := a.collectLongTermReflectionContexts(ctx, fundID, tradingDate)
 
+	// Sprint 10.1 — model A/B sticky key. We use (fund × trading
+	// date) so a single daily run keeps all its LLM calls on the
+	// same arm. If the orchestrator gains an explicit workflow
+	// run id we can swap this for that, but until then this
+	// gives identical stickiness because PM decisions run at
+	// most once per fund per trading day in production.
+	runIDForAB := fundID + ":" + tradingDate.Format("2006-01-02")
+
 	input := decision.DecisionInput{
 		FundID:              fundID,
 		TradingDate:         tradingDate,
+		RunID:               runIDForAB,
 		Market:              profile.Market,
 		BaseCurrency:        profile.BaseCurrency,
 		PrimaryDirection:    profile.PrimaryDirection,

@@ -47,6 +47,7 @@ import (
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketimpact"
 	"github.com/fundai/server/internal/marketplace"
+	"github.com/fundai/server/internal/modelab"
 	"github.com/fundai/server/internal/promotion"
 	"github.com/fundai/server/internal/recall"
 	"github.com/fundai/server/internal/drawdown"
@@ -721,6 +722,15 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		usageTracker.Stop()
 		return nil, fmt.Errorf("llm runtime: resync after agentRepo wiring: %w", err)
 	}
+
+	// Sprint 10.1 — model-level A/B routing. The router now
+	// consults a modelab.Resolver before falling through to the
+	// per-user / per-agent priority chain. When no experiment
+	// matches the (fund, agent, role, step) tuple the hook
+	// returns nil and the router behaves exactly as before.
+	modelABRepo := modelab.NewRepo(db)
+	modelABResolver := modelab.NewResolver(modelABRepo)
+	llmRuntime.AttachModelABResolver(modelABResolver)
 
 	marketDataService := marketdata.NewService(cfg.MarketData).WithTranslator(marketdata.NewTranslator(cfg.NewsTranslator))
 	// Boot the Binance / Coinbase websocket streamers (no-op when

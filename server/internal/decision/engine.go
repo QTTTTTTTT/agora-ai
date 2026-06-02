@@ -546,6 +546,15 @@ type DecisionInput struct {
 	TraderProposal string
 	RiskAssessment string
 
+	// Sprint 10.1 — model A/B routing. RunID is the stable
+	// per-workflow identifier (typically workflow_run.id +
+	// trading_date) the modelab Resolver uses as the sticky-arm
+	// key. Empty RunID degrades stickiness but the engine still
+	// runs; non-empty value lets a multi-call decision flow
+	// (Trader.Propose → Risk.Assess → PM.FinalApprove) all land
+	// in the same A/B arm so the comparison stays clean.
+	RunID string
+
 	// IntradaySnapshots is the Sprint 3 / L1 soft signal block — one
 	// row per symbol in the candidate universe. Trend direction +
 	// vol-z + vol-ratio per symbol; the PM reasons about timing while

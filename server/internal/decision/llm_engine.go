@@ -106,6 +106,8 @@ func (e *LLMDecisionEngine) Decide(ctx context.Context, input DecisionInput) (*D
 		AgentID:     agentID,
 		StepName:    e.StepName,
 		FundID:      e.FundID,
+		AgentRole:   "pm",
+		RunID:       input.RunID,
 	}
 
 	resp, err := e.Client.Chat(ctx, req)

@@ -100,6 +100,13 @@ type ModelRouter struct {
 	// 用量记录器（可选，为 nil 时跳过记录）。
 	usageRecorder UsageRecorder
 	guard         SubscriptionGuard
+
+	// Sprint 10.1 — model A/B hook. When non-nil it is invoked
+	// after the explicit req.Model check (so manual model pins
+	// remain forensic) and before any user / agent override
+	// resolution (so operator-initiated experiments override
+	// user defaults within their scope). nil = no A/B routing.
+	modelABHook ModelABHook
 }
 
 // NewModelRouter 创建 ModelRouter。
@@ -172,6 +179,22 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		}
 		// 找不到具体模型，记录警告并继续用 tier 路由
 		log.Printf("[llm/router] model %q not found, falling back to tier routing", req.Model)
+	}
+
+	// --- 1.5. Sprint 10.1 — model A/B routing hook ---
+	// The hook is invoked with the router's read lock held. Its
+	// implementation (modelab.Resolver) does its own DB work and
+	// owns a separate mutex, so there is no cycle. The contract
+	// is: a ModelABHook MUST NOT call back into ModelRouter
+	// write methods (SetUserOverride, ReplaceAgentConfigs, …)
+	// from inside this hook — doing so would dead-lock against
+	// the read lock we hold here.
+	if hook := r.modelABHook; hook != nil {
+		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
+			cfg := decision.Config.Clone()
+			r.ensureAPIKey(cfg, owner)
+			return r.finalizeConfig(ctx, req, tier, cfg)
+		}
 	}
 
 	// --- 2. Agent 默认模型配置 ---

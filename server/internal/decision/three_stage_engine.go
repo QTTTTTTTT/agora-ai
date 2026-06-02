@@ -194,6 +194,8 @@ func (e *ThreeStageEngine) runProposalStage(ctx context.Context, input DecisionI
 		AgentID:     e.agentID(input),
 		StepName:    e.StepName + ".trader_propose",
 		FundID:      e.FundID,
+		AgentRole:   "trader",
+		RunID:       input.RunID,
 	}
 	resp, err := e.Client.Chat(stageCtx, req)
 	if err != nil {
@@ -225,6 +227,8 @@ func (e *ThreeStageEngine) runAssessmentStage(ctx context.Context, input Decisio
 		AgentID:     e.agentID(input),
 		StepName:    e.StepName + ".risk_assess",
 		FundID:      e.FundID,
+		AgentRole:   "risk",
+		RunID:       input.RunID,
 	}
 	resp, err := e.Client.Chat(stageCtx, req)
 	if err != nil {

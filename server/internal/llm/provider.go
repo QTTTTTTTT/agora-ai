@@ -116,6 +116,23 @@ type ChatRequest struct {
 	FundID      string        `json:"fund_id"`     // 关联基金
 	StepName    string        `json:"step_name"`   // 工作流步骤名
 
+	// Sprint 10.1 — model A/B routing inputs.
+	//
+	// AgentRole is the canonical role string (pm / risk / trader /
+	// researcher / sentiment_analyst …) the model A/B resolver
+	// matches against ScopeAgentRole experiments. Empty is fine —
+	// agent_role-scoped experiments simply don't fire.
+	//
+	// RunID is the workflow run identifier (typically
+	// workflow_run.id × trading_date). It is the sticky-arm key
+	// for any (experiment, step, agent) tuple inside this run.
+	// Empty RunID still works — the resolver falls back to a
+	// per-call deterministic hash — but stickiness across multi-
+	// call workflows is then lost, which contaminates the A vs B
+	// comparison. Callers SHOULD supply a stable, run-scoped key.
+	AgentRole string `json:"agent_role,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+
 	// OwnerID 是为本次调用承担成本/配额的用户。
 	// 多数情况下等于 UserID；但在 marketplace 黑盒推理等场景下，
 	// 调用者(UserID) 可能租用了其他人发布的策略，
