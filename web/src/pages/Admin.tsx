@@ -24,6 +24,7 @@ import AdminBorrowSection from "../components/AdminBorrowSection";
 import AdminDrawdownSection from "../components/AdminDrawdownSection";
 import AdminFactorExposureSection from "../components/AdminFactorExposureSection";
 import AdminStressScenariosSection from "../components/AdminStressScenariosSection";
+import AdminBrinsonCompositionsSection from "../components/AdminBrinsonCompositionsSection";
 import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
@@ -1210,6 +1211,8 @@ const Admin: React.FC = () => {
           <AdminFactorExposureSection language={language} />
 
           <AdminStressScenariosSection language={language} />
+
+          <AdminBrinsonCompositionsSection language={language} />
 
           <AdminWSFeedSection language={language} />
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
+	"github.com/fundai/server/internal/brinson"
 	"github.com/fundai/server/internal/factorexposure"
 	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/marketdata"
@@ -96,6 +97,11 @@ type adminHandler struct {
 	// scenarios library. nil → registration short-circuits and
 	// the admin / per-fund stress endpoints respond 503.
 	stressRepo *stress.Repo
+
+	// brinsonRepo backs the S7 / P3-4 Brinson attribution
+	// composition library. nil → registration short-circuits and
+	// the admin / per-fund Brinson endpoints respond 503.
+	brinsonRepo *brinson.Repo
 
 	// wsFeedManager / wsFeedCache / wsFeedBridge back the S6.5
 	// WebSocket-real-time market-data admin endpoints
@@ -250,6 +256,8 @@ func newAdminHandler(svc *Services) *adminHandler {
 
 		stressRepo: svc.StressRepo,
 
+		brinsonRepo: svc.BrinsonRepo,
+
 		wsFeedManager: svc.WSFeedManager,
 		wsFeedCache:   svc.WSFeedCache,
 		wsFeedBridge:  svc.WSFeedBridge,
@@ -321,6 +329,8 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerFactorExposureAdminRoutes(mux)
 	// S7 / P3-3 — admin-managed stress scenarios library.
 	h.registerStressAdminRoutes(mux)
+	// S7 / P3-4 — Brinson benchmark composition library.
+	h.registerBrinsonAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

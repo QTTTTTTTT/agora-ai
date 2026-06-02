@@ -868,6 +868,61 @@ export interface Messages {
     targetFactor: string;
     targetWildcard: string;
   };
+  brinsonAttribution: {
+    panelTitle: string;
+    panelSubtitle: string;
+    runButton: string;
+    running: string;
+    benchmarkLabel: string;
+    benchmarkPlaceholder: string;
+    dimensionLabel: string;
+    dimensionAssetClass: string;
+    dimensionMarket: string;
+    dimensionSector: string;
+    benchmarkEmpty: string;
+    portfolioReturn: string;
+    benchmarkReturn: string;
+    activeReturn: string;
+    allocationEffect: string;
+    selectionEffect: string;
+    interactionEffect: string;
+    totalEffect: string;
+    decompositionTitle: string;
+    bucketsTitle: string;
+    bucketsEmpty: string;
+    colBucket: string;
+    colPortfolioWeight: string;
+    colBenchmarkWeight: string;
+    colPortfolioReturn: string;
+    colBenchmarkReturn: string;
+    colAllocation: string;
+    colSelection: string;
+    colInteraction: string;
+    colTotal: string;
+    persistLabel: string;
+    error: string;
+    noPortfolioHoldings: string;
+    compositionNotFound: string;
+    sectorUnsupported: string;
+    asofLabel: string;
+    adminPanelTitle: string;
+    adminPanelSubtitle: string;
+    adminListTitle: string;
+    adminListEmpty: string;
+    adminUpsertTitle: string;
+    adminUpsertSubmit: string;
+    adminUpsertSubmitting: string;
+    adminDeleteButton: string;
+    adminDeleteConfirm: string;
+    adminBucketKey: string;
+    adminBucketWeight: string;
+    adminBucketReturn: string;
+    adminAddBucket: string;
+    adminRemoveBucket: string;
+    adminBenchmarkId: string;
+    adminAsof: string;
+    adminNote: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -1827,6 +1882,61 @@ export const messages: Record<LocaleId, Messages> = {
       targetAssetClass: '资产类别级',
       targetFactor: '因子级',
       targetWildcard: '通配（全部持仓）',
+    },
+    brinsonAttribution: {
+      panelTitle: 'Brinson 业绩归因',
+      panelSubtitle: '将组合相对基准的超额收益拆解为配置效应、选股效应和交互效应。先在管理员后台维护基准成分（每个分桶的权重和收益），再在此面板按资产类别 / 市场维度运行归因。',
+      runButton: '运行归因',
+      running: '计算中…',
+      benchmarkLabel: '基准',
+      benchmarkPlaceholder: '选择基准…',
+      dimensionLabel: '分桶维度',
+      dimensionAssetClass: '资产类别',
+      dimensionMarket: '市场',
+      dimensionSector: '行业（暂未支持）',
+      benchmarkEmpty: '尚未配置基准成分，请联系管理员到 brinson_benchmark_compositions 后台添加',
+      portfolioReturn: '组合收益',
+      benchmarkReturn: '基准收益',
+      activeReturn: '主动收益',
+      allocationEffect: '配置效应',
+      selectionEffect: '选股效应',
+      interactionEffect: '交互效应',
+      totalEffect: '合计效应',
+      decompositionTitle: '三效应分解',
+      bucketsTitle: '分桶明细',
+      bucketsEmpty: '暂无分桶明细',
+      colBucket: '分桶',
+      colPortfolioWeight: '组合权重',
+      colBenchmarkWeight: '基准权重',
+      colPortfolioReturn: '组合收益',
+      colBenchmarkReturn: '基准收益',
+      colAllocation: '配置',
+      colSelection: '选股',
+      colInteraction: '交互',
+      colTotal: '合计',
+      persistLabel: '存档此次归因',
+      error: '归因运行失败',
+      noPortfolioHoldings: '当前持仓在所选维度上没有有效分类',
+      compositionNotFound: '未找到该基准的成分数据',
+      sectorUnsupported: '行业维度需要先维护持仓的行业分类，暂未支持',
+      asofLabel: '截至日期',
+      adminPanelTitle: 'Brinson 基准成分库',
+      adminPanelSubtitle: '维护 brinson_benchmark_compositions 表。每个 (benchmark_id, dimension, asof) 一行，buckets JSONB 数组里每个分桶 (key, weight, return_pct) 表示基准在该桶里的权重和当期收益。',
+      adminListTitle: '当前成分',
+      adminListEmpty: '暂无基准成分，请新增',
+      adminUpsertTitle: '新增 / 更新基准成分',
+      adminUpsertSubmit: '保存',
+      adminUpsertSubmitting: '保存中…',
+      adminDeleteButton: '删除',
+      adminDeleteConfirm: '确认删除该基准成分？会级联清理引用它的归因快照。',
+      adminBucketKey: '分桶 Key',
+      adminBucketWeight: '权重 (0-1)',
+      adminBucketReturn: '收益 (e.g. 0.05)',
+      adminAddBucket: '+ 添加分桶',
+      adminRemoveBucket: '删除',
+      adminBenchmarkId: '基准 ID',
+      adminAsof: '截至日期',
+      adminNote: '备注',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -2796,6 +2906,61 @@ export const messages: Record<LocaleId, Messages> = {
       targetAssetClass: 'Asset class',
       targetFactor: 'Factor',
       targetWildcard: 'Wildcard (all holdings)',
+    },
+    brinsonAttribution: {
+      panelTitle: 'Brinson Attribution',
+      panelSubtitle: 'Decompose active return (portfolio − benchmark) into allocation, selection and interaction effects per bucket. Admin maintains the benchmark composition; the fund-level runner derives the portfolio side from live holdings.',
+      runButton: 'Run attribution',
+      running: 'Running…',
+      benchmarkLabel: 'Benchmark',
+      benchmarkPlaceholder: 'Pick a benchmark…',
+      dimensionLabel: 'Dimension',
+      dimensionAssetClass: 'Asset class',
+      dimensionMarket: 'Market',
+      dimensionSector: 'Sector (not yet supported)',
+      benchmarkEmpty: 'No benchmark compositions available — ask an admin to seed brinson_benchmark_compositions',
+      portfolioReturn: 'Portfolio return',
+      benchmarkReturn: 'Benchmark return',
+      activeReturn: 'Active return',
+      allocationEffect: 'Allocation effect',
+      selectionEffect: 'Selection effect',
+      interactionEffect: 'Interaction effect',
+      totalEffect: 'Total effect',
+      decompositionTitle: 'Three-effect decomposition',
+      bucketsTitle: 'Per-bucket detail',
+      bucketsEmpty: 'No bucket detail',
+      colBucket: 'Bucket',
+      colPortfolioWeight: 'Port. wt',
+      colBenchmarkWeight: 'Bench. wt',
+      colPortfolioReturn: 'Port. ret',
+      colBenchmarkReturn: 'Bench. ret',
+      colAllocation: 'Allocation',
+      colSelection: 'Selection',
+      colInteraction: 'Interaction',
+      colTotal: 'Total',
+      persistLabel: 'Archive this run',
+      error: 'Attribution failed',
+      noPortfolioHoldings: 'No holdings carry the requested dimension',
+      compositionNotFound: 'Composition not found for the chosen benchmark',
+      sectorUnsupported: 'Sector dimension requires holding-level sector classification (not yet wired)',
+      asofLabel: 'As of',
+      adminPanelTitle: 'Brinson benchmark compositions',
+      adminPanelSubtitle: 'Maintain brinson_benchmark_compositions. One row per (benchmark_id, dimension, asof). Buckets JSONB array holds {key, weight, return_pct} where weight is a fraction (sum ≈ 1).',
+      adminListTitle: 'Current compositions',
+      adminListEmpty: 'No compositions yet',
+      adminUpsertTitle: 'Add / update composition',
+      adminUpsertSubmit: 'Save',
+      adminUpsertSubmitting: 'Saving…',
+      adminDeleteButton: 'Delete',
+      adminDeleteConfirm: 'Delete this composition? Archived attribution snapshots that reference it will be cascade-deleted.',
+      adminBucketKey: 'Bucket key',
+      adminBucketWeight: 'Weight (0–1)',
+      adminBucketReturn: 'Return (e.g. 0.05)',
+      adminAddBucket: '+ Add bucket',
+      adminRemoveBucket: 'Remove',
+      adminBenchmarkId: 'Benchmark ID',
+      adminAsof: 'As-of date',
+      adminNote: 'Note',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',

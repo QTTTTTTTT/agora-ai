@@ -1600,6 +1600,101 @@ export interface StressResult {
   impacts: StressImpact[];
 }
 
+// ---- Brinson attribution (S7 / P3-4) ------------------------------
+// Decomposes a fund's active return vs benchmark into three effects
+// per bucket: allocation, selection, interaction.
+
+// BucketDimension picks the grouping axis for both portfolio and
+// benchmark compositions. "sector" is reserved for a future
+// sector-classification table and may return an empty portfolio
+// composition today.
+export type BrinsonBucketDimension = "asset_class" | "market" | "sector";
+
+export const ALL_BRINSON_DIMENSIONS: readonly BrinsonBucketDimension[] = [
+  "asset_class",
+  "market",
+  "sector",
+];
+
+// BrinsonBucket is one (key, weight, return_pct) row inside a
+// composition. Weights are fractions summing to ~1.
+export interface BrinsonBucket {
+  key: string;
+  weight: number;
+  return_pct: number;
+}
+
+// BrinsonComposition is an admin-managed benchmark composition row.
+export interface BrinsonComposition {
+  id: string;
+  benchmark_id: string;
+  dimension: BrinsonBucketDimension;
+  asof: string; // YYYY-MM-DD
+  buckets: BrinsonBucket[];
+  note?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// BrinsonBenchmarkSummary is the deduped catalog row returned to
+// fund operators (just the metadata they need to pick one).
+export interface BrinsonBenchmarkSummary {
+  benchmark_id: string;
+  dimension: BrinsonBucketDimension;
+  latest_asof: string;
+}
+
+// BrinsonBucketAttribution is the per-bucket output row.
+export interface BrinsonBucketAttribution {
+  key: string;
+  portfolio_weight: number;
+  benchmark_weight: number;
+  portfolio_return: number;
+  benchmark_return: number;
+  allocation: number;
+  selection: number;
+  interaction: number;
+  total_effect: number;
+}
+
+// BrinsonResult is the engine's full output for one run.
+export interface BrinsonResult {
+  fund_id: string;
+  benchmark_id: string;
+  dimension: BrinsonBucketDimension;
+  composition_id?: string;
+  calculated_at: string;
+  portfolio_return: number;
+  benchmark_return: number;
+  active_return: number;
+  allocation_total: number;
+  selection_total: number;
+  interaction_total: number;
+  bucket_count: number;
+  buckets: BrinsonBucketAttribution[];
+}
+
+// BrinsonHistoryEntry is one archived run as returned by
+// /brinson/history. Buckets are optional because thin trend rows
+// might choose to omit them in a future API revision.
+export interface BrinsonHistoryEntry {
+  id: number;
+  fund_id: string;
+  benchmark_id: string;
+  dimension: BrinsonBucketDimension;
+  composition_id: string;
+  calculated_at: string;
+  active_return: number;
+  portfolio_return: number;
+  benchmark_return: number;
+  allocation_total: number;
+  selection_total: number;
+  interaction_total: number;
+  bucket_count: number;
+  buckets?: BrinsonBucketAttribution[];
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

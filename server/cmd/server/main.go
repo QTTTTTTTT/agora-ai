@@ -33,6 +33,7 @@ import (
 
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
+	"github.com/fundai/server/internal/brinson"
 	"github.com/fundai/server/internal/broker"
 	"github.com/fundai/server/internal/factorexposure"
 	"github.com/fundai/server/internal/stress"
@@ -581,6 +582,9 @@ type Services struct {
 	// StressRepo backs S7 / P3-3 stress-scenario CRUD and the
 	// per-fund stress runner. nil-safe.
 	StressRepo             *stress.Repo
+	// BrinsonRepo backs S7 / P3-4 Brinson benchmark composition
+	// CRUD and the per-fund Brinson runner. nil-safe.
+	BrinsonRepo            *brinson.Repo
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -820,6 +824,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		BorrowCache:         borrowCache,
 		FactorExposureRepo:  factorexposure.NewRepo(db),
 		StressRepo:          stress.NewRepo(db),
+		BrinsonRepo:         brinson.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
 		WSFeedCache:         wsFeedCache,
@@ -1224,6 +1229,13 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// P&L plus per-holding contributions.
 	if sh := newStressHandler(svc); sh != nil {
 		sh.RegisterRoutes(mux)
+	}
+
+	// S7 / P3-4 — per-fund Brinson attribution runner +
+	// authenticated benchmark catalog. Admin CRUD for benchmark
+	// compositions sits on adminHandler.registerBrinsonAdminRoutes.
+	if bh := newBrinsonHandler(svc); bh != nil {
+		bh.RegisterRoutes(mux)
 	}
 
 	// ---- SPA fallback: serve React static files ----

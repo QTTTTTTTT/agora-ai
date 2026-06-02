@@ -31,6 +31,7 @@ import {
 import FactorExposurePanel from "../components/FactorExposurePanel";
 import VaRPanel from "../components/VaRPanel";
 import StressTestPanel from "../components/StressTestPanel";
+import BrinsonAttributionPanel from "../components/BrinsonAttributionPanel";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
 
 // PR-3A9: a dedicated /funds/:id/performance route that compresses
@@ -772,6 +773,11 @@ const FundPerformance: React.FC = () => {
           scenario (historical / hypothetical / regulatory) and
           project its shocks onto the current portfolio. */}
       <StressTestPanel fundId={fundId} language={language} />
+
+      {/* S7 / P3-4 — Brinson three-effect attribution. Decompose
+          active return vs an admin-maintained benchmark into
+          allocation / selection / interaction effects per bucket. */}
+      <BrinsonAttributionPanel fundId={fundId} language={language} />
     </div>
   );
 };

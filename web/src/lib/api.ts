@@ -2422,6 +2422,128 @@ export async function listStressScenariosForFund(opts: {
 }
 
 // ---------------------------------------------------------------------------
+// Brinson attribution (S7 / P3-4)
+// ---------------------------------------------------------------------------
+
+export type {
+  BrinsonBucketDimension,
+  BrinsonBucket,
+  BrinsonComposition,
+  BrinsonBenchmarkSummary,
+  BrinsonBucketAttribution,
+  BrinsonResult,
+  BrinsonHistoryEntry,
+} from "@fundai/api-client";
+export {
+  ALL_BRINSON_DIMENSIONS,
+} from "@fundai/api-client";
+
+// Admin: list benchmark compositions.
+export async function listAdminBrinsonCompositions(opts: {
+  benchmarkId?: string;
+  dimension?: import("@fundai/api-client").BrinsonBucketDimension;
+  limit?: number;
+} = {}): Promise<{
+  compositions: import("@fundai/api-client").BrinsonComposition[];
+  dimensions: import("@fundai/api-client").BrinsonBucketDimension[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.benchmarkId) qs.set("benchmarkId", opts.benchmarkId);
+  if (opts.dimension) qs.set("dimension", opts.dimension);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    compositions: import("@fundai/api-client").BrinsonComposition[];
+    dimensions: import("@fundai/api-client").BrinsonBucketDimension[];
+  }>(`/api/admin/brinson-compositions${tail}`);
+}
+
+export interface UpsertBrinsonCompositionInput {
+  benchmark_id: string;
+  dimension: import("@fundai/api-client").BrinsonBucketDimension;
+  asof: string; // YYYY-MM-DD
+  buckets: import("@fundai/api-client").BrinsonBucket[];
+  note?: string;
+}
+
+export async function upsertAdminBrinsonComposition(
+  input: UpsertBrinsonCompositionInput,
+): Promise<{ composition: import("@fundai/api-client").BrinsonComposition }> {
+  return apiPost<{
+    composition: import("@fundai/api-client").BrinsonComposition;
+  }>(`/api/admin/brinson-compositions`, input);
+}
+
+export async function deleteAdminBrinsonComposition(
+  id: string,
+): Promise<{ deleted: boolean }> {
+  return apiDelete<{ deleted: boolean }>(
+    `/api/admin/brinson-compositions/${encodeURIComponent(id)}`,
+  );
+}
+
+// Catalog of saved benchmarks for fund operators. Authenticated
+// users only — admins still own the mutations.
+export async function listBrinsonBenchmarksForFund(): Promise<{
+  benchmarks: import("@fundai/api-client").BrinsonBenchmarkSummary[];
+  dimensions: import("@fundai/api-client").BrinsonBucketDimension[];
+}> {
+  return apiGet<{
+    benchmarks: import("@fundai/api-client").BrinsonBenchmarkSummary[];
+    dimensions: import("@fundai/api-client").BrinsonBucketDimension[];
+  }>(`/api/brinson/benchmarks`);
+}
+
+// Per-fund Brinson run. POST so it's never cached.
+// Note: the api-contract validator's inferMethod only scans the
+// 2 lines above each URL literal, so we keep apiPost< T > and
+// the URL on adjacent lines here.
+export interface BrinsonRunResponse {
+  result: import("@fundai/api-client").BrinsonResult;
+  composition_id: string;
+  persist_error?: string;
+}
+export async function runFundBrinsonAttribution(
+  fundId: string,
+  opts: {
+    benchmarkId: string;
+    dimension: import("@fundai/api-client").BrinsonBucketDimension;
+    compositionId?: string;
+    asof?: string;
+    persist?: boolean;
+  },
+): Promise<BrinsonRunResponse> {
+  return apiPost<BrinsonRunResponse>(`/api/funds/${encodeURIComponent(fundId)}/brinson/run`,
+    {
+      benchmark_id: opts.benchmarkId,
+      dimension: opts.dimension,
+      composition_id: opts.compositionId,
+      asof: opts.asof,
+      persist: !!opts.persist,
+    });
+}
+
+export async function fetchFundBrinsonHistory(
+  fundId: string,
+  opts: {
+    benchmarkId?: string;
+    dimension?: import("@fundai/api-client").BrinsonBucketDimension;
+    limit?: number;
+  } = {},
+): Promise<{
+  results: import("@fundai/api-client").BrinsonHistoryEntry[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.benchmarkId) qs.set("benchmarkId", opts.benchmarkId);
+  if (opts.dimension) qs.set("dimension", opts.dimension);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    results: import("@fundai/api-client").BrinsonHistoryEntry[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/brinson/history${tail}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 
