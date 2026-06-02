@@ -21,6 +21,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fundai/server/internal/agentreputation"
+	"github.com/fundai/server/internal/alphalesson"
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/attribution"
 	"github.com/fundai/server/internal/audit"
@@ -1123,6 +1125,14 @@ type workflowServiceAdapter struct {
 	// checks both before issuing a Query.
 	recallService      *recall.Service
 	recallEmbedder     recall.Embedder
+	// agentReputationRepo + alphaLessonRepo back the Sprint 9.1
+	// alpha-aware memory context block fed into the PM prompt.
+	// Both nil = feature off (DecisionInput.AgentTrackRecord
+	// stays empty); the per-fund runtime forwards them straight
+	// into the runtimePMAgent so buildAgentTrackRecord can
+	// render the markdown block via alphalesson.BuildContext.
+	agentReputationRepo *agentreputation.Repo
+	alphaLessonRepo     *alphalesson.Repo
 	// planLifecycleNotifier is the Sprint 4 / android-core push
 	// fan-out hook. Optional — nil = no push notifications.
 	planLifecycleNotifier workflow.PlanLifecycleNotifier
@@ -1176,6 +1186,25 @@ func (s *workflowServiceAdapter) WithSemanticRecall(svc *recall.Service, embedde
 	}
 	s.recallService = svc
 	s.recallEmbedder = embedder
+	return s
+}
+
+// WithAlphaAwareMemory wires the Sprint 9.1 alpha-aware-memory stack
+// that produces the AgentTrackRecord block on the PM prompt:
+//   - reputation: the per-fund agent leaderboard (avg α, hit_rate)
+//     drawn from agent_reputation_stats.
+//   - lessons: the most recent alpha-tagged memory rows the
+//     reputation backfill mints when |α| crosses the threshold.
+//
+// Passing nil to either side leaves the block absent from the
+// prompt — same silent-degrade contract as the rest of the
+// optional context blocks.
+func (s *workflowServiceAdapter) WithAlphaAwareMemory(reputation *agentreputation.Repo, lessons *alphalesson.Repo) *workflowServiceAdapter {
+	if s == nil {
+		return s
+	}
+	s.agentReputationRepo = reputation
+	s.alphaLessonRepo = lessons
 	return s
 }
 
@@ -1514,6 +1543,19 @@ type runtimePMAgent struct {
 	// receiver-nil guard. Wired by newRuntime when the global
 	// metrics registry is available.
 	serverMetrics *serverMetrics
+
+	// agentReputationRepo + alphaLessonRepo back the Sprint 9.1
+	// alpha-aware memory context block. The PM reads the per-fund
+	// agent leaderboard (avg α, hit_rate) from the reputation repo
+	// and the most recent alpha-tagged lessons from the lesson
+	// repo, renders them into a single markdown block via
+	// alphalesson.BuildContext, and stuffs it into
+	// DecisionInput.AgentTrackRecord. Both are nil-safe — when
+	// either is unset, buildAgentTrackRecord returns "" and the
+	// prompt simply omits the section. Wired by newRuntime once
+	// the agentreputation + alphalesson services are available.
+	agentReputationRepo *agentreputation.Repo
+	alphaLessonRepo     *alphalesson.Repo
 	// lastTraceByFund is the G1 #2 attribution bridge. The
 	// buildDecisionInput → GeneratePlan path produces the
 	// trace at the START of a plan tick (when we know what
@@ -6062,6 +6104,17 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				// ObserveDecisionInput so tests that don't
 				// wire metrics keep working.
 				serverMetrics: s.metrics,
+				// Sprint 9.1 — alpha-aware memory. The PM
+				// reads the per-fund agent leaderboard +
+				// recent alpha-tagged lessons from these
+				// repos and renders the markdown block via
+				// alphalesson.BuildContext. Both are nil-safe:
+				// when either is unwired (legacy / smoke
+				// builds before the reputation loop is on)
+				// buildAgentTrackRecord returns "" and the
+				// prompt simply omits the section.
+				agentReputationRepo: s.agentReputationRepo,
+				alphaLessonRepo:     s.alphaLessonRepo,
 			}
 		}(),
 		&runtimeApprovalGateway{
@@ -14769,6 +14822,7 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		LongTermReflections: longTermReflections,
 		SleeveScorecard:     a.buildSleeveScorecard(ctx, fundID),
 		LessonReplay:        a.buildLessonReplay(ctx, fundID),
+		AgentTrackRecord:    a.buildAgentTrackRecord(ctx, fundID),
 		QuantSnapshots:      a.buildQuantSnapshots(ctx, profile.Market, universe, decisionPositions),
 		IntradaySnapshots:   a.buildIntradaySnapshots(ctx, profile.Market, universe, decisionPositions, tradingDate),
 		SemanticRecall:      a.buildSemanticRecall(ctx, fundID, macroBriefing, universe),
@@ -16020,6 +16074,42 @@ func (a *runtimePMAgent) buildLessonReplay(ctx context.Context, fundID string) s
 	}
 	replay := attribution.BuildLessonReplay(memories, time.Now().UTC(), attribution.LessonReplayOptions{})
 	return replay.Summary
+}
+
+// buildAgentTrackRecord renders the Sprint 9.1 alpha-aware-memory
+// block for the LLM PM prompt. Same defensive contract as
+// buildSleeveScorecard / buildLessonReplay: every failure path
+// returns "" so the prompt builder simply omits the section.
+//
+// The block synthesises two soft priors:
+//
+//   - The per-fund agent leaderboard (top + bottom by avg α vs
+//     benchmark, hit_rate, decision count) drawn from
+//     agent_reputation_stats. This is how the PM learns which
+//     analyst / bull / bear voice has actually been right.
+//   - The most recent alpha-tagged lessons (the memory rows the
+//     alpha-aware reputation backfill mints when |α| crosses
+//     the configured threshold). Each carries the agent tag, the
+//     realised α, and the lesson body.
+//
+// alphalesson.BuildContext is the pure renderer; this wiring
+// layer only supplies the repos + fundID + locale-free defaults.
+// Both repos are nil-safe — the renderer returns "" when neither
+// side has data, which matches the legacy behaviour for brand-new
+// funds without a reputation history.
+func (a *runtimePMAgent) buildAgentTrackRecord(ctx context.Context, fundID string) string {
+	if a == nil || a.agentReputationRepo == nil || a.alphaLessonRepo == nil {
+		return ""
+	}
+	block, err := alphalesson.BuildContext(ctx, a.agentReputationRepo, a.alphaLessonRepo, fundID, alphalesson.ContextOptions{})
+	if err != nil {
+		slog.Debug("decision prompt: agent track record unavailable",
+			"fund_id", fundID,
+			"err", err,
+		)
+		return ""
+	}
+	return block
 }
 
 // translateDecisionActions turns a DecisionOutput coming back from the

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/fundai/server/internal/agentreputation"
+	"github.com/fundai/server/internal/alphalesson"
 	"github.com/fundai/server/internal/analystreport"
 	"github.com/fundai/server/internal/debaterepo"
 	"github.com/fundai/server/internal/api"
@@ -611,6 +612,10 @@ type Services struct {
 	// returns 503; the read endpoints continue to serve
 	// whatever is in the table.
 	AgentReputationLoop    *agentReputationLoop
+	// AlphaLessonRepo is the S9.1 alpha-tagged memory writer +
+	// reader. The reputation backfill calls it to mint
+	// long-term lessons; the PM context builder pulls from it.
+	AlphaLessonRepo        *alphalesson.Repo
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -854,6 +859,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		AnalystReportRepo:   analystreport.NewRepo(db),
 		DebateRepo:          debaterepo.NewRepo(db),
 		AgentReputationRepo: agentreputation.NewRepo(db),
+		AlphaLessonRepo:     alphalesson.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
 		WSFeedCache:         wsFeedCache,
@@ -910,7 +916,8 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 			newDebateTranscriptSource(services.DebateRepo),
 			nullRealisedReturn,
 			agentReputationLoopOptions{
-				FundLister: fundLister,
+				FundLister:    fundLister,
+				LessonWriter:  services.AlphaLessonRepo,
 			},
 		)
 	}
@@ -980,6 +987,14 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	attributionAdapter := newAttributionServiceAdapter(db)
 	services.FundHandler = services.FundHandler.WithAttributionService(attributionAdapter)
 	workflowService = workflowService.WithAttributionService(attributionAdapter.Service())
+
+	// Sprint 9.1 — alpha-aware memory. The per-fund runtime
+	// produced by workflowService.newRuntime forwards these
+	// repos into the runtimePMAgent so the PM prompt's
+	// AgentTrackRecord block is populated. Both are nil-safe;
+	// when either is unwired (very old test paths) the block
+	// is simply omitted.
+	workflowService = workflowService.WithAlphaAwareMemory(services.AgentReputationRepo, services.AlphaLessonRepo)
 
 	// Phase 2J/K/L: strategy promotion lifecycle.
 	// The promotion adapter is wired only when persistence is

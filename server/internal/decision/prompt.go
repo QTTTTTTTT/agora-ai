@@ -67,6 +67,12 @@ Adhere to these rules without exception:
        - If a candidate action targets the same sleeve+regime pair as a CRITICAL replay row, you MUST address the lesson in your reasoning field — either explain why today's setup differs from the historical pattern, or downgrade the action to "watch" / cap its confidence below 0.65.
        - WINNER rows are reinforcement, not commands: align with them only when the underlying conditions still match today.
        - The replay is bounded (most 5 rows, lookback ≤ 14 days). If something newsworthy isn't in the replay, the scorecard's numeric rows are still authoritative.
+   - When input.agentTrackRecord is present (Sprint 9.1 alpha-aware memory): this markdown block summarises (a) the agent leaderboard — the top and bottom analysts/researchers/bull/bear by avg α vs benchmark over their recent decisions, with hit_rate and decision count — and (b) the most recent alpha-tagged lessons that the reputation backfill has minted (each prefixed with the agent tag and the realised α). Treat it as a soft prior on whose voice to trust inside today's roundtable consensus:
+       - When today's roundtableConsensus / roundtableDebate cites an agent listed under "Top by avg α" with a directional view, you may raise that view's weight in your reasoning. When the cited agent appears under "Bottom by avg α" with a NEGATIVE avg α, lean toward DEMOTING that view (require independent supporting evidence before following it).
+       - Cite the agent label + the avg α figure (e.g. "Fundamentals (avg α +2.1% over 12 calls) backs the long thesis") when this block tips your decision.
+       - The recent alpha-tagged lessons section lists actual past wins/losses with the realised α and a one-line lesson body. Use them the same way as recentLessons — match the pattern (symbol / sector / direction) to today's candidate action before borrowing the implied conclusion.
+       - Sample size matters: rows with fewer than 5 decisions are filtered out before you see them; for rows in the 5–10 range, treat the avg α as a weak prior. Never override a hard signal block (cooldown, exposure breach) on the strength of agentTrackRecord alone.
+       - When the block is absent treat it as "no track record yet" (brand-new fund, first weeks of trading) — fall back on recentLessons + lessonReplay + the rest of the priors. Do NOT infer agent quality from absence.
    - When input.universeRanking is present (Sprint A cross-sectional rank table): every row carries momentumZ / volatilityZ / liquidityZ + a single compositeZ + a quartile bucket (1 = top quartile, 4 = bottom). Z-scores are universe-relative for THIS trading day. Use the table as the cross-sectional tilt on top of the per-symbol signals:
        - Prefer Q1 (compositeZ in the top quartile) names for new buys / adds. A Q1 symbol with a bullish debate verdict + non-chop regime is the strongest setup; size at the snapshot ceiling.
        - Treat Q4 names as the default watch list for new positions. Only propose a buy on a Q4 name when there is a concrete reason that is NOT already priced into the ranking (e.g. an earnings-day catalyst that the trailing-20-day momentum can't see, or a debate quantCase that explicitly cites a momentum reversal). Otherwise downgrade to "watch".
@@ -228,6 +234,7 @@ func userPrompt(input DecisionInput) string {
 		NewsSentiment       string                       `json:"newsSentiment,omitempty"`
 		SleeveScorecard     string                       `json:"sleeveScorecard,omitempty"`
 		LessonReplay        string                       `json:"lessonReplay,omitempty"`
+		AgentTrackRecord    string                       `json:"agentTrackRecord,omitempty"`
 		QuantSnapshots      []quantSnapshotPromptItem    `json:"quantSnapshots,omitempty"`
 		UniverseRanking     []universeRankingPromptItem  `json:"universeRanking,omitempty"`
 		QualityScores       []qualityScorePromptItem     `json:"qualityScores,omitempty"`
@@ -269,6 +276,7 @@ func userPrompt(input DecisionInput) string {
 		NewsSentiment:       strings.TrimSpace(input.NewsSentiment),
 		SleeveScorecard:     strings.TrimSpace(input.SleeveScorecard),
 		LessonReplay:        strings.TrimSpace(input.LessonReplay),
+		AgentTrackRecord:    strings.TrimSpace(input.AgentTrackRecord),
 		QuantSnapshots:      buildQuantSnapshotPromptItems(input.QuantSnapshots),
 		UniverseRanking:     buildUniverseRankingPromptItems(input.UniverseRanking),
 		QualityScores:       buildQualityScorePromptItems(input.QualityScores),

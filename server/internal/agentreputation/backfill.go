@@ -107,12 +107,21 @@ func (c BackfillConfig) limit() int {
 	return c.Limit
 }
 
+// LessonWriter is the S9.1 hook the backfill driver calls after
+// it has persisted outcomes. The alphalesson package satisfies
+// it via Repo.WriteAlphaLessons. Optional — when nil, no
+// lessons are produced.
+type LessonWriter interface {
+	WriteAlphaLessonsForOutcomes(ctx context.Context, outcomes []Outcome) (int, error)
+}
+
 // Backfill is the orchestrator. Stateless after construction.
 type Backfill struct {
-	repo     *Repo
-	panels   PanelSource
-	debates  DebateSource
-	returns  RealisedReturnFn
+	repo    *Repo
+	panels  PanelSource
+	debates DebateSource
+	returns RealisedReturnFn
+	lessons LessonWriter
 }
 
 // NewBackfill wires the driver. repo + returns are required;
@@ -120,6 +129,15 @@ type Backfill struct {
 // source is skipped.
 func NewBackfill(repo *Repo, panels PanelSource, debates DebateSource, returns RealisedReturnFn) *Backfill {
 	return &Backfill{repo: repo, panels: panels, debates: debates, returns: returns}
+}
+
+// WithLessonWriter installs the S9.1 alpha-lesson sink. Returns
+// the backfill so it can be chain-constructed.
+func (b *Backfill) WithLessonWriter(w LessonWriter) *Backfill {
+	if b != nil {
+		b.lessons = w
+	}
+	return b
 }
 
 // Run produces outcomes for one fund and recomputes the
@@ -206,6 +224,15 @@ func (b *Backfill) Run(ctx context.Context, fundID string, cfg BackfillConfig) (
 	}
 	if err := b.repo.RecomputeStats(ctx, fundID); err != nil {
 		return len(outs), fmt.Errorf("agentreputation: recompute: %w", err)
+	}
+	// S9.1 — best-effort alpha-tagged memory write. A lesson
+	// writer failure must not roll back the upsert (the
+	// reputation table is the source of truth; lessons are a
+	// derived prompt aid). Log + continue.
+	if b.lessons != nil {
+		if _, err := b.lessons.WriteAlphaLessonsForOutcomes(ctx, outs); err != nil {
+			return len(outs), fmt.Errorf("agentreputation: lesson writer: %w", err)
+		}
 	}
 	return len(outs), nil
 }

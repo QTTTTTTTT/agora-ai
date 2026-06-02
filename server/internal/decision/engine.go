@@ -521,6 +521,18 @@ type DecisionInput struct {
 	RecentLessons       []RecentLessonContext
 	LongTermReflections []LongTermReflectionContext
 
+	// Sprint 9.1 — alpha-aware memory. A pre-rendered markdown block
+	// that summarises (a) the agent leaderboard (top + bottom by
+	// avg α vs benchmark) and (b) the most recent alpha-tagged
+	// lessons the reputation backfill has written. Built by
+	// alphalesson.BuildContext in the wiring layer; the LLM PM
+	// reads it as a soft prior — "trust these agent voices more,
+	// these less" — and the prompt simply concatenates it. Empty
+	// when agentreputation_stats has no rows for the fund (e.g.
+	// brand-new fund) or the alpha lessons table is empty (no
+	// outcome has crossed the alpha threshold yet).
+	AgentTrackRecord string
+
 	// IntradaySnapshots is the Sprint 3 / L1 soft signal block — one
 	// row per symbol in the candidate universe. Trend direction +
 	// vol-z + vol-ratio per symbol; the PM reasons about timing while

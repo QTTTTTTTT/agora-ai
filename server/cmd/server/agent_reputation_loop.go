@@ -47,6 +47,10 @@ type agentReputationLoopOptions struct {
 	// Horizons is the list of forward windows (in days) the
 	// backfill produces outcomes for. Defaults to {1, 5, 21}.
 	Horizons []int
+	// LessonWriter is the S9.1 sink. Nil = no alpha-tagged
+	// memory rows are minted (still safe; the reputation table
+	// is the source of truth).
+	LessonWriter agentreputation.LessonWriter
 }
 
 // agentReputationLoop is the runnable produced by newAgentReputationLoop.
@@ -157,6 +161,9 @@ func (l *agentReputationLoop) runWave(ctx context.Context) int {
 		return 0
 	}
 	bf := agentreputation.NewBackfill(l.repo, l.panels, l.debates, l.returns)
+	if l.opts.LessonWriter != nil {
+		bf = bf.WithLessonWriter(l.opts.LessonWriter)
+	}
 	since := time.Now().Add(-time.Duration(l.opts.LookbackDays) * 24 * time.Hour)
 	total := 0
 	for _, fid := range fundIDs {
