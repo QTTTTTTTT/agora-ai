@@ -1842,6 +1842,66 @@ export interface AnalystRunRequest {
   technical?: AnalystTechnicalInput;
 }
 
+// ---------------------------------------------------------------------------
+// S8.2 — Bull / Bear debate
+// ---------------------------------------------------------------------------
+//
+// The debate orchestrator runs N rounds where Bull and Bear
+// (forced personas) take turns arguing for / against the same
+// symbol. The four analyst reports from S8.1 are the input
+// they share.
+
+export type AdvocateStance = "bull" | "bear";
+
+export const ALL_ADVOCATE_STANCES: readonly AdvocateStance[] = ["bull", "bear"];
+
+export interface DebateArgument {
+  id?: string;
+  agent_id: string;
+  agent_name: string;
+  stance: AdvocateStance;
+  symbol: string;
+  round: number;
+  asof: string;
+  generated_at: string;
+  direction: AnalystDirection;
+  confidence: number; // 0..100
+  thesis: string;
+  support_points: string[];
+  rebuttals: string[];
+  cited_reports?: string[];
+  llm_model?: string;
+}
+
+export interface DebateVerdict {
+  direction: AnalystDirection;
+  confidence: number; // 0..100
+  winner_stance?: AdvocateStance;
+  bull_confidence: number;
+  bear_confidence: number;
+  contested: boolean;
+  winning_summary?: string;
+  losing_summary?: string;
+}
+
+export interface DebateTranscript {
+  id?: string;
+  fund_id: string;
+  panel_id?: string;
+  symbol: string;
+  asof: string;
+  generated_at: string;
+  verdict: DebateVerdict;
+  arguments: DebateArgument[];
+  panel?: AnalystPanelReport;
+}
+
+// DebateRunRequest extends AnalystRunRequest with debate-only
+// knobs. The handler runs the panel + debate in one call.
+export interface DebateRunRequest extends AnalystRunRequest {
+  rounds?: number;
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

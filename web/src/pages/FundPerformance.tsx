@@ -33,6 +33,7 @@ import VaRPanel from "../components/VaRPanel";
 import StressTestPanel from "../components/StressTestPanel";
 import BrinsonAttributionPanel from "../components/BrinsonAttributionPanel";
 import AnalystPanelSection from "../components/AnalystPanelSection";
+import BullBearDebateSection from "../components/BullBearDebateSection";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
 
 // PR-3A9: a dedicated /funds/:id/performance route that compresses
@@ -784,6 +785,11 @@ const FundPerformance: React.FC = () => {
           technical) panel that votes on one symbol and produces an
           aggregated bullish / bearish / neutral verdict. */}
       <AnalystPanelSection fundId={fundId} language={language} />
+
+      {/* S8.2 — forced Bull / Bear adversarial debate on top of
+          the S8.1 panel: each round Bull and Bear argue against
+          each other, neither allowed to settle on neutral. */}
+      <BullBearDebateSection fundId={fundId} language={language} />
     </div>
   );
 };

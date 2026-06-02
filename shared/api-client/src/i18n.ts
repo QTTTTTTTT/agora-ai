@@ -960,6 +960,42 @@ export interface Messages {
     llmModelFallback: string;
     llmModelLLM: string;
   };
+  bullBearDebate: {
+    title: string;
+    subtitle: string;
+    symbolLabel: string;
+    symbolPlaceholder: string;
+    roundsLabel: string;
+    runButton: string;
+    running: string;
+    notesLabel: string;
+    verdictTitle: string;
+    verdictDirection: string;
+    verdictConfidence: string;
+    verdictContested: string;
+    verdictNotContested: string;
+    bullConfidence: string;
+    bearConfidence: string;
+    winnerBull: string;
+    winnerBear: string;
+    winnerTie: string;
+    argumentsTitle: string;
+    roundLabel: string;
+    stanceBull: string;
+    stanceBear: string;
+    thesisLabel: string;
+    supportPointsLabel: string;
+    rebuttalsLabel: string;
+    citedReportsLabel: string;
+    noDebateYet: string;
+    error: string;
+    historyTitle: string;
+    historyEmpty: string;
+    historyLoading: string;
+    confidenceLabel: string;
+    llmModelFallback: string;
+    llmModelLLM: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -2007,6 +2043,42 @@ export const messages: Record<LocaleId, Messages> = {
       error: '面板运行失败',
       historyTitle: '历史面板',
       historyEmpty: '暂无历史面板',
+      historyLoading: '加载中…',
+      confidenceLabel: '置信度 {value}%',
+      llmModelFallback: '规则回退',
+      llmModelLLM: 'LLM',
+    },
+    bullBearDebate: {
+      title: '多空对辩',
+      subtitle: '基于分析师面板的结论，强制让 Bull / Bear 两位研究员各执一词、交替反驳。Bull 必须找出最强买入理由，Bear 必须找出最强卖出 / 回避理由，谁也不能中立。回合越深，反驳越精准，PM 在最后只读对辩结论。',
+      symbolLabel: '标的代码',
+      symbolPlaceholder: '如 AAPL / 600519',
+      roundsLabel: '辩论轮数',
+      runButton: '运行多空对辩',
+      running: '多空研究员对辩中…',
+      notesLabel: '备注',
+      verdictTitle: '对辩裁决',
+      verdictDirection: '方向',
+      verdictConfidence: '置信度',
+      verdictContested: '势均力敌（多空差距 < 20%）',
+      verdictNotContested: '分差明显',
+      bullConfidence: '多头平均置信度',
+      bearConfidence: '空头平均置信度',
+      winnerBull: '多头胜出',
+      winnerBear: '空头胜出',
+      winnerTie: '平局',
+      argumentsTitle: '逐轮发言',
+      roundLabel: '第 {round} 轮',
+      stanceBull: '多头',
+      stanceBear: '空头',
+      thesisLabel: '论点',
+      supportPointsLabel: '支撑证据',
+      rebuttalsLabel: '反驳对手',
+      citedReportsLabel: '引用分析师',
+      noDebateYet: '尚未运行对辩',
+      error: '对辩运行失败',
+      historyTitle: '历史对辩',
+      historyEmpty: '暂无历史对辩',
       historyLoading: '加载中…',
       confidenceLabel: '置信度 {value}%',
       llmModelFallback: '规则回退',
@@ -3068,6 +3140,42 @@ export const messages: Record<LocaleId, Messages> = {
       error: 'Panel run failed',
       historyTitle: 'Historical panels',
       historyEmpty: 'No historical panels yet',
+      historyLoading: 'Loading…',
+      confidenceLabel: 'confidence {value}%',
+      llmModelFallback: 'rule fallback',
+      llmModelLLM: 'LLM',
+    },
+    bullBearDebate: {
+      title: 'Bull / Bear Debate',
+      subtitle: 'Two forced personas — Bull and Bear — argue against each other over the analyst panel\'s conclusions. Bull must find the strongest reason to buy; Bear must find the strongest reason to sell or avoid. Neither is allowed to settle on neutral. Later rounds carry more weight in the final verdict the PM reads.',
+      symbolLabel: 'Symbol',
+      symbolPlaceholder: 'e.g. AAPL / 600519',
+      roundsLabel: 'Debate rounds',
+      runButton: 'Run debate',
+      running: 'Researchers debating…',
+      notesLabel: 'Notes',
+      verdictTitle: 'Verdict',
+      verdictDirection: 'Direction',
+      verdictConfidence: 'Confidence',
+      verdictContested: 'Contested (margin < 20%)',
+      verdictNotContested: 'Decisive margin',
+      bullConfidence: 'Bull avg confidence',
+      bearConfidence: 'Bear avg confidence',
+      winnerBull: 'Bull wins',
+      winnerBear: 'Bear wins',
+      winnerTie: 'Tie',
+      argumentsTitle: 'Per-round arguments',
+      roundLabel: 'Round {round}',
+      stanceBull: 'Bull',
+      stanceBear: 'Bear',
+      thesisLabel: 'Thesis',
+      supportPointsLabel: 'Support points',
+      rebuttalsLabel: 'Rebuttals',
+      citedReportsLabel: 'Cited analysts',
+      noDebateYet: 'No debate run yet',
+      error: 'Debate run failed',
+      historyTitle: 'Historical debates',
+      historyEmpty: 'No historical debates yet',
       historyLoading: 'Loading…',
       confidenceLabel: 'confidence {value}%',
       llmModelFallback: 'rule fallback',

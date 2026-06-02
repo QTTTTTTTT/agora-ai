@@ -2619,6 +2619,67 @@ export async function getFundAnalystPanel(
 }
 
 // ---------------------------------------------------------------------------
+// S8.2 — Bull / Bear debate
+// ---------------------------------------------------------------------------
+
+export type {
+  AdvocateStance,
+  DebateArgument,
+  DebateVerdict,
+  DebateTranscript,
+  DebateRunRequest,
+} from "@fundai/api-client";
+export { ALL_ADVOCATE_STANCES } from "@fundai/api-client";
+
+// Per-fund Bull/Bear debate run. Same flatten pattern as the
+// analyst panel runner so the api-contract validator's
+// inferMethod resolves POST.
+export interface DebateRunResponse {
+  debate: import("@fundai/api-client").DebateTranscript;
+  persist_error?: string;
+}
+export async function runFundDebate(
+  fundId: string,
+  body: import("@fundai/api-client").DebateRunRequest,
+): Promise<DebateRunResponse> {
+  return apiPost<DebateRunResponse>(`/api/funds/${encodeURIComponent(fundId)}/debates/run`,
+    body);
+}
+
+export async function listFundDebates(
+  fundId: string,
+  opts: {
+    symbol?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  } = {},
+): Promise<{
+  debates: import("@fundai/api-client").DebateTranscript[];
+}> {
+  const qs = new URLSearchParams();
+  if (opts.symbol) qs.set("symbol", opts.symbol);
+  if (opts.from) qs.set("from", opts.from);
+  if (opts.to) qs.set("to", opts.to);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    debates: import("@fundai/api-client").DebateTranscript[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/debates${tail}`);
+}
+
+export async function getFundDebate(
+  fundId: string,
+  debateId: string,
+): Promise<{
+  debate: import("@fundai/api-client").DebateTranscript;
+}> {
+  return apiGet<{
+    debate: import("@fundai/api-client").DebateTranscript;
+  }>(`/api/funds/${encodeURIComponent(fundId)}/debates/${encodeURIComponent(debateId)}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/fundai/server/internal/analystreport"
+	"github.com/fundai/server/internal/debaterepo"
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/brinson"
@@ -594,6 +595,12 @@ type Services struct {
 	// deployment (LLM credentials, persona overrides, …). nil
 	// → /api/funds/{fundId}/analysts/run replies 503.
 	AnalystPanelProvider   AnalystPanelProvider
+	// DebateRepo backs the S8.2 Bull/Bear debate transcript
+	// persistence (debaterepo.Repo). nil-safe.
+	DebateRepo             *debaterepo.Repo
+	// DebateProvider returns the configured Bull/Bear debate
+	// orchestrator for a fund. nil → /api/funds/{fundId}/debates/run replies 503.
+	DebateProvider         DebateProvider
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -835,6 +842,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		StressRepo:          stress.NewRepo(db),
 		BrinsonRepo:         brinson.NewRepo(db),
 		AnalystReportRepo:   analystreport.NewRepo(db),
+		DebateRepo:          debaterepo.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
 		WSFeedCache:         wsFeedCache,
@@ -861,6 +869,11 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// analysts on their deterministic fallback paths; S8.3 will
 	// swap nil → real llm.LLMClient once CompleteWithSchema lands.
 	services.AnalystPanelProvider = newDefaultAnalystPanelProvider(services)
+
+	// S8.2 — install the default Bull/Bear debate provider.
+	// Uses the same nil-LLM path as the panel in S8.1 so the
+	// advocates fall back to their deterministic skeletons.
+	services.DebateProvider = newDefaultDebateProvider(services)
 
 	// P1-5: order replay. Re-seed the simulator from open trade rows
 	// persisted before the last shutdown. Runs synchronously so the
@@ -1264,6 +1277,14 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// fixed stub panel. Nil provider → /run replies 503.
 	if ah := newAnalystPanelHandler(svc, svc.AnalystPanelProvider); ah != nil {
 		ah.RegisterRoutes(mux, svc.AnalystPanelProvider)
+	}
+
+	// S8.2 — Bull / Bear forced debate. Reuses the analyst panel
+	// to seed each round (so the same /debates/run call also
+	// produces a fresh panel snapshot). DebateProvider on
+	// Services is the dependency-injection seam.
+	if dh := newDebateHandler(svc); dh != nil {
+		dh.RegisterRoutes(mux, svc.AnalystPanelProvider, svc.DebateProvider)
 	}
 
 	// ---- SPA fallback: serve React static files ----
