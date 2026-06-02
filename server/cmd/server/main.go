@@ -1205,6 +1205,14 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		feh.RegisterRoutes(mux)
 	}
 
+	// S7 / P3-2 — per-fund Value-at-Risk + Conditional VaR.
+	// Computes historical / parametric / Monte Carlo VaR for the
+	// 3 canonical confidence levels from nav_snapshots.daily_return;
+	// archives a snapshot when ?persist=1.
+	if vh := newVaRHandler(svc); vh != nil {
+		vh.RegisterRoutes(mux)
+	}
+
 	// ---- SPA fallback: serve React static files ----
 	spa := spaHandler(cfg.StaticFilesPath)
 	mux.Handle("/", spa)

@@ -1444,6 +1444,76 @@ export interface FactorExposureTrendPoint {
   loadings_asof: string;
 }
 
+// =====================================================================
+// S7 / P3-2 — Value-at-Risk + Conditional VaR (Expected Shortfall).
+// =====================================================================
+
+// VaRMethod mirrors the CHECK constraint on
+// portfolio_var_snapshots.method. monte_carlo uses a normal
+// distribution today; the type is open to future variants
+// (Student-t etc.) but kept narrow on the wire for now.
+export type VaRMethod = "historical" | "parametric" | "monte_carlo";
+
+// ALL_VAR_METHODS in the order the UI renders tiles.
+export const ALL_VAR_METHODS: readonly VaRMethod[] = [
+  "historical",
+  "parametric",
+  "monte_carlo",
+] as const;
+
+// VaRConfidence is the constrained set the backend accepts. The
+// UI's confidence dropdown reads from this tuple so changes here
+// propagate end-to-end without code drift.
+export type VaRConfidence = 0.9 | 0.95 | 0.99;
+
+export const ALL_VAR_CONFIDENCES: readonly VaRConfidence[] = [
+  0.9,
+  0.95,
+  0.99,
+] as const;
+
+// VaRResult is one (method × confidence) tile in the snapshot.
+// var_pct / cvar_pct are NEGATIVE fractions of NAV. Example:
+// var_pct = -0.023 means "we are 95% confident the one-day loss
+// won't exceed 2.3% of NAV".
+export interface VaRResult {
+  method: VaRMethod;
+  confidence: number;
+  horizon: number;
+  var_pct: number;
+  cvar_pct: number;
+  monte_carlo_seed?: number;
+  monte_carlo_paths?: number;
+}
+
+// VaRSnapshot is the live read response.
+export interface VaRSnapshot {
+  fund_id: string;
+  generated_at: string;
+  horizon: number;
+  lookback_days: number;
+  sample_size: number;
+  mean_daily_return: number;
+  stdev_daily_return: number;
+  sample_window_start?: string;
+  sample_window_end?: string;
+  results: VaRResult[];
+}
+
+// VaRTrendPoint is one archived snapshot row used by the
+// dashboard sparkline.
+export interface VaRTrendPoint {
+  id: number;
+  calculated_at: string;
+  method: VaRMethod;
+  confidence: number;
+  horizon_days: number;
+  var_pct: number;
+  cvar_pct: number;
+  sample_size: number;
+  lookback_days: number;
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

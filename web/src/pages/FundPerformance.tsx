@@ -29,6 +29,7 @@ import {
   type AppLanguage,
 } from "../lib/preferences";
 import FactorExposurePanel from "../components/FactorExposurePanel";
+import VaRPanel from "../components/VaRPanel";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
 
 // PR-3A9: a dedicated /funds/:id/performance route that compresses
@@ -758,6 +759,13 @@ const FundPerformance: React.FC = () => {
           market_beta) computed from current holdings against the
           instrument_factor_loadings calibration table. */}
       <FactorExposurePanel fundId={fundId} language={language} />
+
+      {/* S7 / P3-2 — Value-at-Risk + Conditional VaR. Three
+          methods (historical / parametric / Monte Carlo) ×
+          three confidences (90 / 95 / 99) computed from
+          nav_snapshots.daily_return. The spread across methods
+          surfaces fat-tail risk that parametric alone hides. */}
+      <VaRPanel fundId={fundId} language={language} />
     </div>
   );
 };

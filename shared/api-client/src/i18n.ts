@@ -784,6 +784,39 @@ export interface Messages {
     sourceComputed: string;
     sourceOverride: string;
   };
+  varRisk: {
+    panelTitle: string;
+    panelSubtitle: string;
+    refresh: string;
+    loading: string;
+    empty: string;
+    error: string;
+    insufficientHistory: string;
+    sampleSizeLabel: string;
+    lookbackLabel: string;
+    horizonLabel: string;
+    horizon1d: string;
+    horizon5d: string;
+    horizon10d: string;
+    meanLabel: string;
+    stdevLabel: string;
+    sampleWindowLabel: string;
+    methodLabel: string;
+    confidenceLabel: string;
+    varLabel: string;
+    cvarLabel: string;
+    methodHistorical: string;
+    methodParametric: string;
+    methodMonteCarlo: string;
+    methodHistoricalSubtitle: string;
+    methodParametricSubtitle: string;
+    methodMonteCarloSubtitle: string;
+    confidence90Label: string;
+    confidence95Label: string;
+    confidence99Label: string;
+    varInterpretation: string;
+    cvarInterpretation: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -1659,6 +1692,39 @@ export const messages: Record<LocaleId, Messages> = {
       sourceMSCI: 'MSCI',
       sourceComputed: 'Quant Lab',
       sourceOverride: '紧急覆写',
+    },
+    varRisk: {
+      panelTitle: '风险价值 (VaR / CVaR)',
+      panelSubtitle: '基于 nav_snapshots.daily_return 时序，按三种方法（历史模拟 / 参数法 / 蒙特卡洛）与三档置信度（90% / 95% / 99%）计算单期最大可能损失。',
+      refresh: '刷新',
+      loading: '计算中…',
+      empty: '暂无数据',
+      error: '加载失败',
+      insufficientHistory: '历史样本不足，请先累积至少 20 个交易日的 NAV 序列。',
+      sampleSizeLabel: '样本数',
+      lookbackLabel: '回看天数',
+      horizonLabel: '持有期',
+      horizon1d: '1 日',
+      horizon5d: '5 日',
+      horizon10d: '10 日',
+      meanLabel: '日均收益',
+      stdevLabel: '波动率',
+      sampleWindowLabel: '样本区间',
+      methodLabel: '方法',
+      confidenceLabel: '置信度',
+      varLabel: 'VaR',
+      cvarLabel: 'CVaR',
+      methodHistorical: '历史模拟',
+      methodParametric: '参数法',
+      methodMonteCarlo: '蒙特卡洛',
+      methodHistoricalSubtitle: '不假设分布，对收益序列直接取分位数',
+      methodParametricSubtitle: '假设正态分布，按 μ − z·σ 闭式计算',
+      methodMonteCarloSubtitle: '从 N(μ, σ) 抽样 5 万次后取分位数',
+      confidence90Label: '90%',
+      confidence95Label: '95%',
+      confidence99Label: '99%',
+      varInterpretation: '在该置信度下，下一个持有期内损失大概率不超过此值',
+      cvarInterpretation: '在 VaR 被突破的情况下，预期损失的平均值（尾部期望）',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -2544,6 +2610,39 @@ export const messages: Record<LocaleId, Messages> = {
       sourceMSCI: 'MSCI',
       sourceComputed: 'Quant Lab',
       sourceOverride: 'Override',
+    },
+    varRisk: {
+      panelTitle: 'Value at Risk (VaR / CVaR)',
+      panelSubtitle: 'One-period worst-case loss estimated from nav_snapshots.daily_return using three methods (historical / parametric / Monte Carlo) and three confidence levels (90% / 95% / 99%).',
+      refresh: 'Refresh',
+      loading: 'Computing…',
+      empty: 'No data',
+      error: 'Failed to load',
+      insufficientHistory: 'Not enough history yet — accumulate at least 20 trading days of NAV first.',
+      sampleSizeLabel: 'Sample',
+      lookbackLabel: 'Lookback',
+      horizonLabel: 'Horizon',
+      horizon1d: '1 day',
+      horizon5d: '5 days',
+      horizon10d: '10 days',
+      meanLabel: 'Mean daily return',
+      stdevLabel: 'Volatility',
+      sampleWindowLabel: 'Sample window',
+      methodLabel: 'Method',
+      confidenceLabel: 'Confidence',
+      varLabel: 'VaR',
+      cvarLabel: 'CVaR',
+      methodHistorical: 'Historical',
+      methodParametric: 'Parametric',
+      methodMonteCarlo: 'Monte Carlo',
+      methodHistoricalSubtitle: 'Non-parametric percentile of realised returns',
+      methodParametricSubtitle: 'Normal closed-form μ − z·σ',
+      methodMonteCarloSubtitle: '50 000 draws from N(μ, σ), empirical percentile',
+      confidence90Label: '90%',
+      confidence95Label: '95%',
+      confidence99Label: '99%',
+      varInterpretation: 'Loss is expected to stay above this number with the given confidence over one horizon',
+      cvarInterpretation: 'Expected loss conditional on VaR being breached (tail expectation)',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',

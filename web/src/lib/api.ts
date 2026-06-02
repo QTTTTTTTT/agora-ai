@@ -2254,6 +2254,73 @@ export async function fetchFactorExposureTrend(
 }
 
 // ---------------------------------------------------------------------------
+// VaR / CVaR (S7 / P3-2)
+// ---------------------------------------------------------------------------
+
+export type {
+  VaRMethod,
+  VaRConfidence,
+  VaRResult,
+  VaRSnapshot,
+  VaRTrendPoint,
+} from "@fundai/api-client";
+export { ALL_VAR_METHODS, ALL_VAR_CONFIDENCES } from "@fundai/api-client";
+
+// fetchVaRSnapshot pulls the live (method × confidence) tile set
+// for one fund. lookback / horizon mirror the backend query
+// surface; persist=true archives the snapshot in the same call.
+export async function fetchVaRSnapshot(
+  fundId: string,
+  opts: {
+    lookback?: number;
+    horizon?: number;
+    persist?: boolean;
+  } = {},
+): Promise<{
+  snapshot: import("@fundai/api-client").VaRSnapshot;
+  methods: import("@fundai/api-client").VaRMethod[];
+  confidences: import("@fundai/api-client").VaRConfidence[];
+  persist_error?: string;
+}> {
+  const qs = new URLSearchParams();
+  if (opts.lookback !== undefined) qs.set("lookback", String(opts.lookback));
+  if (opts.horizon !== undefined) qs.set("horizon", String(opts.horizon));
+  if (opts.persist) qs.set("persist", "1");
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<{
+    snapshot: import("@fundai/api-client").VaRSnapshot;
+    methods: import("@fundai/api-client").VaRMethod[];
+    confidences: import("@fundai/api-client").VaRConfidence[];
+    persist_error?: string;
+  }>(`/api/funds/${encodeURIComponent(fundId)}/risk/var${tail}`);
+}
+
+export async function fetchVaRTrend(
+  fundId: string,
+  opts: {
+    method: import("@fundai/api-client").VaRMethod;
+    confidence: import("@fundai/api-client").VaRConfidence;
+    horizon?: number;
+    limit?: number;
+  },
+): Promise<{
+  points: import("@fundai/api-client").VaRTrendPoint[];
+  methods: import("@fundai/api-client").VaRMethod[];
+  confidences: import("@fundai/api-client").VaRConfidence[];
+}> {
+  const qs = new URLSearchParams();
+  qs.set("method", opts.method);
+  qs.set("confidence", String(opts.confidence));
+  qs.set("horizon", String(opts.horizon ?? 1));
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  return apiGet<{
+    points: import("@fundai/api-client").VaRTrendPoint[];
+    methods: import("@fundai/api-client").VaRMethod[];
+    confidences: import("@fundai/api-client").VaRConfidence[];
+  }>(`/api/funds/${encodeURIComponent(fundId)}/risk/var/trend?${qs.toString()}`);
+}
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 
