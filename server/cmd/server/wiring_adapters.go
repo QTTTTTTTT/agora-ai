@@ -1133,6 +1133,14 @@ type workflowServiceAdapter struct {
 	// render the markdown block via alphalesson.BuildContext.
 	agentReputationRepo *agentreputation.Repo
 	alphaLessonRepo     *alphalesson.Repo
+	// workflowCheckpointRepo backs the Sprint 9.2 per-step
+	// snapshot persistence. The per-fund orchestrator's
+	// CheckpointStore is built from this repo via
+	// newWorkflowCheckpointSink. nil = checkpoint persistence
+	// disabled (orchestrator falls back to in-process state
+	// only); the resume / admin-UI endpoints then return empty
+	// lists silently.
+	workflowCheckpointRepo *repository.WorkflowCheckpointRepo
 	// planLifecycleNotifier is the Sprint 4 / android-core push
 	// fan-out hook. Optional — nil = no push notifications.
 	planLifecycleNotifier workflow.PlanLifecycleNotifier
@@ -1186,6 +1194,17 @@ func (s *workflowServiceAdapter) WithSemanticRecall(svc *recall.Service, embedde
 	}
 	s.recallService = svc
 	s.recallEmbedder = embedder
+	return s
+}
+
+// WithWorkflowCheckpointRepo wires the Sprint 9.2 per-step
+// checkpoint repository. Nil disables checkpoint persistence
+// (orchestrator keeps using in-process state only). Idempotent.
+func (s *workflowServiceAdapter) WithWorkflowCheckpointRepo(repo *repository.WorkflowCheckpointRepo) *workflowServiceAdapter {
+	if s == nil {
+		return s
+	}
+	s.workflowCheckpointRepo = repo
 	return s
 }
 
@@ -5640,6 +5659,89 @@ func (s *workflowServiceAdapter) TriggerStep(userID, fundID, step string) (*api.
 	return status, nil
 }
 
+// AdminTriggerStep is the Sprint 9.2 admin-side resume entry point.
+// Unlike TriggerStep it does NOT call authorizeFundAccess — the
+// admin handler already enforced requireAdmin — and it takes the
+// trading date the operator (or the resolveResumeTarget helper)
+// has already decided on rather than recomputing it from the
+// market calendar. The rest of the path mirrors TriggerStep
+// exactly so a resumed step goes through the same retry / event /
+// checkpoint plumbing as a normally scheduled step.
+func (s *workflowServiceAdapter) AdminTriggerStep(ctx context.Context, fundID string, tradingDate time.Time, step string) (*api.WorkflowStatus, error) {
+	if s == nil {
+		return nil, api.ErrNotImplemented
+	}
+	if strings.TrimSpace(fundID) == "" || strings.TrimSpace(step) == "" {
+		return nil, api.ErrBadInput
+	}
+	workflowStep, err := parseWorkflowStep(step)
+	if err != nil {
+		return nil, err
+	}
+	if !workflow.SupportsManualTrigger(workflowStep) {
+		return nil, fmt.Errorf("%w: manual trigger unsupported for step %s; supported steps: %s", api.ErrBadInput, workflowStep.String(), strings.Join(workflow.SupportedManualTriggerStepNames(), ", "))
+	}
+	fund, err := s.fundRepo.GetByID(ctx, fundID)
+	if err != nil {
+		return nil, mapRepositoryError(err)
+	}
+	if fund == nil {
+		return nil, api.ErrNotFound
+	}
+	runtime := s.getRuntime(fund, tradingDate, time.Now(), false)
+	run, claimed, err := s.workflowRepo.ClaimManualStep(ctx, fund.ID, tradingDate, workflowStep.String())
+	if err != nil {
+		return nil, mapRepositoryError(err)
+	}
+	if !claimed {
+		return nil, api.ErrConflict
+	}
+	if run != nil {
+		s.restoreRuntimeFromRun(runtime, run)
+	}
+	triggerCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	if _, err := runtime.orchestrator.TriggerStep(triggerCtx, workflowStep, tradingDate.Format("2006-01-02")); err != nil {
+		status, persistErr := s.persistRuntimeStateIfCurrent(fund.ID, runtime, tradingDate)
+		if persistErr != nil {
+			return nil, persistErr
+		}
+		if s.metrics != nil && status != nil {
+			s.metrics.ObserveWorkflow(fund.ID, status.State, status.Step)
+		}
+		return nil, err
+	}
+	status, err := s.persistRuntimeStateIfCurrent(fund.ID, runtime, tradingDate)
+	if err != nil {
+		return nil, err
+	}
+	if s.metrics != nil && status != nil {
+		s.metrics.ObserveWorkflow(fund.ID, status.State, status.Step)
+	}
+	return status, nil
+}
+
+// workflowCheckpointResumeAdapter satisfies the admin handler's
+// workflowCheckpointResumeSink contract by forwarding into the
+// existing workflowServiceAdapter's AdminTriggerStep path.
+type workflowCheckpointResumeAdapter struct {
+	svc *workflowServiceAdapter
+}
+
+func newWorkflowCheckpointResumeAdapter(svc *workflowServiceAdapter) *workflowCheckpointResumeAdapter {
+	if svc == nil {
+		return nil
+	}
+	return &workflowCheckpointResumeAdapter{svc: svc}
+}
+
+func (a *workflowCheckpointResumeAdapter) ResumeStep(ctx context.Context, fundID string, tradingDate time.Time, step string) (*api.WorkflowStatus, error) {
+	if a == nil || a.svc == nil {
+		return nil, api.ErrNotImplemented
+	}
+	return a.svc.AdminTriggerStep(ctx, fundID, tradingDate, step)
+}
+
 func (s *workflowServiceAdapter) GetStatus(userID, fundID string) (*api.WorkflowStatus, error) {
 	fund, err := authorizeFundAccess(context.Background(), s.fundRepo, s.companyRepo, userID, fundID)
 	if err != nil {
@@ -6164,6 +6266,11 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 		// out to FCM via the device-token registry. Notifier is
 		// optional — nil-safe in workflow's defensive recover.
 		workflow.WithPlanLifecycleNotifier(s.planLifecycleNotifier),
+		// Sprint 9.2 — per-step checkpoint persistence. The
+		// sink is built once per orchestrator from the shared
+		// repo; nil sink (test paths / legacy wiring without
+		// a DB) silently disables checkpoint storage.
+		workflow.WithCheckpointStore(newWorkflowCheckpointSink(s.workflowCheckpointRepo)),
 	)
 	return runtime
 }

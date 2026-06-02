@@ -114,6 +114,13 @@ type adminHandler struct {
 	// tests can plug a stub. nil → rebuild returns 503.
 	agentReputationRebuildSink agentReputationRebuildSink
 
+	// workflowCheckpointRepo + workflowCheckpointResumeSink back
+	// the S9.2 per-step admin view + resume endpoints. Both nil
+	// → endpoints stay unregistered (production routing simply
+	// 404s when the feature isn't wired).
+	workflowCheckpointRepo       *repository.WorkflowCheckpointRepo
+	workflowCheckpointResumeSink workflowCheckpointResumeSink
+
 	// wsFeedManager / wsFeedCache / wsFeedBridge back the S6.5
 	// WebSocket-real-time market-data admin endpoints
 	// (connection status, current subscriptions, cache stats,
@@ -271,6 +278,8 @@ func newAdminHandler(svc *Services) *adminHandler {
 
 		agentReputationRepo: svc.AgentReputationRepo,
 
+		workflowCheckpointRepo: svc.WorkflowCheckpointRepo,
+
 		wsFeedManager: svc.WSFeedManager,
 		wsFeedCache:   svc.WSFeedCache,
 		wsFeedBridge:  svc.WSFeedBridge,
@@ -286,6 +295,14 @@ func newAdminHandler(svc *Services) *adminHandler {
 	// absent, so the 503 fast-path in the admin handler works.
 	if svc.AgentReputationLoop != nil {
 		h.agentReputationRebuildSink = svc.AgentReputationLoop
+	}
+	// S9.2 — typed-nil safe wiring for the resume sink. The
+	// adapter forwards into the workflowService's existing
+	// TriggerStep path so a resume is just "re-fire the same
+	// step under admin authority". Absent workflow service →
+	// resume endpoint returns 503.
+	if svc.WorkflowService != nil {
+		h.workflowCheckpointResumeSink = newWorkflowCheckpointResumeAdapter(svc.WorkflowService)
 	}
 	// Wire Sprint 3 / M5 skill inbox if both DB and mailer are
 	// configured. Without mailer we still expose list + shadow-eval;
@@ -352,6 +369,8 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerBrinsonAdminRoutes(mux)
 	// S8.4 — per-agent reputation ledger admin view + rebuild.
 	h.registerAgentReputationAdminRoutes(mux)
+	// S9.2 — per-step workflow checkpoint timeline + resume.
+	h.registerWorkflowCheckpointAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

@@ -503,6 +503,12 @@ type DailyOrchestrator struct {
 	trading      TradingEngine
 	memory       MemorySystem
 	planNotifier PlanLifecycleNotifier // optional — push fan-out hook
+	// checkpointStore is the Sprint 9.2 per-step snapshot writer.
+	// Optional: when nil the orchestrator skips the persist step
+	// (the in-memory state.recordStep path still runs so RunFull's
+	// return value is unaffected). Production wiring forwards a
+	// workflowCheckpointSink that bridges to the repository.
+	checkpointStore CheckpointStore
 
 	// Internal bookkeeping.
 	mu       sync.Mutex
@@ -515,6 +521,35 @@ type DailyOrchestrator struct {
 	// global rand source, and so tests can inject a seeded RNG via
 	// WithRetryRNG for deterministic backoff assertions.
 	retryRNG *rand.Rand
+}
+
+// CheckpointStore persists per-step snapshots of a daily workflow
+// run. The orchestrator calls Save after every runStep terminates
+// (success, failure, or paused). Implementations are responsible
+// for keying on (RunID, Step) so the row reflects the latest
+// attempt — see repository.WorkflowCheckpointRepo.Upsert.
+//
+// The store is intentionally narrow: it sees only the data the
+// resume path needs (status, error text, payload identifiers). The
+// rich in-process state (research reports, plan struct) never
+// leaves the orchestrator.
+type CheckpointStore interface {
+	Save(ctx context.Context, snapshot CheckpointSnapshot) error
+}
+
+// CheckpointSnapshot is the value passed from the orchestrator to a
+// CheckpointStore on every persisted step.
+type CheckpointSnapshot struct {
+	RunID       string
+	FundID      string
+	TradingDate string
+	Step        string
+	Status      string
+	Attempts    int
+	StartedAt   time.Time
+	EndedAt     time.Time
+	ErrorText   string
+	Payload     []byte
 }
 
 // OrchestratorOption applies optional configuration.
@@ -540,6 +575,15 @@ func WithSchedule(s ScheduleConfig) OrchestratorOption {
 // time-seeded RNG initialized lazily.
 func WithRetryRNG(r *rand.Rand) OrchestratorOption {
 	return func(o *DailyOrchestrator) { o.retryRNG = r }
+}
+
+// WithCheckpointStore wires the Sprint 9.2 per-step snapshot
+// writer. Nil disables checkpoint persistence (the orchestrator
+// still maintains its in-process state). Tests that don't care
+// about checkpoint storage can omit this; production wiring
+// forwards a workflowCheckpointSink backed by the repository.
+func WithCheckpointStore(store CheckpointStore) OrchestratorOption {
+	return func(o *DailyOrchestrator) { o.checkpointStore = store }
 }
 
 // WithPlanLifecycleNotifier wires the optional push fan-out hook
@@ -1107,6 +1151,7 @@ func (o *DailyOrchestrator) runStep(ctx context.Context, step WorkflowStep, fn f
 	}
 
 	o.state.recordStep(sr)
+	o.persistCheckpoint(ctx, step, sr, attempts, nil)
 	return sr, err
 }
 
@@ -1171,6 +1216,49 @@ func (o *DailyOrchestrator) recordSkip(step WorkflowStep) {
 	o.state.recordStep(sr)
 	o.logger.Info("step skipped", "step", step.String(), "run_id", o.state.RunID)
 	o.emit(context.Background(), "step_skipped", step, nil, nil)
+	o.persistCheckpoint(context.Background(), step, sr, 0, nil)
+}
+
+// persistCheckpoint hands the step result to the optional Sprint
+// 9.2 checkpoint store. Every failure path is logged and swallowed
+// — the orchestrator is allowed to keep running when the snapshot
+// can't be persisted, because the in-process state is the source
+// of truth for the current pass. The next runStep will overwrite
+// the row anyway.
+func (o *DailyOrchestrator) persistCheckpoint(ctx context.Context, step WorkflowStep, sr StepResult, attempts int, payload []byte) {
+	if o == nil || o.checkpointStore == nil || o.state == nil {
+		return
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	errText := ""
+	if sr.Error != nil {
+		errText = sr.Error.Error()
+	}
+	snap := CheckpointSnapshot{
+		RunID:       o.state.RunID,
+		FundID:      o.fundID,
+		TradingDate: o.state.TradingDate,
+		Step:        step.String(),
+		Status:      sr.Status,
+		Attempts:    attempts,
+		StartedAt:   sr.StartedAt,
+		EndedAt:     sr.EndedAt,
+		ErrorText:   errText,
+		Payload:     payload,
+	}
+	saveCtx := ctx
+	if saveCtx == nil || saveCtx.Err() != nil {
+		saveCtx = context.Background()
+	}
+	if err := o.checkpointStore.Save(saveCtx, snap); err != nil {
+		o.logger.Warn("checkpoint persist failed",
+			"step", step.String(),
+			"run_id", o.state.RunID,
+			"err", err,
+		)
+	}
 }
 
 // emit publishes an event; failures are logged but never propagated.

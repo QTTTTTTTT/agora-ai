@@ -616,6 +616,12 @@ type Services struct {
 	// reader. The reputation backfill calls it to mint
 	// long-term lessons; the PM context builder pulls from it.
 	AlphaLessonRepo        *alphalesson.Repo
+	// WorkflowCheckpointRepo is the S9.2 per-step snapshot repo
+	// behind the daily orchestrator's CheckpointStore plus the
+	// admin / resume HTTP endpoints. nil-safe — when unwired the
+	// orchestrator silently skips persistence and the admin
+	// endpoints return empty lists.
+	WorkflowCheckpointRepo *repository.WorkflowCheckpointRepo
 	WSFeedConfig           wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -995,6 +1001,15 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// when either is unwired (very old test paths) the block
 	// is simply omitted.
 	workflowService = workflowService.WithAlphaAwareMemory(services.AgentReputationRepo, services.AlphaLessonRepo)
+
+	// Sprint 9.2 — workflow checkpoints. The orchestrator
+	// upserts a per-step row on every runStep call so the
+	// resume / admin-UI endpoints can show the timeline and
+	// drive resume actions. nil repo (no DB) disables the
+	// persistence; the in-process state path is unaffected.
+	workflowCheckpointRepo := repository.NewWorkflowCheckpointRepo(db)
+	workflowService = workflowService.WithWorkflowCheckpointRepo(workflowCheckpointRepo)
+	services.WorkflowCheckpointRepo = workflowCheckpointRepo
 
 	// Phase 2J/K/L: strategy promotion lifecycle.
 	// The promotion adapter is wired only when persistence is

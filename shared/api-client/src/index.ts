@@ -1969,6 +1969,49 @@ export interface AgentReputationRebuildResponse {
   status: string;
 }
 
+// ---------------------------------------------------------------------------
+// Workflow checkpoints (S9.2)
+// ---------------------------------------------------------------------------
+
+export type WorkflowCheckpointStatus =
+  | "success"
+  | "failed"
+  | "skipped"
+  | "pending"
+  | "paused";
+
+export interface WorkflowCheckpoint {
+  id: string;
+  run_id: string;
+  fund_id: string;
+  trading_date: string; // YYYY-MM-DD (UTC)
+  step: string;
+  status: WorkflowCheckpointStatus;
+  attempts: number;
+  started_at: string; // RFC3339
+  ended_at: string;
+  duration_ms: number;
+  error_text?: string;
+  payload?: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListWorkflowCheckpointsResponse {
+  checkpoints: WorkflowCheckpoint[];
+}
+
+export interface ResumeWorkflowCheckpointRequest {
+  run_id: string;
+  step?: string; // optional — defaults to latest failed/paused
+}
+
+export interface ResumeWorkflowCheckpointResponse {
+  run_id: string;
+  step: string;
+  status: string;
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

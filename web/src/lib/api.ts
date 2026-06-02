@@ -2757,6 +2757,42 @@ export async function rebuildAgentReputation(
 }
 
 // ---------------------------------------------------------------------------
+// Workflow checkpoints (S9.2)
+// ---------------------------------------------------------------------------
+
+export async function listWorkflowCheckpoints(opts: {
+  runId?: string;
+  fundId?: string;
+  tradingDate?: string;
+} = {}): Promise<import("@fundai/api-client").ListWorkflowCheckpointsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.runId) qs.set("run_id", opts.runId);
+  if (opts.fundId) qs.set("fund_id", opts.fundId);
+  if (opts.tradingDate) qs.set("trading_date", opts.tradingDate);
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<import("@fundai/api-client").ListWorkflowCheckpointsResponse>(
+    `/api/admin/workflow-checkpoints${tail}`,
+  );
+}
+
+export async function resumeWorkflowCheckpoint(
+  body: import("@fundai/api-client").ResumeWorkflowCheckpointRequest,
+): Promise<import("@fundai/api-client").ResumeWorkflowCheckpointResponse> {
+  return apiPost<import("@fundai/api-client").ResumeWorkflowCheckpointResponse>(
+    `/api/admin/workflow-checkpoints/resume`,
+    body,
+  );
+}
+
+export type {
+  WorkflowCheckpoint,
+  WorkflowCheckpointStatus,
+  ListWorkflowCheckpointsResponse,
+  ResumeWorkflowCheckpointRequest,
+  ResumeWorkflowCheckpointResponse,
+} from "@fundai/api-client";
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

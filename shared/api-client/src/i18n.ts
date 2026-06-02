@@ -1033,6 +1033,31 @@ export interface Messages {
     rebuildError: string;
     horizonDays: string;
   };
+  workflowCheckpoints: {
+    title: string;
+    subtitle: string;
+    refresh: string;
+    loading: string;
+    empty: string;
+    error: string;
+    runFilter: string;
+    runFilterPlaceholder: string;
+    fundFilter: string;
+    fundFilterPlaceholder: string;
+    dateFilter: string;
+    colStep: string;
+    colStatus: string;
+    colAttempts: string;
+    colDuration: string;
+    colEnded: string;
+    colError: string;
+    resumeFromLatest: string;
+    resumeFromHere: string;
+    resumeNoFailed: string;
+    resumeRunning: string;
+    resumeSuccess: string;
+    resumeError: string;
+  };
   corpActions: {
     title: string;
     subtitle: string;
@@ -2157,6 +2182,32 @@ export const messages: Record<LocaleId, Messages> = {
       rebuildSuccess: '完成：写入 {n} 条结算',
       rebuildError: '重算失败',
       horizonDays: '{n} 天',
+    },
+    workflowCheckpoints: {
+      title: '工作流节点快照',
+      subtitle:
+        '每日工作流每跑完一个节点都会写一条 checkpoint，包含步骤名 / 状态 / 耗时 / 报错原文 / 重试次数。可按 run_id 或（基金 + 交易日）筛选；对失败 / 暂停的步骤可一键重跑，整条 run 不必从头来过。',
+      refresh: '刷新',
+      loading: '加载中…',
+      empty: '暂无 checkpoint 记录',
+      error: '加载失败',
+      runFilter: 'Run ID',
+      runFilterPlaceholder: '粘贴 workflow run_id',
+      fundFilter: '基金 ID',
+      fundFilterPlaceholder: '可选',
+      dateFilter: '交易日',
+      colStep: '步骤',
+      colStatus: '状态',
+      colAttempts: '尝试次数',
+      colDuration: '耗时',
+      colEnded: '结束时间',
+      colError: '错误',
+      resumeFromLatest: '从最近失败步骤恢复',
+      resumeFromHere: '从本步骤重跑',
+      resumeNoFailed: '所有步骤均已成功，无需恢复',
+      resumeRunning: '触发中…',
+      resumeSuccess: '已触发：{step} → {status}',
+      resumeError: '触发失败',
     },
     corpActions: {
       title: '分红 · 拆股 · 配股记录',
@@ -3291,6 +3342,32 @@ export const messages: Record<LocaleId, Messages> = {
       rebuildSuccess: 'Done: wrote {n} outcomes',
       rebuildError: 'Rebuild failed',
       horizonDays: '{n}d',
+    },
+    workflowCheckpoints: {
+      title: 'Workflow node checkpoints',
+      subtitle:
+        'Every step of the daily workflow writes a checkpoint row with status, duration, retry count and the raw error text. Filter by run_id or (fund + trading date); failed / paused steps can be re-fired in place without restarting the whole run.',
+      refresh: 'Refresh',
+      loading: 'Loading…',
+      empty: 'No checkpoints recorded yet',
+      error: 'Failed to load',
+      runFilter: 'Run ID',
+      runFilterPlaceholder: 'Paste workflow run_id',
+      fundFilter: 'Fund ID',
+      fundFilterPlaceholder: 'Optional',
+      dateFilter: 'Trading date',
+      colStep: 'Step',
+      colStatus: 'Status',
+      colAttempts: 'Attempts',
+      colDuration: 'Duration',
+      colEnded: 'Ended',
+      colError: 'Error',
+      resumeFromLatest: 'Resume from latest failure',
+      resumeFromHere: 'Re-fire this step',
+      resumeNoFailed: 'All steps succeeded — nothing to resume',
+      resumeRunning: 'Triggering…',
+      resumeSuccess: 'Triggered: {step} → {status}',
+      resumeError: 'Trigger failed',
     },
     corpActions: {
       title: 'Dividends · Splits · Rights Issues',
