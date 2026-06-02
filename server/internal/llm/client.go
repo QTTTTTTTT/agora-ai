@@ -316,6 +316,35 @@ func (c *MultiProviderClient) chatOnce(ctx context.Context, req ChatRequest) (*C
 	if config == nil {
 		return nil, fmt.Errorf("llm: failed to resolve model for request (tier=%s, step=%s)", req.ModelTier, req.StepName)
 	}
+	return c.chatWithResolvedConfig(ctx, req, config)
+}
+
+// ChatWithConfig executes a chat call against a pre-built ModelConfig,
+// bypassing the router. The full cache / rate-limit / budget / quota /
+// observability / usage-record pipeline is applied normally.
+//
+// Used by the Sprint 10.2 ShadowDispatcher to fire arm-specific calls
+// against fully-formed configs (arm.BaseURL, arm.Temperature, …) that
+// the router's findModelByName path couldn't reach with a model-name
+// lookup alone. Failover is NOT applied for shadow calls — a single
+// attempt is enough for comparison and a multi-provider chain would
+// muddy the per-arm attribution.
+func (c *MultiProviderClient) ChatWithConfig(ctx context.Context, req ChatRequest, config *ModelConfig) (*ChatResponse, error) {
+	if c == nil {
+		return nil, fmt.Errorf("llm: nil MultiProviderClient")
+	}
+	if config == nil {
+		return nil, fmt.Errorf("llm: ChatWithConfig requires a non-nil ModelConfig")
+	}
+	return c.chatWithResolvedConfig(ctx, req, config)
+}
+
+// chatWithResolvedConfig is the post-resolve body of chatOnce, factored
+// out so both the router-driven path and ChatWithConfig can share it
+// without duplicating cache / quota / budget / billing / observability
+// code. Called with config already validated for non-nil.
+func (c *MultiProviderClient) chatWithResolvedConfig(ctx context.Context, req ChatRequest, config *ModelConfig) (*ChatResponse, error) {
+	var err error
 	if config.APIKey == "" {
 		// Wrap the missing-key error in the sentinel so the
 		// failover layer can route around an agent whose

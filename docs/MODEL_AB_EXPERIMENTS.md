@@ -82,12 +82,47 @@ been edited in the meantime. This keeps a multi-call workflow (e.g.
   `(experiment_id, arm_index)`. Existing `usage_records` rows can be
   joined to assignments on that tuple to attribute cost per arm.
 
+## Sprint 10.2 — ShadowDispatcher (delivered)
+
+The router-only path from 10.1 routes ONLY the winning arm; to *compare*
+arms you need their outputs side-by-side. The `ShadowDispatcher`
+(internal/modelab/dispatcher.go) is an `llm.LLMClient` wrapper that:
+
+1. Asks the `Resolver` whether the call matches an experiment.
+2. If no, delegates to the inner client untouched.
+3. If yes, fires `len(arms)` calls in parallel: the **primary** arm via
+   `Inner.Chat(req)` (so it still goes through the router and steers the
+   production response that returns to the caller), and every other arm
+   via `ConfigChatClient.ChatWithConfig(req, BuildLLMConfig(arm, hc))`,
+   which bypasses the router entirely and pins exactly the arm spec.
+4. Non-primary responses are persisted to `model_ab_shadow_responses`
+   with `raw_output`, `parsed_output` (when JSON-parsable), latency, and
+   token counts.
+
+### Safety properties
+
+- Shadow errors NEVER fail the primary call.
+- Primary errors propagate to the caller unchanged (a shadow that
+  happens to succeed doesn't mask a primary failure).
+- Shadow arms run with a bounded per-call timeout (default 30s) and a
+  process-wide semaphore on `MaxConcurrentShadowCalls` (default 8).
+- Token budget guard: experiments with `max_total_tokens` set stop
+  attracting new traffic once their cumulative output token count
+  crosses the cap.
+- Shadow arms use a `context.Background()`-derived ctx so the dispatcher
+  can finish + persist even if the caller's context is cancelled the
+  instant the primary returns.
+
+### Integration
+
+`llmRuntime.LLMClient()` now returns the dispatcher when one is wired
+(via `AttachModelABResolver`), so every business-side caller
+(`decision.LLMDecisionEngine`, `ThreeStageEngine`, sentiment scorer, …)
+sees the wrapped client transparently. Production code does not need to
+change.
+
 ## What's still missing (later sprints)
 
-- **S10.2** — `ShadowDispatcher` runs the non-primary arms in parallel
-  and persists their raw outputs into `model_ab_shadow_responses`. S10.1
-  only routes the *primary* call to the winning arm; comparing arms
-  requires shadow output.
 - **S10.3** — aggregator + REST API + React report page that shows
   decision agreement, latency, cost, and downstream α per arm.
 - **S10.4** — admin CRUD UI on top of the REST API so operators don't
@@ -111,6 +146,8 @@ revisions.
 - `server/internal/modelab/repo.go` — DB access layer
 - `server/internal/modelab/resolver.go` — cached experiment lookup + sticky-arm upsert
 - `server/internal/modelab/hook.go` — `BuildLLMConfig` + `Resolver.AsLLMHook`
+- `server/internal/modelab/dispatcher.go` — `ShadowDispatcher` + `ConfigChatClient`
 - `server/internal/llm/model_ab_hook.go` — typed hook interface installed on `ModelRouter`
+- `server/internal/llm/client.go` — `MultiProviderClient.ChatWithConfig`
 - `server/cmd/server/wiring_adapters.go` — `llmRuntime.AttachModelABResolver`
 - `server/cmd/server/main.go` — `modelab.NewRepo(db)` + attach call

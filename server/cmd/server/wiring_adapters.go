@@ -250,6 +250,18 @@ type llmRuntime struct {
 	// cache when an experiment's status flips. nil = no model
 	// A/B (legacy / tests without DB).
 	modelABResolver *modelab.Resolver
+
+	// modelABRepo is shared between the resolver, the shadow
+	// dispatcher (S10.2), and the admin handlers (S10.3/4).
+	// Set via SetModelABRepo before AttachModelABResolver so
+	// dispatcher persistence is wired immediately.
+	modelABRepo *modelab.Repo
+
+	// modelABDispatcher wraps the multi-provider client to fan
+	// out shadow arms when an experiment matches. Returned by
+	// LLMClient() so all decision/agent paths see it. nil when
+	// no resolver / repo / client is wired.
+	modelABDispatcher *modelab.ShadowDispatcher
 }
 
 // agentModelLister narrows repository.AgentRepo to the two methods
@@ -269,9 +281,10 @@ func (r *llmRuntime) SetAgentRepo(repo agentModelLister) {
 	r.agentRepo = repo
 }
 
-// AttachModelABResolver wires the Sprint 10.1 model A/B engine
-// onto the router so every Chat() call passes through the
-// resolver before falling back to per-user / per-agent defaults.
+// AttachModelABResolver wires the Sprint 10 model A/B engine
+// onto the router AND installs the shadow dispatcher so every
+// Chat() call passes through arm selection (S10.1) and parallel
+// arm execution (S10.2).
 //
 // Safe to call before or after SyncAll, but should be called
 // AFTER the router exists (i.e. after newLLMRuntime returns).
@@ -284,6 +297,7 @@ func (r *llmRuntime) AttachModelABResolver(resolver *modelab.Resolver) {
 	r.modelABResolver = resolver
 	if resolver == nil {
 		r.router.SetModelABHook(nil)
+		r.modelABDispatcher = nil
 		return
 	}
 	hc := modelab.HookContext{
@@ -291,6 +305,35 @@ func (r *llmRuntime) AttachModelABResolver(resolver *modelab.Resolver) {
 		TierDefaults:  r.tierDefaults,
 	}
 	r.router.SetModelABHook(resolver.AsLLMHook(hc))
+
+	// Sprint 10.2 — shadow dispatcher fans out non-primary arms
+	// in parallel and persists their responses. The dispatcher
+	// wraps the multi-provider client; callers that consume the
+	// runtime through LLMClient() get the wrapped version
+	// transparently.
+	if r.client != nil && r.modelABRepo != nil {
+		r.modelABDispatcher = modelab.NewShadowDispatcher(r.client, resolver, r.modelABRepo, hc)
+	}
+}
+
+// SetModelABRepo wires the modelab repository onto the runtime
+// so the shadow dispatcher (S10.2) can persist non-primary arm
+// responses AND the admin handlers (S10.3 / S10.4) can read /
+// mutate experiments. Safe to call before AttachModelABResolver.
+func (r *llmRuntime) SetModelABRepo(repo *modelab.Repo) {
+	if r == nil {
+		return
+	}
+	r.modelABRepo = repo
+}
+
+// ModelABRepo returns the runtime's modelab repository (nil
+// when modelab isn't wired). Used by the admin handlers.
+func (r *llmRuntime) ModelABRepo() *modelab.Repo {
+	if r == nil {
+		return nil
+	}
+	return r.modelABRepo
 }
 
 // ModelABResolver returns the currently attached resolver. Used
@@ -485,14 +528,19 @@ func (r *llmRuntime) ListModels(ctx context.Context) ([]api.ModelInfo, error) {
 	return result, nil
 }
 
-// LLMClient exposes the underlying MultiProviderClient so callers
-// that want the raw llm.LLMClient interface (e.g.,
-// decision.LLMDecisionEngine which only depends on Chat) can wire it
-// without the metric / logging wrapper above. Returns nil if the
-// runtime was constructed without a client (legacy test paths).
+// LLMClient exposes the LLM client decision/agent paths consume.
+// When a Sprint 10.2 ShadowDispatcher is attached we return it
+// transparently so every business call goes through the
+// experiment fan-out path. Without a dispatcher the runtime
+// returns the raw MultiProviderClient — identical to pre-10
+// behaviour. Returns nil if the runtime was constructed without
+// a client (legacy test paths).
 func (r *llmRuntime) LLMClient() llm.LLMClient {
 	if r == nil {
 		return nil
+	}
+	if r.modelABDispatcher != nil {
+		return r.modelABDispatcher
 	}
 	return r.client
 }

@@ -723,13 +723,17 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		return nil, fmt.Errorf("llm runtime: resync after agentRepo wiring: %w", err)
 	}
 
-	// Sprint 10.1 — model-level A/B routing. The router now
-	// consults a modelab.Resolver before falling through to the
-	// per-user / per-agent priority chain. When no experiment
-	// matches the (fund, agent, role, step) tuple the hook
-	// returns nil and the router behaves exactly as before.
+	// Sprint 10 — model-level A/B routing (S10.1) plus shadow
+	// dispatcher (S10.2). The router consults a modelab.Resolver
+	// before falling through to the per-user / per-agent
+	// priority chain; the shadow dispatcher fans out non-primary
+	// arms in parallel and persists their outputs into
+	// model_ab_shadow_responses. When no experiment matches the
+	// (fund, agent, role, step) tuple, both layers are no-ops
+	// and the runtime behaves exactly as before.
 	modelABRepo := modelab.NewRepo(db)
 	modelABResolver := modelab.NewResolver(modelABRepo)
+	llmRuntime.SetModelABRepo(modelABRepo)
 	llmRuntime.AttachModelABResolver(modelABResolver)
 
 	marketDataService := marketdata.NewService(cfg.MarketData).WithTranslator(marketdata.NewTranslator(cfg.NewsTranslator))
