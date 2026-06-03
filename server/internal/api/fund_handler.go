@@ -94,6 +94,36 @@ type Plan struct {
 	Actions            []PlanAction    `json:"actions,omitempty"`
 	CreatedAt          time.Time       `json:"createdAt"`
 	UpdatedAt          time.Time       `json:"updatedAt"`
+	// Sprint 11.3 — tiered LLM-failure disclosure.
+	//
+	// DecisionSource is the bounded enum of provenance tags
+	// (llm_pm / llm_three_stage / fallback_no_llm /
+	// fallback_after_llm_error / fallback_empty_plan / legacy).
+	// Every authenticated user sees this field — knowing whether
+	// a plan was AI-derived vs rule-derived is a baseline
+	// transparency requirement on a regulated investment surface.
+	DecisionSource string `json:"decisionSource,omitempty"`
+	// FallbackReason carries the user-facing payload: the
+	// category code + an opaque provider/model label suitable
+	// for a UI chip. The technical Summary field is NEVER
+	// included in this surface and is stripped by the API layer
+	// before serialisation. Admins read the full Detail via the
+	// separate AdminLLMHealthSection endpoint introduced in
+	// Sprint 11.4.
+	FallbackReason *PlanFallbackReason `json:"fallbackReason,omitempty"`
+}
+
+// PlanFallbackReason is the redacted public projection of
+// errorclass.Detail. We intentionally omit the Summary field — the raw
+// provider message can include API URLs, model names, or vendor
+// internals that should not leak to general users. The Provider field
+// is included as a coarse identifier ("openai" / "claude") so the user
+// understands which path failed without exposing the specific model
+// variant under contract.
+type PlanFallbackReason struct {
+	Category string `json:"category"`
+	Provider string `json:"provider,omitempty"`
+	At       string `json:"at,omitempty"`
 }
 
 type PlanAction struct {

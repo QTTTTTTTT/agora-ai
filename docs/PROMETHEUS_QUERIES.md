@@ -196,6 +196,42 @@ sum by (provider, status) (rate(fundai_llm_calls_total{status!="success"}[10m]))
 **解读**: 单 provider 集中失败 → 该 provider 限流或 API key 失效；
 auto-failover 应在 30 秒内切换 (Sprint A bonus fix 验证点)。
 
+### 4.3 决策来源占比 (S11.4)
+
+`fundai_pm_decision_total{source,category,provider}` 暴露每次 PM 决策的来源标签。
+
+```promql
+sum by (source) (rate(fundai_pm_decision_total[5m]))
+```
+
+**解读**: 正常情况下 `llm_pm` 或 `llm_three_stage` 应占绝大多数；
+`fallback_*` 累计占比 > 5% 持续 30 分钟即触发 `PMDecisionFallbackRateHigh` 告警。
+
+### 4.4 兜底原因 Top-N (S11.4)
+
+```promql
+topk(5, sum by (category, provider) (
+  rate(fundai_pm_decision_total{source=~"fallback_.*"}[1h])
+))
+```
+
+**解读**:
+- `category=rate_limited` 集中在一个 provider → 升级订阅档位或切换 provider。
+- `category=schema_validation_failed` 突增 → 多半是 prompt 与模型 schema 漂移。
+- `category=unknown` 持续 > 0 → 触发 `PMDecisionUnknownCategory` 告警，
+  errorclass 需要扩枚举。
+
+### 4.5 兜底占比单基金视角 (S11.4)
+
+```promql
+sum(rate(fundai_pm_decision_total{source=~"fallback_.*"}[15m]))
+  /
+clamp_min(sum(rate(fundai_pm_decision_total[15m])), 0.001)
+```
+
+**解读**: 全平台兜底占比，配合 admin LLM-health 面板使用。建议
+告警阈值 > 0.05 sustained 30 minutes。
+
 ---
 
 ## 5. 工作流推进 (PM 决策对应的 plan workflow)

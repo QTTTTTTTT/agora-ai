@@ -30,6 +30,7 @@ import (
 	"github.com/fundai/server/internal/debate"
 	"github.com/fundai/server/internal/correlation"
 	"github.com/fundai/server/internal/decision"
+	"github.com/fundai/server/internal/decision/errorclass"
 	"github.com/fundai/server/internal/earnings"
 	"github.com/fundai/server/internal/exitmanager"
 	"github.com/fundai/server/internal/exposure"
@@ -1725,6 +1726,44 @@ type runtimePMAgent struct {
 	// the cross-fund case where two different funds tick
 	// simultaneously.
 	lastTraceByFund sync.Map
+
+	// decisionSourceObserver (Sprint 11.4) is the optional
+	// metrics sink for PM-decision provenance events. nil-safe;
+	// production wires *serverMetrics here, tests leave it nil
+	// and the recorder is a no-op.
+	decisionSourceObserver pmDecisionSourceObserver
+
+	// lastDecisionSourceByFund is the Sprint 11.2 sibling of
+	// lastTraceByFund. It carries the decision-provenance tag
+	// (llm_pm / llm_three_stage / fallback_after_llm_error / …)
+	// plus an optional errorclass.Detail blob from the moment
+	// buildPlanActions decides which path it took to the moment
+	// GeneratePlan has the plan ID and can persist via
+	// PlanRepo.SetDecisionSource. Same load-and-delete contract
+	// as lastTraceByFund — see decisionSourceRecord. Keeping
+	// this as a separate map (rather than fattening
+	// lastTraceByFund) preserves a single-purpose cache per
+	// concern and avoids forcing the G1 #2 attribution writer to
+	// know about S11 fields.
+	lastDecisionSourceByFund sync.Map
+}
+
+// decisionSourceRecord is the per-fund payload stashed by
+// buildPlanActions for GeneratePlan to consume. Source is one of the
+// decision_source enum values; ReasonJSON is the marshalled
+// errorclass.Detail JSONB and is nil for successful LLM rows.
+type decisionSourceRecord struct {
+	Source     string
+	ReasonJSON []byte
+}
+
+// pmDecisionSourceObserver is the metrics-sink contract for Sprint
+// 11.4. *serverMetrics satisfies this interface; tests can stub it
+// out cheaply. The signature deliberately mirrors errorclass.Detail
+// field semantics — category + provider are empty on the LLM-success
+// path, populated on fallback rows.
+type pmDecisionSourceObserver interface {
+	ObservePMDecisionSource(source, category, provider string)
 }
 
 type runtimeRiskAgent struct {
@@ -3346,7 +3385,9 @@ func (s *planServiceAdapter) getPlanWithActions(userID, planID string) (*api.Pla
 	if err != nil {
 		return nil, err
 	}
-	return convertPlanWithLocale(userID, s.llmRuntime, plan, actions), nil
+	converted := convertPlanWithLocale(userID, s.llmRuntime, plan, actions)
+	attachDecisionSource(context.Background(), s.planRepo, converted)
+	return converted, nil
 }
 
 func (s *planServiceAdapter) rejectPlan(ctx context.Context, planID, reason string) error {
@@ -3750,6 +3791,10 @@ func (s *decisionTraceServiceAdapter) GetDecisionTrace(userID, fundID, tradingDa
 		go func() {
 			defer fanOut.Done()
 			planView = convertPlanWithLocale(userID, s.llmRuntime, selectedPlan, actions)
+			// Sprint 11.3 — the decision-trace card is exactly
+			// where users go to understand "where did this plan
+			// come from", so the provenance chip belongs here.
+			attachDecisionSource(context.Background(), s.planRepo, planView)
 		}()
 	}
 	// Non-LLM builders can run on the calling goroutine while the
@@ -6167,6 +6212,12 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 				marketData:     s.marketData,
 				tradeRepo:      tradeRepo,
 				decisionEngine: buildLLMDecisionEngine(s.runtime, fund.ID),
+				// Sprint 11.4 — pipe the serverMetrics into the PM
+				// agent so recordDecisionSource can publish
+				// fundai_pm_decision_total. Nil-safe: smoke /
+				// integration builds with no metrics struct fall
+				// through to the no-op recorder.
+				decisionSourceObserver: pmDecisionSourceObserverFromMetrics(s.metrics),
 				lotRepo:        lotRepo,
 				exitManager:    exitmanager.NewService(),
 				// regimeService is OPTIONAL — when s.ohlcFetcher is
@@ -13170,6 +13221,20 @@ func (a *runtimePMAgent) GeneratePlan(ctx context.Context, fundID, tradingDate s
 	if err != nil {
 		return nil, mapRepositoryError(err)
 	}
+	// Sprint 11.2 — persist the decision provenance tag right
+	// after CreateWithActions returns. This is intentionally
+	// soft-fail: a transient UPDATE failure logs a warning but
+	// does not break plan creation. Worst case the row stays at
+	// the SQL default ('legacy'), which is strictly better than
+	// failing the whole PM tick. consumeDecisionSource also
+	// guards against missing records so tests that drive the
+	// adapter without going through buildPlanActions keep
+	// passing.
+	if rec, ok := a.consumeDecisionSource(fundID); ok {
+		if err := a.planRepo.SetDecisionSource(ctx, id, rec.Source, rec.ReasonJSON); err != nil {
+			slog.Warn("plan_repo SetDecisionSource failed", "fundId", fundID, "planId", id, "err", err)
+		}
+	}
 	// G1 #2: attribution writer needs the LLM's per-action
 	// reasoning (where the PM names blocks like "qualityScores",
 	// "valueScores", etc.) plus the high-level summary. The
@@ -14423,11 +14488,33 @@ func (a *runtimePMAgent) buildPlanActions(ctx context.Context, fundID string, tr
 	if a.decisionEngine != nil {
 		actions, confidence, err := a.runDecisionEngine(ctx, fund, pmAgent, positions, boughtTodayByKey, roundtable, tradingDate, fundID)
 		if err == nil && len(actions) > 0 {
+			a.recordDecisionSource(fundID, llmDecisionSourceFor(a.decisionEngine), errorclass.Detail{})
 			return actions, confidence, nil
 		}
+		// LLM path failed OR returned an empty plan. Both feed the
+		// fallback heuristic, but Sprint 11 distinguishes them in
+		// the persisted decision_source tag so the admin LLM-health
+		// board and the user-facing chip can differentiate "model
+		// errored" (fallback_after_llm_error, actionable for the
+		// user) from "model returned no actions" (fallback_empty_plan,
+		// often signals a degenerate input rather than infra trouble).
 		if err != nil {
 			slog.Warn("pm decision engine failed, falling back to deterministic heuristic", "fundId", fundID, "err", err)
+			detail := errorclass.Classify(err)
+			a.recordDecisionSource(fundID, "fallback_after_llm_error", detail)
+		} else {
+			a.recordDecisionSource(fundID, "fallback_empty_plan", errorclass.Detail{
+				Category: errorclass.CategoryEmptyResponse,
+				Summary:  "decision engine returned zero actions",
+				At:       time.Now().UTC(),
+			})
 		}
+	} else {
+		a.recordDecisionSource(fundID, "fallback_no_llm", errorclass.Detail{
+			Category: errorclass.CategoryUnknown,
+			Summary:  "no decision engine wired (legacy deploy or test stub)",
+			At:       time.Now().UTC(),
+		})
 	}
 
 	actions, err := a.buildPlanActionsLegacy(ctx, fund, pmAgent, positions, boughtTodayByKey, roundtable, tradingDate, fundID)
@@ -14435,6 +14522,95 @@ func (a *runtimePMAgent) buildPlanActions(ctx context.Context, fundID string, tr
 		return nil, 0, err
 	}
 	return actions, 0.55, nil
+}
+
+// llmDecisionSourceFor maps the concrete decision.DecisionEngine
+// implementation to its Sprint 11 decision_source tag. Returns
+// "fallback_no_llm" for the FallbackEngine — that engine signals
+// "no LLM" rather than "LLM succeeded".
+func llmDecisionSourceFor(engine decision.DecisionEngine) string {
+	switch engine.(type) {
+	case *decision.ThreeStageEngine:
+		return "llm_three_stage"
+	case *decision.LLMDecisionEngine:
+		return "llm_pm"
+	case decision.FallbackEngine:
+		return "fallback_no_llm"
+	default:
+		return "llm_pm" // unknown wrapper, treat as a normal LLM run
+	}
+}
+
+// recordDecisionSource stashes the Sprint 11 provenance tuple for the
+// current fund's in-flight plan. The companion GeneratePlan path will
+// load-and-delete the entry via consumeDecisionSource right after
+// PlanRepo.CreateWithActions returns, then call
+// PlanRepo.SetDecisionSource. Stale rows can't accumulate because each
+// store overwrites the previous one for the same fundID.
+//
+// The reason argument is a zero-value Detail for the "successful LLM"
+// case; we detect that by checking Category == "" and skip storing
+// the reason JSON.
+func (a *runtimePMAgent) recordDecisionSource(fundID, source string, reason errorclass.Detail) {
+	if a == nil || strings.TrimSpace(fundID) == "" || strings.TrimSpace(source) == "" {
+		return
+	}
+	rec := decisionSourceRecord{Source: source}
+	if reason.Category != "" {
+		if blob, err := json.Marshal(reason); err == nil {
+			rec.ReasonJSON = blob
+		}
+	}
+	a.lastDecisionSourceByFund.Store(fundID, rec)
+	// Sprint 11.4 — emit the metrics event at the same call
+	// site. We tag category/provider only when present so the
+	// cardinality stays bounded. The observer is nil-safe.
+	if a.decisionSourceObserver != nil {
+		a.decisionSourceObserver.ObservePMDecisionSource(source, string(reason.Category), reason.Provider)
+	}
+}
+
+// AttachDecisionSourceObserver lets the wiring layer plug a metrics
+// sink onto an existing runtimePMAgent. Tests can pass nil to confirm
+// the recorder degrades to a no-op without panicking. Concurrency:
+// called exactly once at startup (single goroutine) before any PM
+// tick fires, so no synchronisation is needed.
+func (a *runtimePMAgent) AttachDecisionSourceObserver(observer pmDecisionSourceObserver) {
+	if a == nil {
+		return
+	}
+	a.decisionSourceObserver = observer
+}
+
+// pmDecisionSourceObserverFromMetrics wraps an arbitrary
+// *serverMetrics-shaped value into the pmDecisionSourceObserver
+// interface. The indirection lets us pass a nil *serverMetrics
+// without panicking inside the constructor — the typed nil would
+// otherwise survive the interface conversion and crash on the first
+// call.
+func pmDecisionSourceObserverFromMetrics(m *serverMetrics) pmDecisionSourceObserver {
+	if m == nil {
+		return nil
+	}
+	return m
+}
+
+// consumeDecisionSource is GeneratePlan's load-and-delete counterpart
+// to recordDecisionSource. Returns ok=false when no record was stored
+// (e.g. tests that drive buildPlanActions directly or legacy code
+// paths that skip the new bookkeeping); GeneratePlan in that case
+// falls through without calling SetDecisionSource and the row keeps
+// the SQL default 'legacy' tag.
+func (a *runtimePMAgent) consumeDecisionSource(fundID string) (decisionSourceRecord, bool) {
+	if a == nil || strings.TrimSpace(fundID) == "" {
+		return decisionSourceRecord{}, false
+	}
+	v, ok := a.lastDecisionSourceByFund.LoadAndDelete(fundID)
+	if !ok {
+		return decisionSourceRecord{}, false
+	}
+	rec, ok := v.(decisionSourceRecord)
+	return rec, ok
 }
 
 // buildPlanActionsLegacy is the pre-Phase-2A deterministic plan
@@ -21622,6 +21798,50 @@ func convertABTest(test *repository.ABTest) *api.ABTest {
 
 func convertPlan(plan *repository.InvestmentPlan, actions []repository.PlanAction) *api.Plan {
 	return convertPlanWithLocale("", nil, plan, actions)
+}
+
+// attachDecisionSource is the Sprint 11.3 opt-in augment that pulls the
+// provenance tag + redacted fallback reason from PlanRepo and stamps
+// them onto the API-facing Plan. Soft-fail by design: a transient
+// repo error logs a warning and leaves the chip absent rather than
+// breaking the plan render. Endpoints that want the chip call this
+// right after convertPlan(); endpoints that don't (e.g. bulk plan
+// list views) skip it to avoid the per-row round trip.
+//
+// The returned Plan is the same pointer that was passed in — we
+// modify in place so the convention matches the rest of the
+// converter layer.
+func attachDecisionSource(ctx context.Context, repo *repository.PlanRepo, plan *api.Plan) {
+	if plan == nil || repo == nil || strings.TrimSpace(plan.ID) == "" {
+		return
+	}
+	source, reasonJSON, err := repo.GetDecisionSource(ctx, plan.ID)
+	if err != nil {
+		slog.Warn("attachDecisionSource: lookup failed",
+			"planId", plan.ID, "fundId", plan.FundID, "err", err)
+		return
+	}
+	plan.DecisionSource = source
+	if len(reasonJSON) == 0 {
+		return
+	}
+	var detail errorclass.Detail
+	if err := json.Unmarshal(reasonJSON, &detail); err != nil {
+		slog.Warn("attachDecisionSource: unmarshal reason failed",
+			"planId", plan.ID, "err", err)
+		return
+	}
+	// Strip the technical Summary — non-admin callers must not see
+	// raw provider error text. The admin LLM-health board (S11.4)
+	// reads the raw JSONB column directly and bypasses this
+	// converter.
+	plan.FallbackReason = &api.PlanFallbackReason{
+		Category: string(detail.Category),
+		Provider: detail.Provider,
+	}
+	if !detail.At.IsZero() {
+		plan.FallbackReason.At = detail.At.UTC().Format(time.RFC3339)
+	}
 }
 
 func convertPlanWithLocale(userID string, runtime *llmRuntime, plan *repository.InvestmentPlan, actions []repository.PlanAction) *api.Plan {

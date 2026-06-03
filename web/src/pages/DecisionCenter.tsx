@@ -27,6 +27,7 @@ import { PlanListSidebar } from "./decisionCenter/PlanListSidebar";
 import { PriceRefreshDialog, type PriceRefreshRow } from "./decisionCenter/PriceRefreshDialog";
 import { RiskConclusionCard } from "./decisionCenter/RiskConclusionCard";
 import { TraceboardCard } from "./decisionCenter/TraceboardCard";
+import { DecisionSourceChip } from "../components/DecisionSourceChip";
 import NextRunBanner from "../components/NextRunBanner";
 import {
   canReviewPlan,
@@ -1559,6 +1560,11 @@ const DecisionCenter: React.FC = () => {
                 <div className="mt-4 flex flex-wrap gap-3 text-xs text-gray-500">
                   <span className="rounded-full bg-gray-100 px-3 py-1">{copy.portfolioManager}: {selectedPlanDetail?.pmAgentId || selected.pmAgentId || copy.notRecorded}</span>
                   <span className="rounded-full bg-gray-100 px-3 py-1">{copy.discussionSession}: {selectedPlanDetail?.roundtableId || selected.roundtableId || copy.notRecorded}</span>
+                  <DecisionSourceChip
+                    language={language}
+                    source={selectedPlanDetail?.decisionSource ?? selected?.decisionSource}
+                    reason={selectedPlanDetail?.fallbackReason ?? selected?.fallbackReason}
+                  />
                 </div>
               </div>
 

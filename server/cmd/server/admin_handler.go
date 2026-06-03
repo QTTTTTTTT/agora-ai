@@ -139,6 +139,12 @@ type adminHandler struct {
 	modelABRepo     *modelab.Repo
 	modelABReporter *modelab.Reporter
 	modelABResolver *modelab.Resolver
+
+	// llmHealthRepo backs the Sprint 11.4 LLM-health admin
+	// dashboard (decision_source / fallback_reason aggregates).
+	// Nil-safe; when unwired the llm-health routes stay
+	// unregistered.
+	llmHealthRepo *repository.LLMHealthRepo
 }
 
 // adminSuperAdminChecker implements audit.SuperAdminChecker by reading
@@ -296,6 +302,7 @@ func newAdminHandler(svc *Services) *adminHandler {
 
 		modelABRepo:     svc.ModelABRepo,
 		modelABReporter: svc.ModelABReporter,
+		llmHealthRepo:   svc.LLMHealthRepo,
 	}
 	if svc.LLMRuntime != nil {
 		h.modelABResolver = svc.LLMRuntime.ModelABResolver()
@@ -389,6 +396,7 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerWorkflowCheckpointAdminRoutes(mux)
 	// S10.3 / 10.4 — model A/B experiment list / report / CRUD.
 	h.registerModelABAdminRoutes(mux)
+	h.registerLLMHealthAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

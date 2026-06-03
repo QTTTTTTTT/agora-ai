@@ -660,6 +660,14 @@ type llmRequestError struct {
 	Message    string
 }
 
+// RequestError is the exported type alias for llmRequestError so other
+// packages (decision/errorclass, in particular) can errors.As() into a
+// concrete shape with Provider / Model / Reason / StatusCode fields
+// without paying the API-stability cost of moving the unexported
+// struct definition. The classifier reads Reason + StatusCode to map
+// raw provider failures into the bounded user-facing category set.
+type RequestError = llmRequestError
+
 func (e *llmRequestError) Error() string {
 	if e.StatusCode > 0 {
 		return fmt.Sprintf("llm: %s %s failed (%s, status=%d): %s", e.Provider, e.Model, e.Reason, e.StatusCode, e.Message)

@@ -2135,6 +2135,50 @@ export interface ModelABArmMetric {
   agreement_with_primary_pct: number; // -1 if not computed
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 11.4 — LLM health admin endpoints.
+// ---------------------------------------------------------------------------
+
+// LLMHealthSourceRow mirrors one row of /api/admin/llm-health/summary
+// sources[]. Source is the decision_source enum (mirrors the Go side).
+// Count is the number of plans in the window keyed by that source.
+export interface LLMHealthSourceRow {
+  source: string;
+  count: number;
+}
+
+export interface LLMHealthCategoryRow {
+  category: string;
+  provider?: string;
+  count: number;
+}
+
+export interface LLMHealthSummary {
+  window_hours: number;
+  sources: LLMHealthSourceRow[];
+  categories: LLMHealthCategoryRow[];
+}
+
+// LLMHealthRecentFallback is the admin-only shape that EXPLICITLY
+// includes the raw provider summary (Summary). Non-admin client
+// projections (PlanFallbackReason in lib/api.ts) strip this field —
+// see attachDecisionSource in the Go wiring layer.
+export interface LLMHealthRecentFallback {
+  plan_id: string;
+  fund_id: string;
+  source: string;
+  category?: string;
+  provider?: string;
+  model?: string;
+  summary?: string;
+  created_at: string;
+}
+
+export interface LLMHealthRecentFallbacksResponse {
+  window_hours: number;
+  items: LLMHealthRecentFallback[];
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

@@ -631,7 +631,10 @@ type Services struct {
 	// independently via llmRuntime.AttachModelABResolver.
 	ModelABRepo     *modelab.Repo
 	ModelABReporter *modelab.Reporter
-	WSFeedConfig           wsFeedConfig
+	// LLMHealthRepo (Sprint 11.4) backs the admin LLM-health
+	// dashboard. Nil-safe.
+	LLMHealthRepo *repository.LLMHealthRepo
+	WSFeedConfig  wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
 	WSFeedBridge           *wsFeedSubscriptionBridge
@@ -1041,6 +1044,10 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// layer, which the admin UI degrades on.
 	services.ModelABRepo = modelABRepo
 	services.ModelABReporter = modelABReporter
+	// Sprint 11.4 — admin LLM-health dashboard. Lives next to
+	// ModelABRepo because both are admin-only and read-only;
+	// nil-safe at the handler boundary.
+	services.LLMHealthRepo = repository.NewLLMHealthRepo(db)
 
 	// Sprint 9.3 — social sentiment ingestion. The registry
 	// reads per-platform env flags; when no provider is enabled
@@ -3134,6 +3141,17 @@ type serverMetrics struct {
 	// every run shares one counter — the decider is rebuilt per
 	// analyze invocation and would lose state otherwise.
 	abShadowLLMCalls map[string]int64
+
+	// Sprint 11.4 — decision-source counter. One counter row per
+	// PM decision keyed by source (llm_pm / llm_three_stage /
+	// fallback_after_llm_error / fallback_empty_plan /
+	// fallback_no_llm / legacy) and, for fallback rows, the
+	// errorclass.Category and provider. Powers the
+	// `fundai_pm_decision_total{source,category,provider}`
+	// series the admin LLM-health board (S11.4) reads and the
+	// SRE alert template uses to fire when fallback rate exceeds
+	// 5% of all PM decisions over the trailing hour.
+	decisionSourceTotal map[string]int64
 }
 
 var httpRequestDurationSecondsBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
@@ -3175,6 +3193,7 @@ func newServerMetrics() *serverMetrics {
 		corpActionIngestEvents:          make(map[string]int64),
 		corpActionIngestApply:           make(map[string]int64),
 		abShadowLLMCalls:                make(map[string]int64),
+		decisionSourceTotal:             make(map[string]int64),
 	}
 }
 
@@ -3295,6 +3314,28 @@ func (m *serverMetrics) ObserveLLM(provider, model, step string, status string, 
 	m.llmCallsTotal[key]++
 	m.llmLatencyMS[key] += latency.Milliseconds()
 	m.llmCallCount[key]++
+}
+
+// ObservePMDecisionSource (Sprint 11.4) records one PM decision keyed
+// by its provenance tag. category and provider are empty strings for
+// the LLM-success rows (llm_pm, llm_three_stage) and populated from
+// the errorclass.Detail for fallback rows. The series cardinality is
+// bounded: 6 sources × 11 categories × ~5 providers = ~330 lines.
+func (m *serverMetrics) ObservePMDecisionSource(source, category, provider string) {
+	if m == nil {
+		return
+	}
+	if strings.TrimSpace(source) == "" {
+		return
+	}
+	key := fmt.Sprintf("source=%s,category=%s,provider=%s",
+		strings.TrimSpace(source),
+		strings.TrimSpace(category),
+		strings.TrimSpace(provider),
+	)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.decisionSourceTotal[key]++
 }
 
 func (m *serverMetrics) ObserveWorkflow(fundID, state, step string) {
@@ -4012,6 +4053,26 @@ func (m *serverMetrics) ExportPrometheus() string {
 	)
 	for _, key := range sortedMetricKeys(m.abShadowLLMCalls) {
 		lines = append(lines, fmt.Sprintf("fundai_ab_shadow_llm_calls_total{%s} %d", prometheusLabels(key), m.abShadowLLMCalls[key]))
+	}
+	// Sprint 11.4 — decision-source counter. Labels:
+	//   source     llm_pm / llm_three_stage / fallback_* / legacy
+	//   category   errorclass.Category (only set on fallback_*)
+	//   provider   openai / claude / gemini / "" (only set on fallback_*
+	//              where the request reached the provider before failing)
+	//
+	// Operator queries:
+	//   sum(rate(fundai_pm_decision_total{source=~"fallback_.*"}[5m])) /
+	//     sum(rate(fundai_pm_decision_total[5m]))
+	//   → fallback rate; alert when > 0.05 sustained 30m.
+	//
+	//   sum by (category)(rate(fundai_pm_decision_total{source="fallback_after_llm_error"}[1h]))
+	//   → top failure causes for an operator briefing.
+	lines = append(lines,
+		"# HELP fundai_pm_decision_total PM decisions partitioned by provenance source and (for fallback rows) errorclass category and provider.",
+		"# TYPE fundai_pm_decision_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.decisionSourceTotal) {
+		lines = append(lines, fmt.Sprintf("fundai_pm_decision_total{%s} %d", prometheusLabels(key), m.decisionSourceTotal[key]))
 	}
 	return strings.Join(append(lines, ""), "\n")
 }

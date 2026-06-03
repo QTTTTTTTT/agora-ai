@@ -1,5 +1,7 @@
 import type { DecisionTraceTrade } from "../../lib/api";
 
+import type { DecisionSource, PlanFallbackReason } from "../../lib/api";
+
 export type PlanStatus = "pending" | "pending_user" | "approved" | "rejected" | string;
 export type ActionType = "buy" | "sell" | "hold" | "reduce" | "add" | "watch" | string;
 export type CheckResult = "pass" | "warn" | "fail" | string;
@@ -53,6 +55,12 @@ export interface ApiPlan {
   actions?: ApiPlanAction[];
   createdAt: string;
   updatedAt: string;
+  // Sprint 11.3 — provenance chip data. Both fields opt-in: the
+  // bulk plan list endpoint omits them to save the per-row round
+  // trip; the per-plan detail and decision-trace endpoints
+  // populate them via attachDecisionSource.
+  decisionSource?: DecisionSource;
+  fallbackReason?: PlanFallbackReason;
 }
 
 export interface RiskCheckView {

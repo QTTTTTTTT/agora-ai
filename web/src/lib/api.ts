@@ -2893,6 +2893,37 @@ export type {
 } from "@fundai/api-client";
 
 // ---------------------------------------------------------------------------
+// Sprint 11.4 — LLM health admin endpoints.
+// ---------------------------------------------------------------------------
+
+export async function fetchLLMHealthSummary(
+  windowHours = 24,
+): Promise<import("@fundai/api-client").LLMHealthSummary> {
+  return apiGet<import("@fundai/api-client").LLMHealthSummary>(
+    `/api/admin/llm-health/summary?window_hours=${encodeURIComponent(String(windowHours))}`,
+  );
+}
+
+export async function fetchLLMHealthRecentFallbacks(
+  windowHours = 24,
+  limit = 50,
+): Promise<import("@fundai/api-client").LLMHealthRecentFallbacksResponse> {
+  return apiGet<import("@fundai/api-client").LLMHealthRecentFallbacksResponse>(
+    `/api/admin/llm-health/recent-fallbacks?window_hours=${encodeURIComponent(
+      String(windowHours),
+    )}&limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export type {
+  LLMHealthSourceRow,
+  LLMHealthCategoryRow,
+  LLMHealthSummary,
+  LLMHealthRecentFallback,
+  LLMHealthRecentFallbacksResponse,
+} from "@fundai/api-client";
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 
@@ -3273,6 +3304,41 @@ export interface PlanSummary {
   }>;
   createdAt: string;
   updatedAt: string;
+  // Sprint 11.3 — provenance chip data. decisionSource is one of
+  // llm_pm / llm_three_stage / fallback_no_llm /
+  // fallback_after_llm_error / fallback_empty_plan / legacy.
+  // fallbackReason is populated only on fallback_* rows and carries
+  // the redacted category + provider — the technical summary is
+  // never sent to non-admin users.
+  decisionSource?: DecisionSource;
+  fallbackReason?: PlanFallbackReason;
+}
+
+export type DecisionSource =
+  | "llm_pm"
+  | "llm_three_stage"
+  | "fallback_no_llm"
+  | "fallback_after_llm_error"
+  | "fallback_empty_plan"
+  | "legacy";
+
+export type DecisionFallbackCategory =
+  | "rate_limited"
+  | "service_unavailable"
+  | "auth_failed"
+  | "context_length_exceeded"
+  | "invalid_request"
+  | "schema_validation_failed"
+  | "network_timeout"
+  | "budget_exceeded"
+  | "empty_response"
+  | "cancelled"
+  | "unknown";
+
+export interface PlanFallbackReason {
+  category: DecisionFallbackCategory;
+  provider?: string;
+  at?: string;
 }
 
 export interface DecisionTraceDiscussion {

@@ -81,8 +81,22 @@ type InvestmentPlan struct {
 	// fallback plans). The shape is intentionally loose so the
 	// writer can evolve without another migration.
 	BlockContributions json.RawMessage `json:"blockContributions,omitempty"`
-	CreatedAt          time.Time       `json:"createdAt"`
-	UpdatedAt          time.Time       `json:"updatedAt"`
+	// DecisionSource (Sprint 11.1) is the provenance tag for this
+	// plan: llm_pm / llm_three_stage / fallback_no_llm /
+	// fallback_after_llm_error / fallback_empty_plan / legacy. NULL
+	// in the DB collapses to "legacy" for any plan written before
+	// migration 077. Read separately via GetDecisionSource so the
+	// existing GetByID SELECT stays unchanged and its test surface
+	// is preserved.
+	DecisionSource string `json:"decisionSource,omitempty"`
+	// FallbackReason (Sprint 11.1) is the JSONB
+	// errorclass.Detail payload — populated only when
+	// DecisionSource starts with "fallback_". The Summary key is
+	// the raw provider message and MUST be stripped from
+	// non-admin API responses by the caller.
+	FallbackReason json.RawMessage `json:"fallbackReason,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
 type PlanAction struct {
@@ -793,6 +807,75 @@ func (r *PlanRepo) SetBlockContributions(ctx context.Context, planID string, pay
 		return fmt.Errorf("plan_repo: SetBlockContributions: %w", err)
 	}
 	return nil
+}
+
+// SetDecisionSource stamps the Sprint 11.1 LLM-vs-fallback provenance
+// onto an existing plan, mirroring the SetBlockContributions soft-fail
+// contract. source MUST be one of the errorclass / decision_source
+// values (llm_pm, llm_three_stage, fallback_no_llm,
+// fallback_after_llm_error, fallback_empty_plan); reason is the
+// pre-marshalled errorclass.Detail JSONB for fallback rows and nil
+// for successful LLM rows.
+//
+// The DB column has a NOT NULL DEFAULT 'legacy', so empty source is
+// rejected as a programmer error (we never want to silently downgrade
+// a successful LLM run to "legacy" because the wiring forgot to set
+// the field). reason may be nil; the column is nullable.
+func (r *PlanRepo) SetDecisionSource(ctx context.Context, planID, source string, reason []byte) error {
+	if strings.TrimSpace(planID) == "" {
+		return fmt.Errorf("plan_repo: SetDecisionSource: empty plan id")
+	}
+	if strings.TrimSpace(source) == "" {
+		return fmt.Errorf("plan_repo: SetDecisionSource: empty source")
+	}
+	var reasonArg any
+	if len(reason) > 0 {
+		reasonArg = reason
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE investment_plans
+		    SET decision_source = $2,
+		        fallback_reason = $3,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		planID, source, reasonArg,
+	)
+	if err != nil {
+		return fmt.Errorf("plan_repo: SetDecisionSource: %w", err)
+	}
+	return nil
+}
+
+// GetDecisionSource is the focused read counterpart to
+// SetDecisionSource. Returns the source tag and the raw JSONB
+// fallback_reason blob (nil when the column is NULL). Kept narrow on
+// purpose so the existing PlanRepo.GetByID SELECT — and its dense
+// sqlmock test surface — stays unchanged.
+func (r *PlanRepo) GetDecisionSource(ctx context.Context, planID string) (string, []byte, error) {
+	if strings.TrimSpace(planID) == "" {
+		return "", nil, fmt.Errorf("plan_repo: GetDecisionSource: empty plan id")
+	}
+	var (
+		source string
+		reason sql.NullString
+	)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COALESCE(decision_source, 'legacy'),
+		        fallback_reason::text
+		   FROM investment_plans
+		  WHERE id = $1`,
+		planID,
+	).Scan(&source, &reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("plan_repo: GetDecisionSource: %w", err)
+	}
+	if reason.Valid && reason.String != "" {
+		return source, []byte(reason.String), nil
+	}
+	return source, nil, nil
 }
 
 func (r *PlanRepo) GetByID(ctx context.Context, id string) (*InvestmentPlan, error) {
