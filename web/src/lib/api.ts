@@ -4860,3 +4860,113 @@ export async function testAdminLLMProvider(
 ): Promise<TestAdminLLMProviderResponse> {
   return apiPost<TestAdminLLMProviderResponse>(`/api/admin/llm-providers/test`, body);
 }
+
+// ===== S14.A — provider observability ============================
+// These endpoints feed the admin "看板" tab. The backend returns
+// stable shapes (empty arrays, not 404s) so the UI doesn't need a
+// "not yet initialised" branch on first boot.
+
+export interface ProviderHealthSparklinePoint {
+  checked_at: string;
+  ok: boolean;
+  latency_ms: number;
+}
+
+export interface ProviderHealthDashboardRow {
+  provider_id: string;
+  provider: string;
+  label: string;
+  checks: number;
+  successes: number;
+  failures: number;
+  success_rate: number;
+  latency_p50_ms: number;
+  latency_p95_ms: number;
+  latency_max_ms: number;
+  last_checked_at?: string;
+  last_ok?: boolean;
+  sparkline: ProviderHealthSparklinePoint[];
+}
+
+export interface ProviderHealthDashboardResponse {
+  window_start: string;
+  window_end: string;
+  probe_ticks_since_boot: number;
+  rows: ProviderHealthDashboardRow[];
+}
+
+export interface ProviderCostTotal {
+  provider: string;
+  calls: number;
+  total_tokens: number;
+  cost_cents: number;
+  cost_usd: number;
+  days_in_window: number;
+}
+
+export interface ProviderCostDaily {
+  provider: string;
+  model_name: string;
+  day: string; // YYYY-MM-DD
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_cents: number;
+  cost_usd: number;
+  last_rolled_at: string;
+}
+
+export interface ProviderCostDashboardResponse {
+  window_start_day: string;
+  window_end_day: string;
+  rollup_ticks_since_boot: number;
+  totals: ProviderCostTotal[];
+  daily: ProviderCostDaily[];
+}
+
+export interface ProviderHistoryRow {
+  id: string;
+  checked_at: string;
+  ok: boolean;
+  latency_ms: number;
+  http_status: number;
+  message?: string;
+  model_name?: string;
+}
+
+export interface ProviderHistoryResponse {
+  provider_id: string;
+  window_start: string;
+  window_end: string;
+  rows: ProviderHistoryRow[];
+}
+
+export async function getAdminProviderHealthDashboard(
+  range: '6h' | '24h' | '7d' | '30d' = '24h',
+): Promise<ProviderHealthDashboardResponse> {
+  return apiGet<ProviderHealthDashboardResponse>(
+    `/api/admin/llm-providers/health?range=${range}`,
+  );
+}
+
+export async function getAdminProviderCostDashboard(
+  range: '24h' | '7d' | '30d' = '7d',
+  provider?: string,
+): Promise<ProviderCostDashboardResponse> {
+  const params = new URLSearchParams({ range });
+  if (provider && provider.trim()) params.set('provider', provider.trim());
+  return apiGet<ProviderCostDashboardResponse>(
+    `/api/admin/llm-providers/cost?${params.toString()}`,
+  );
+}
+
+export async function getAdminProviderHistory(
+  providerId: string,
+  range: '6h' | '24h' | '7d' | '30d' = '24h',
+  limit = 500,
+): Promise<ProviderHistoryResponse> {
+  return apiGet<ProviderHistoryResponse>(
+    `/api/admin/llm-providers/${encodeURIComponent(providerId)}/history?range=${range}&limit=${limit}`,
+  );
+}

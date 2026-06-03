@@ -32,6 +32,7 @@ import { AdminModelABPromotionSection } from "../components/AdminModelABPromotio
 import { AdminLLMHealthSection } from "../components/AdminLLMHealthSection";
 import { AdminAlertsSection } from "../components/AdminAlertsSection";
 import { AdminLLMProvidersSection } from "../components/AdminLLMProvidersSection";
+import AdminLLMObservabilitySection from "../components/AdminLLMObservabilitySection";
 import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
@@ -1232,6 +1233,10 @@ const Admin: React.FC = () => {
           {/* Renders ABOVE A/B so operators configure providers first; */}
           {/* the A/B form's provider dropdown pulls from this table. */}
           <AdminLLMProvidersSection language={language} />
+
+          {/* S14.A — provider observability (health & cost dashboard). */}
+          {/* Reads from the 5-min probe loop + hourly rollup loop. */}
+          <AdminLLMObservabilitySection language={language} />
 
           {/* S10.3 / S10.4 — model A/B experiments (list, report, CRUD). */}
           <AdminModelABSection language={language} />

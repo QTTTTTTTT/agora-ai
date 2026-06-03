@@ -168,6 +168,19 @@ type adminHandler struct {
 	platformLLMProviderRepo *repository.PlatformLLMProviderRepo
 	modelRouter             *llm.ModelRouter
 	providerReloader        providerReloader
+
+	// S14.A — observability dashboard data sources.
+	// providerHealthHistoryRepo: 5-min ping rows (last 30d).
+	// providerDailyRollupRepo:   per-day cost / token buckets.
+	// healthProbeLoop:           the running probe loop (so the
+	//                            admin endpoint can expose a tick
+	//                            counter for "is it alive?" checks).
+	// All three nil-safe — missing repos cause the GET endpoints to
+	// return empty arrays rather than 500.
+	providerHealthHistoryRepo *repository.ProviderHealthHistoryRepo
+	providerDailyRollupRepo   *repository.ProviderDailyRollupRepo
+	healthProbeLoop           *llmHealthProbeLoop
+	costRollupLoop            *llmCostRollupLoop
 }
 
 // attachLLMRuntime wires the in-process model router + reloader
@@ -347,6 +360,11 @@ func newAdminHandler(svc *Services) *adminHandler {
 		modelABPromotionDraftRepo: svc.ModelABPromotionDraftRepo,
 		modelABPromotionScanLoop:  svc.ModelABPromotionScanLoop,
 		platformLLMProviderRepo:   svc.PlatformLLMProviderRepo,
+
+		providerHealthHistoryRepo: svc.ProviderHealthHistoryRepo,
+		providerDailyRollupRepo:   svc.ProviderDailyRollupRepo,
+		healthProbeLoop:           svc.LLMHealthProbeLoop,
+		costRollupLoop:            svc.LLMCostRollupLoop,
 	}
 	// S13 — modelRouter + providerReloader come from the LLM
 	// runtime which is constructed in a later wave of initServices
@@ -448,6 +466,7 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerAlertAdminRoutes(mux)
 	h.registerModelABPromotionRoutes(mux)
 	h.registerLLMProviderRoutes(mux)
+	h.registerLLMProviderObservabilityRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

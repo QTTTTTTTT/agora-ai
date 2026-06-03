@@ -652,6 +652,20 @@ type Services struct {
 	// the admin handler calls Upsert/Delete + reloader to update
 	// the router in-place without a process restart. Nil-safe.
 	PlatformLLMProviderRepo *repository.PlatformLLMProviderRepo
+	// ProviderHealthHistoryRepo (S14.A) stores 5-minute health
+	// pings for the observability dashboard. Read by admin GET
+	// endpoints; written by LLMHealthProbeLoop. Nil-safe.
+	ProviderHealthHistoryRepo *repository.ProviderHealthHistoryRepo
+	// ProviderDailyRollupRepo (S14.A) stores per-day cost / token
+	// rollups. Read by admin GET endpoints; written hourly by
+	// LLMCostRollupLoop. Nil-safe.
+	ProviderDailyRollupRepo *repository.ProviderDailyRollupRepo
+	// LLMHealthProbeLoop (S14.A) — periodic 5-minute probe of every
+	// active provider. Stops via context cancellation, not Stop().
+	LLMHealthProbeLoop *llmHealthProbeLoop
+	// LLMCostRollupLoop (S14.A) — hourly job that re-folds usage
+	// entries into per-day rollups. Stops via context cancellation.
+	LLMCostRollupLoop *llmCostRollupLoop
 	WSFeedConfig            wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -1131,6 +1145,25 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// S13 — platform LLM provider table (managed via admin UI,
 	// hot-reloaded into the router on every Upsert/Delete).
 	services.PlatformLLMProviderRepo = platformLLMProviderRepo
+
+	// S14.A — provider observability: 5-minute health probe + hourly
+	// cost rollups. Both loops are no-ops when the repos are nil
+	// (i.e. when the underlying DB is missing). The loops use
+	// context.Background() to outlive request scopes; they'll exit
+	// naturally on process termination because that context is
+	// only cancelled then. Restart-safety is provided by:
+	//   * probe loop: each tick re-lists from DB, no in-memory state
+	//   * rollup loop: RecomputeWindow is idempotent on (provider, model, day)
+	providerHealthHistoryRepo := repository.NewProviderHealthHistoryRepo(db)
+	providerDailyRollupRepo := repository.NewProviderDailyRollupRepo(db)
+	services.ProviderHealthHistoryRepo = providerHealthHistoryRepo
+	services.ProviderDailyRollupRepo = providerDailyRollupRepo
+	healthLoop := newLLMHealthProbeLoop(platformLLMProviderRepo, providerHealthHistoryRepo, slog.Default())
+	healthLoop.Start(context.Background())
+	services.LLMHealthProbeLoop = healthLoop
+	rollupLoop := newLLMCostRollupLoop(providerDailyRollupRepo, slog.Default())
+	rollupLoop.Start(context.Background())
+	services.LLMCostRollupLoop = rollupLoop
 
 	// Sprint 9.3 — social sentiment ingestion. The registry
 	// reads per-platform env flags; when no provider is enabled
