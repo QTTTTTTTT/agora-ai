@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { apiGet, apiPost, formatApiError } from "../lib/api";
@@ -760,31 +760,47 @@ const ABTestCompare: React.FC = () => {
     [displayCurrency, language],
   );
 
-  const loadTests = useCallback(async () => {
-    if (!fundId) {
-      setError(copy.missingFundId);
-      setLoading(false);
-      return;
-    }
+  // We keep the localized copy strings in refs so loadTests's identity
+  // does not flip every time PreferencesProvider re-issues the `copy`
+  // memo (e.g. on language switch or displayCurrency change). Without
+  // this guard, useEffect would re-fire, setLoading(true) would run
+  // again, and any in-flight fetch race could leave the UI stuck on
+  // "Loading…" indefinitely after a transient page interaction.
+  const copyRef = useRef(copy);
+  useEffect(() => {
+    copyRef.current = copy;
+  }, [copy]);
 
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await apiGet<ApiABTest[]>(`/api/funds/${fundId}/abtests`);
-      const nextTests = (response ?? []).slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      setTests(nextTests);
-      setSelectedId((current) => {
-        if (current && nextTests.some((test) => test.id === current)) {
-          return current;
-        }
-        return nextTests[0]?.id ?? null;
-      });
-    } catch (err) {
-      setError(formatApiError(err, copy.loadFailed));
-    } finally {
-      setLoading(false);
-    }
-  }, [copy.loadFailed, copy.missingFundId, fundId]);
+  const loadTests = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!fundId) {
+        setError(copyRef.current.missingFundId);
+        setLoading(false);
+        return;
+      }
+
+      if (!opts?.silent) {
+        setLoading(true);
+      }
+      setError(null);
+      try {
+        const response = await apiGet<ApiABTest[]>(`/api/funds/${fundId}/abtests`);
+        const nextTests = (response ?? []).slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        setTests(nextTests);
+        setSelectedId((current) => {
+          if (current && nextTests.some((test) => test.id === current)) {
+            return current;
+          }
+          return nextTests[0]?.id ?? null;
+        });
+      } catch (err) {
+        setError(formatApiError(err, copyRef.current.loadFailed));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [fundId],
+  );
 
   useEffect(() => {
     void loadTests();

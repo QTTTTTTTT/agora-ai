@@ -50,7 +50,7 @@
 -- exposures from a historical holdings × loadings join. Disk is
 -- cheap; row count stays bounded by (funds × factors × days).
 
-BEGIN;
+-- BEGIN;  -- stripped: outer migration runner already wraps each file in a transaction
 
 -- ---------------------------------------------------------------------------
 -- Reference: canonical factor names. The CHECK constraint keeps
@@ -143,4 +143,4 @@ COMMENT ON TABLE portfolio_factor_snapshots IS
 CREATE INDEX IF NOT EXISTS portfolio_factor_snapshots_fund_time_idx
     ON portfolio_factor_snapshots (fund_id, calculated_at DESC, factor);
 
-COMMIT;
+-- COMMIT;  -- stripped: outer migration runner already wraps each file in a transaction

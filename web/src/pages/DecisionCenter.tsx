@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   apiGet,
   apiPost,
@@ -49,11 +49,18 @@ import type { ApiPlan, ExecutionTraceView } from "./decisionCenter/types";
 const DecisionCenter: React.FC = () => {
   const { fundId } = useParams<{ fundId: string }>();
   const { language, displayCurrency } = useAppPreferences();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [plans, setPlans] = useState<ApiPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Sprint 12-alt — accept ?planId=... to drive deep-links from the
+  // admin LLM-health board. Initialised once from the query string so
+  // subsequent navigations to the same fund without a planId param
+  // don't clobber the user's clicks; the param is also cleared from
+  // the URL once we've consumed it (see consumeQueryPlanIdEffect).
+  const queryPlanId = searchParams.get("planId");
+  const [selectedId, setSelectedId] = useState<string | null>(queryPlanId);
   const [showHistory, setShowHistory] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
   // actionSuccess is a transient confirmation banner shown for ~3s
@@ -792,6 +799,12 @@ const DecisionCenter: React.FC = () => {
       });
       setPlans(nextPlans);
       setSelectedId((current) => {
+        // S12-alt: respect ?planId=... when it matches a real plan
+        // in the freshly-loaded list. Falls back to the previous
+        // selection or the pending-first heuristic.
+        if (queryPlanId && nextPlans.some((plan) => plan.id === queryPlanId)) {
+          return queryPlanId;
+        }
         if (current && nextPlans.some((plan) => plan.id === current)) {
           return current;
         }
@@ -803,11 +816,26 @@ const DecisionCenter: React.FC = () => {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [copy.loadError, copy.missingFundId, fundId]);
+  }, [copy.loadError, copy.missingFundId, fundId, queryPlanId]);
 
   useEffect(() => {
     void loadPlans();
   }, [loadPlans]);
+
+  // S12-alt — once we've consumed ?planId on the first load and
+  // applied it as the initial selection, strip the param from the
+  // URL so the user can navigate to a sibling plan without the
+  // deep-link bouncing them back.
+  useEffect(() => {
+    if (!queryPlanId || loading) {
+      return;
+    }
+    if (plans.some((p) => p.id === queryPlanId)) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("planId");
+      setSearchParams(next, { replace: true });
+    }
+  }, [queryPlanId, loading, plans, searchParams, setSearchParams]);
 
   const pendingPlans = useMemo(() => plans.filter((plan) => isPendingPlan(plan.status)), [plans]);
   const historyPlans = useMemo(() => plans.filter((plan) => !isPendingPlan(plan.status)), [plans]);

@@ -53,6 +53,7 @@ import (
 	"github.com/fundai/server/internal/drawdown"
 	"github.com/fundai/server/internal/lockup"
 	"github.com/fundai/server/internal/marketstatus"
+	"github.com/fundai/server/internal/pricecollar"
 	"github.com/fundai/server/internal/securitiesborrow"
 	"github.com/fundai/server/internal/recon"
 	"github.com/fundai/server/internal/surveillance"
@@ -631,10 +632,21 @@ type Services struct {
 	// independently via llmRuntime.AttachModelABResolver.
 	ModelABRepo     *modelab.Repo
 	ModelABReporter *modelab.Reporter
+	// ModelABPromotionDraftRepo + ModelABPromotionScanLoop back the
+	// Sprint 13 auto-promotion flow. The repo is read by the admin
+	// list / apply / reject endpoints; the loop is the nightly
+	// scanner that produces fresh drafts. Both are nil-safe — when
+	// the DB isn't wired (e.g. in some integration tests) the
+	// promotion routes degrade to 503 / "not configured".
+	ModelABPromotionDraftRepo *modelab.DraftRepo
+	ModelABPromotionScanLoop  *promotionScanLoop
 	// LLMHealthRepo (Sprint 11.4) backs the admin LLM-health
 	// dashboard. Nil-safe.
 	LLMHealthRepo *repository.LLMHealthRepo
-	WSFeedConfig  wsFeedConfig
+	// AlertEventRepo (Sprint 12.2) backs the alertmanager
+	// webhook + admin acknowledgement flow. Nil-safe.
+	AlertEventRepo *repository.AlertEventRepo
+	WSFeedConfig   wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
 	WSFeedBridge           *wsFeedSubscriptionBridge
@@ -839,6 +851,38 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	}
 	borrowGateImpl := newBorrowGate(db, borrowRepo, borrowCache, metrics, slogLeveledLogger{})
 
+	// S6.6 — broker-side price-collar gate. Catches fat-finger /
+	// bad-quote / LLM-hallucination limit prices the matcher would
+	// otherwise honour (regression: 2026-06-02 301308 fill at
+	// 96,226.4188 CNY/share against a true mid of ~500 CNY). The
+	// gate runs LAST among the four pre-trade gates so the more
+	// dramatic reject reasons (halted / lockup / borrow) keep
+	// precedence. Defaults: per-asset-class thresholds (11% A-share
+	// main, 21% wide board, 15% US equity, 30% crypto); no-reference
+	// → warn (not reject) so a transient marketdata outage doesn't
+	// halt trading.
+	priceCollarGateImpl := newPriceCollarGate(marketDataService, metrics, slogLeveledLogger{}, pricecollar.EngineOptions{})
+
+	// S12.1 — broker-side lot-size compliance gate (the 5th and
+	// final pre-trade gate). Catches A-share board minimums and
+	// step rules (100/200, 1/100), HK custom lots (from
+	// instrument_metadata, S12.3), US fractional capability
+	// (default integer-only), futures integer hands, and crypto
+	// step_size (also from instrument_metadata). Sits LAST in the
+	// gate chain so regulatory rejects (status / lockup / borrow)
+	// and the price-collar fat-finger reject keep precedence in
+	// the surfaced reason. Trigger story: 2026-06-03 audit found
+	// 301308 buy 1 share (ChiNext min 100) + 688195/688205
+	// misaligned partial sells.
+	instrumentMetadataRepo := repository.NewInstrumentMetadataRepo(db)
+	lotSizeGateImpl := newLotSizeGate(
+		db, metrics, slogLeveledLogger{},
+		newHKLotResolver(instrumentMetadataRepo),
+		newCryptoStepResolver(instrumentMetadataRepo),
+		newTickResolver(instrumentMetadataRepo, slogLeveledLogger{}),
+		newOverridesResolver(instrumentMetadataRepo),
+	)
+
 	// S6.5 — WebSocket real-time market data. The cache sits
 	// between the manager (which fans out raw ticks) and the
 	// broker hot path. When WSFEED_ENABLED is false the cache
@@ -878,6 +922,8 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 			broker.WithMatchEngine(marketImpactEngine),
 			broker.WithLockupGate(lockupGateImpl),
 			broker.WithBorrowGate(borrowGateImpl),
+			broker.WithPriceCollarGate(priceCollarGateImpl),
+			broker.WithLotSizeGate(lotSizeGateImpl),
 		),
 		MarketImpactRepo:    marketImpactRepo,
 		MarketImpactCache:   marketImpactCache,
@@ -1044,10 +1090,25 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// layer, which the admin UI degrades on.
 	services.ModelABRepo = modelABRepo
 	services.ModelABReporter = modelABReporter
+	// Sprint 13 — model A/B auto-promotion scanner. The draft
+	// repo and the nightly loop are both wired here so the loop
+	// is started by the same goroutine that starts the other
+	// background jobs further down.
+	services.ModelABPromotionDraftRepo = modelab.NewDraftRepo(db)
+	services.ModelABPromotionScanLoop = newPromotionScanLoop(
+		modelABReporter,
+		modelABRepo,
+		services.ModelABPromotionDraftRepo,
+		promotionScanLoopOptions{
+			Interval: 24 * time.Hour,
+		},
+	)
 	// Sprint 11.4 — admin LLM-health dashboard. Lives next to
 	// ModelABRepo because both are admin-only and read-only;
 	// nil-safe at the handler boundary.
 	services.LLMHealthRepo = repository.NewLLMHealthRepo(db)
+	// Sprint 12.2 — alertmanager webhook + admin ack flow.
+	services.AlertEventRepo = repository.NewAlertEventRepo(db)
 
 	// Sprint 9.3 — social sentiment ingestion. The registry
 	// reads per-platform env flags; when no provider is enabled
@@ -2598,7 +2659,17 @@ func isPublicRoute(path string) bool {
 		switch path {
 		case "/api/health", "/api/version", "/api/metrics", "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/session",
 			"/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/wechat-login",
-			"/api/auth/2fa/challenge":
+			"/api/auth/2fa/challenge",
+			// Sprint 12.2 — alertmanager webhook receiver. We let
+			// it bypass the JWT middleware because alertmanager
+			// authenticates with a shared bearer secret
+			// (FUNDAI_ALERT_WEBHOOK_SECRET) rather than a
+			// user JWT. The handler itself enforces that secret
+			// via subtle.ConstantTimeCompare; the worst-case for
+			// adding the route here is the same posture as the
+			// /api/metrics endpoint which is also unprotected by
+			// design.
+			"/api/admin/alerts/webhook":
 			return true
 		default:
 			return false
@@ -3025,6 +3096,31 @@ type serverMetrics struct {
 	//   admin_upsert_rate / admin_delete_rate
 	// Exported as fundai_borrow_events_total{event="..."}.
 	borrowEvents                  map[string]int64
+	// lotSizeEvents counts broker-side lot-size gate hits (S12.1).
+	// Trigger story: 2026-06-03 audit found 301308 buy 1 share +
+	// 688195/688205 misaligned partial sells that slipped past the
+	// upstream NormalizeBuyQty / NormalizeSellQty because no
+	// broker-side terminal gate existed. Events:
+	//   allow                       — happy path (qty aligned)
+	//   reject_a_share              — A-share buy below MinLot / step
+	//   reject_hk_equity            — HK board-lot violation
+	//   reject_us_equity            — US fractional without capability
+	//   reject_futures              — futures fractional hand
+	//   reject_crypto               — crypto step or min-notional miss
+	//   reject_unknown_side         — probe Side neither buy nor sell
+	//   evaluate_failed             — spec/position source error (fail-open)
+	// Exported as fundai_lotsize_events_total{event="..."}.
+	lotSizeEvents                 map[string]int64
+	// priceCollarEvents counts broker-side fat-finger / bad-quote
+	// limit-price gate hits. Trigger story: 2026-06-02 301308 fill
+	// at 96,226.4188 CNY/share (true mid ~500). Events:
+	//   allow                       — happy path (limit inside collar)
+	//   reject_price_collar         — limit too far from reference
+	//   warn_price_collar_no_reference / reject_price_collar_no_reference
+	//                                 — reference quote missing / stale
+	//   evaluate_failed             — engine internal failure (fail-open)
+	// Exported as fundai_pricecollar_events_total{event="..."}.
+	priceCollarEvents             map[string]int64
 	// wsFeedEvents counts S6.5 WebSocket real-time market
 	// data plumbing events:
 	//   tick_applied / quote_cache_hit / quote_miss_fallback_ok
@@ -3182,6 +3278,8 @@ func newServerMetrics() *serverMetrics {
 		marketImpactEvents:            make(map[string]int64),
 		lockupEvents:                  make(map[string]int64),
 		borrowEvents:                  make(map[string]int64),
+		priceCollarEvents:             make(map[string]int64),
+		lotSizeEvents:                 make(map[string]int64),
 		wsFeedEvents:                  make(map[string]int64),
 		decisionInputBlocks:           make(map[string]int64),
 		decisionExposureBreaches:      make(map[string]int64),
@@ -3695,6 +3793,53 @@ func (m *serverMetrics) RecordMarketStatusEvent(event string) {
 	m.marketStatusEvents[event]++
 }
 
+// RecordLotSizeEvent bumps the per-event broker lot-size gate
+// counter (S12.1). event is one of:
+//
+//	{allow, reject_a_share, reject_hk_equity, reject_us_equity,
+//	 reject_futures, reject_crypto, reject_unknown_side,
+//	 evaluate_failed}
+//
+// Exported as fundai_lotsize_events_total{event="..."}.
+func (m *serverMetrics) RecordLotSizeEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.ToLower(strings.TrimSpace(event))
+	if event == "" {
+		event = "unknown"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lotSizeEvents == nil {
+		m.lotSizeEvents = make(map[string]int64)
+	}
+	m.lotSizeEvents[event]++
+}
+
+// RecordPriceCollarEvent bumps the per-event broker price-collar
+// gate counter. event is one of:
+//
+//	{allow, reject_price_collar, warn_price_collar_no_reference,
+//	 reject_price_collar_no_reference, evaluate_failed}
+//
+// Exported as fundai_pricecollar_events_total{event="..."}.
+func (m *serverMetrics) RecordPriceCollarEvent(event string) {
+	if m == nil {
+		return
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.priceCollarEvents == nil {
+		m.priceCollarEvents = make(map[string]int64)
+	}
+	m.priceCollarEvents[event]++
+}
+
 // RecordMarketImpactEvent bumps the per-event counter for the
 // size-aware slippage estimator (S6.2). Exported as
 // fundai_marketimpact_events_total{event="..."}.
@@ -3941,6 +4086,20 @@ func (m *serverMetrics) ExportPrometheus() string {
 	)
 	for _, key := range sortedMetricKeys(m.borrowEvents) {
 		lines = append(lines, fmt.Sprintf("fundai_borrow_events_total{event=%q} %d", key, m.borrowEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_pricecollar_events_total Total broker price-collar gate decisions (fat-finger / bad-quote limit price defence).",
+		"# TYPE fundai_pricecollar_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.priceCollarEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_pricecollar_events_total{event=%q} %d", key, m.priceCollarEvents[key]))
+	}
+	lines = append(lines,
+		"# HELP fundai_lotsize_events_total Total broker lot-size gate decisions (S12.1 market microstructure safety net).",
+		"# TYPE fundai_lotsize_events_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.lotSizeEvents) {
+		lines = append(lines, fmt.Sprintf("fundai_lotsize_events_total{event=%q} %d", key, m.lotSizeEvents[key]))
 	}
 	lines = append(lines,
 		"# HELP fundai_wsfeed_events_total Total WebSocket real-time market-data plumbing events (S6.5).",
@@ -4640,6 +4799,15 @@ func main() {
 	if svc.AgentReputationLoop != nil {
 		go func() {
 			svc.AgentReputationLoop.Run(context.Background())
+		}()
+	}
+
+	// Sprint 13 — model A/B promotion scanner. Same nightly cadence
+	// as the reputation loop; nil-safe when the modelab repo or the
+	// reporter weren't wired.
+	if svc.ModelABPromotionScanLoop != nil {
+		go func() {
+			svc.ModelABPromotionScanLoop.Run(context.Background())
 		}()
 	}
 

@@ -153,3 +153,97 @@ groups:
         annotations:
           summary: FundAI marketplace reconciliation has unresolved findings
           description: The latest reconciler pass reported unresolved or errored items. Inspect agent marketplace orders and reconcile findings.
+
+  # Sprint 12 — pm-decision-source group. Reads
+  # fundai_pm_decision_total{source,category,provider} (S11.4).
+  # See docs/LLM_FAILURE_DISCLOSURE.md §monitoring for runbook.
+  - name: fundai-pm-decision-source
+    rules:
+      - alert: FundAIPMDecisionFallbackRateHigh
+        expr: |
+          sum(rate(fundai_pm_decision_total{source=~"fallback_.*"}[5m]))
+            /
+          clamp_min(sum(rate(fundai_pm_decision_total[5m])), 0.001) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          component: pm_decision
+        annotations:
+          summary: PM fallback share > 5% sustained 30m
+          description: |
+            The fraction of PM plans produced by the deterministic fallback
+            exceeds 5% over 30 minutes. Open the admin LLM-health board for
+            the category breakdown; runbook in docs/LLM_FAILURE_DISCLOSURE.md.
+
+      - alert: FundAIPMDecisionFallbackRateCritical
+        expr: |
+          sum(rate(fundai_pm_decision_total{source=~"fallback_.*"}[5m]))
+            /
+          clamp_min(sum(rate(fundai_pm_decision_total[5m])), 0.001) > 0.25
+        for: 10m
+        labels:
+          severity: critical
+          component: pm_decision
+        annotations:
+          summary: PM fallback share > 25% sustained 10m — LLM path is broken
+          description: |
+            More than a quarter of PM plans are landing on the rule-based
+            fallback. Treat as an LLM-provider outage: check the LLM-health
+            board, recent provider status, and platform-level API keys.
+
+      - alert: FundAIPMDecisionUnknownCategoryDrift
+        expr: |
+          sum(rate(fundai_pm_decision_total{category="unknown"}[1h])) > 0
+        for: 6h
+        labels:
+          severity: info
+          component: pm_decision
+        annotations:
+          summary: errorclass.Category drift detected
+          description: |
+            A new failure shape is producing CategoryUnknown labels. Inspect
+            recent fallbacks in the admin LLM-health board and extend the
+            errorclass classifier with a precise category if a new pattern
+            emerged.
+
+      - alert: FundAIPMDecisionAuthFailedSpike
+        expr: |
+          sum(increase(fundai_pm_decision_total{category="auth_failed"}[15m])) > 5
+        for: 5m
+        labels:
+          severity: critical
+          component: pm_decision
+        annotations:
+          summary: Provider auth failures spiking
+          description: |
+            More than 5 auth_failed PM decisions in 15 minutes. Likely a
+            revoked / rotated API key. Inspect platform credentials and
+            per-fund user_provider_keys.
+
+      - alert: FundAIPMDecisionContextLengthSpike
+        expr: |
+          sum(increase(fundai_pm_decision_total{category="context_length_exceeded"}[1h])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: pm_decision
+        annotations:
+          summary: Context-length rejections spiking
+          description: |
+            One or more funds are routinely hitting the model context limit.
+            Reduce the universe size, switch to a longer-context tier, or
+            split the prompt — see runbook.
+
+      - alert: FundAIPMDecisionBudgetExhausted
+        expr: |
+          sum(increase(fundai_pm_decision_total{category="budget_exceeded"}[15m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: pm_decision
+        annotations:
+          summary: PM call budget exhausted
+          description: |
+            A fund / step LLM call budget was exhausted. Verify the budget
+            limiter configuration matches the subscription tier and check
+            for fan-out regressions in the workflow.

@@ -218,6 +218,32 @@ var (
 	// specifics ("only 50000 shares available, requested 100000").
 	ErrBorrowRejected = errors.New("broker: rejected by borrow gate")
 
+	// ErrPriceCollarRejected means the pre-trade price-collar gate
+	// rejected a limit order because the limit price deviates from
+	// the reference quote by more than the configured tolerance.
+	// The wrapping reason carries intended vs reference prices and
+	// the percentage gap (e.g. "limit 96226 vs reference 500 = 19145%
+	// off, cap 21%"). Trigger story for the gate: 2026-06-02 301308
+	// fill at 96,226.4188 CNY/share against a true mid of ~500 CNY
+	// because a PM fallback path had stamped the notional budget
+	// into the limit price.
+	ErrPriceCollarRejected = errors.New("broker: rejected by price-collar gate")
+
+	// ErrLotSizeRejected means the pre-trade lot-size gate
+	// rejected the order because the quantity violates the
+	// instrument's market microstructure rules (A-share board
+	// minimum / step, HK custom lot, futures contract integer
+	// hands, crypto step_size, fractional-share capability on
+	// the venue). The wrapping reason carries the board and the
+	// rule that was violated. Trigger story for the gate:
+	// 2026-06-02/03 301308 buy 1 share (ChiNext minimum is 100)
+	// and 688195 sell 85 / 688205 sell 62 (STAR Market step is
+	// 1 but odd-lot residual rule wasn't enforced). Sits LAST in
+	// the gate chain (status → lockup → borrow → price-collar →
+	// lot-size) so the more dramatic regulatory rejects keep
+	// precedence in the surfaced reason.
+	ErrLotSizeRejected = errors.New("broker: rejected by lot-size gate")
+
 	// ErrInsufficientCash and ErrInsufficientPosition are reserved
 	// for live brokers; the Simulator does not enforce balance
 	// checks (the platform's risk layer does that upstream). They

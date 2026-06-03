@@ -20,6 +20,7 @@
 //   - No write paths — this section is observation-only.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import {
   fetchLLMHealthRecentFallbacks,
@@ -319,8 +320,29 @@ export function AdminLLMHealthSection({ language }: Props) {
                     <td className="whitespace-nowrap px-2 py-1 text-zinc-400">
                       {row.created_at.slice(0, 19).replace("T", " ")}
                     </td>
-                    <td className="whitespace-nowrap px-2 py-1">{row.fund_id.slice(0, 8)}</td>
-                    <td className="whitespace-nowrap px-2 py-1">{row.plan_id.slice(0, 8)}</td>
+                    <td className="whitespace-nowrap px-2 py-1">
+                      {/* S12-alt — fund tag jumps to that fund's */}
+                      {/* decision center; admin retains access via */}
+                      {/* their existing permissions. */}
+                      <Link
+                        to={`/funds/${encodeURIComponent(row.fund_id)}/decisions`}
+                        className="text-sky-300 underline-offset-2 hover:underline"
+                        title={row.fund_id}
+                      >
+                        {row.fund_id.slice(0, 8)}
+                      </Link>
+                    </td>
+                    <td className="whitespace-nowrap px-2 py-1">
+                      {/* S12-alt — plan tag deep-links straight to */}
+                      {/* the offending plan in the decision center. */}
+                      <Link
+                        to={`/funds/${encodeURIComponent(row.fund_id)}/decisions?planId=${encodeURIComponent(row.plan_id)}`}
+                        className="text-sky-300 underline-offset-2 hover:underline"
+                        title={row.plan_id}
+                      >
+                        {row.plan_id.slice(0, 8)}
+                      </Link>
+                    </td>
                     <td className="px-2 py-1 text-amber-300">{row.source}</td>
                     <td className="px-2 py-1">{row.category || "-"}</td>
                     <td className="px-2 py-1 text-zinc-400">{row.provider || "-"}</td>

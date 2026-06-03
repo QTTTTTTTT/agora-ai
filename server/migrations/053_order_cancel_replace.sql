@@ -12,7 +12,7 @@
 -- columns only carry the canonical state observable on the order
 -- itself.
 
-BEGIN;
+-- BEGIN;  -- stripped: outer migration runner already wraps each file in a transaction
 
 ALTER TABLE trade_executions
     ADD COLUMN IF NOT EXISTS cancelled_at  TIMESTAMPTZ,
@@ -39,4 +39,4 @@ ALTER TABLE trade_executions
     ADD CONSTRAINT trade_executions_cancel_reason_check
     CHECK (cancel_reason IS NULL OR length(cancel_reason) > 0);
 
-COMMIT;
+-- COMMIT;  -- stripped: outer migration runner already wraps each file in a transaction

@@ -15,17 +15,25 @@ import (
 // the production incident on 2026-05-29: the OCS Selection fund held
 // 289 shares of 688195 (腾景科技) at cost_price=335.20, the company
 // emitted a 10送4 + 派 0.164 元/股 event, and the position quote
-// refresher mark-to-market'd current_price down to 238.74 — leaving
-// holding_positions.unrealized_pnl reading -27,876.94, a phantom 41%
-// loss with no trading involvement. The applier must:
+// refresher mark-to-market'd current_price down to 238.74.
 //
-//   - turn 289 shares into 404.6 (× 1.4)
+// Post-S12.2 (whole-share settlement for SSE/SZSE/BSE/HKEX
+// venues), the applier MUST:
+//
+//   - distribute 289 × 0.4 = 115.6 bonus shares → 115 whole +
+//     0.6 fractional residual → final holding 404 (was 404.6
+//     pre-S12.2; the 0.6-share residual was the "0.6 股白痴" bug
+//     that S12.2 fixes);
 //   - turn cost_price 335.20 into 239.4286 (÷ 1.4)
-//   - recompute market_value = 404.6 × 238.74 = 96,594.204
-//   - recompute unrealized_pnl ≈ -282 (real residual intraday move)
-//   - record cash_credit = 289 × 0.164 = 47.396 for audit
-//   - persist a corp_action_applications PK row
-func TestApplyEvent_HappyPath_TenSongSi(t *testing.T) {
+//   - recompute market_value = 404 × 238.74 = 96,450.96
+//   - recompute unrealized_pnl ≈ -278 (intraday move on 404 sh)
+//   - record cash_credit = 289 × 0.164 = 47.396 (regular dividend)
+//   - record fractional residual = 0.6 × 238.74 ≈ 143.244 in a
+//     SECOND cash_ledger row keyed with idem ":residual"
+//   - persist a corp_action_applications PK row carrying the 404
+//     post-quantity (the audit row reflects the actual mutation,
+//     not the pre-S12.2 fractional value).
+func TestApplyEvent_HappyPath_TenSongSi_WholeSharesPlusResidual(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock new: %v", err)
@@ -44,37 +52,39 @@ func TestApplyEvent_HappyPath_TenSongSi(t *testing.T) {
 	fundID := "fund-ocs"
 
 	mock.ExpectBegin()
-	// Idempotency probe — no prior application yet.
 	mock.ExpectQuery(regexp.QuoteMeta("FROM corp_action_applications")).
 		WithArgs(evt.ID, fundID).
 		WillReturnError(errNoRowsForTest)
-	// Lock pre-state.
 	mock.ExpectQuery(regexp.QuoteMeta("FROM holding_positions")).
 		WithArgs(fundID, evt.InstrumentKey).
 		WillReturnRows(sqlmock.NewRows([]string{"quantity", "cost_price", "current_price", "market_value", "unrealized_pnl"}).
 			AddRow(289.0, 335.20, 238.74, 68996.86, -27876.94))
-	// 289 * 1.4 = 404.6   shares
-	// 335.20 / 1.4 = 239.42857142857... → round8 = 239.42857143
-	// 404.6 * 238.74 = 96594.204 (round4)
-	// 404.6 * (238.74 - 239.42857143) = -278.596 (round4)
+	// 289 * 1.4 = 404.6 → floor = 404 whole shares; residual 0.6.
+	// 335.20 / 1.4 = 239.42857143
+	// 404 * 238.74 = 96450.96 (round4)
+	// 404 * (238.74 - 239.42857143) = -278.18285572 → round4 -278.1829
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE holding_positions")).
-		WithArgs(fundID, evt.InstrumentKey, 404.6, 1.4, 1.0, 239.42857143, 96594.204, -278.596).
+		WithArgs(fundID, evt.InstrumentKey, 404.0, 1.4, 1.0, 239.42857143, 96450.96, -278.1829).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE position_lots")).
 		WithArgs(fundID, evt.InstrumentKey, 1.4).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// Cash credit must post to funds.current_capital BEFORE the
-	// application audit row lands. cash_credit = 289 × 0.164 = 47.396.
+	// Regular cash dividend: 289 × 0.164 = 47.396 → funds.current_capital.
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE funds")).
 		WithArgs(fundID, 47.396).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// P1-1 — cash_ledger row co-commits inside the same tx.
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO cash_ledger")).
 		WithArgs(fundID, 47.396, evt.ID, sqlmock.AnyArg(), sqlmock.AnyArg(), "corp:"+evt.ID+":"+fundID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	// cash_credit = 289 × 0.164 = 47.396
+	// Fractional residual: 0.6 × 238.74 = 143.244 → funds.current_capital.
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE funds")).
+		WithArgs(fundID, 143.244).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO cash_ledger")).
+		WithArgs(fundID, 143.244, evt.ID, sqlmock.AnyArg(), sqlmock.AnyArg(), "corp:"+evt.ID+":"+fundID+":residual").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO corp_action_applications")).
-		WithArgs(evt.ID, fundID, 289.0, 404.6, 335.20, 239.42857143, 47.396).
+		WithArgs(evt.ID, fundID, 289.0, 404.0, 335.20, 239.42857143, 47.396).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
@@ -87,14 +97,83 @@ func TestApplyEvent_HappyPath_TenSongSi(t *testing.T) {
 	if got.AlreadyApplied {
 		t.Fatalf("AlreadyApplied = true on first call")
 	}
-	if got.PostQuantity != 404.6 {
-		t.Errorf("PostQuantity = %v, want 404.6", got.PostQuantity)
+	if got.PostQuantity != 404.0 {
+		t.Errorf("PostQuantity = %v, want 404.0 (whole shares only)", got.PostQuantity)
 	}
 	if got.PostCostPrice != 239.42857143 {
 		t.Errorf("PostCostPrice = %v, want 239.42857143", got.PostCostPrice)
 	}
 	if got.CashCredit != wantCash {
 		t.Errorf("CashCredit = %v, want %v", got.CashCredit, wantCash)
+	}
+	if got.CashResidualShares != 0.6 {
+		t.Errorf("CashResidualShares = %v, want 0.6", got.CashResidualShares)
+	}
+	if got.CashResidualCredit != 143.244 {
+		t.Errorf("CashResidualCredit = %v, want 143.244", got.CashResidualCredit)
+	}
+	if got.SettlementMode != "whole_shares" {
+		t.Errorf("SettlementMode = %q, want \"whole_shares\"", got.SettlementMode)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("mock expectations: %v", err)
+	}
+}
+
+// TestApplyEvent_FractionalSettlement_NASDAQSplit ensures the legacy
+// US/crypto behaviour (equal scaling, fractional post-qty OK,
+// no residual cash leg) still works for non-CN/HK venues.
+func TestApplyEvent_FractionalSettlement_NASDAQSplit(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock new: %v", err)
+	}
+	defer db.Close()
+
+	evt := Event{
+		ID:            "evt-aapl-1",
+		InstrumentKey: "NASDAQ:AAPL",
+		ExDate:        time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		ActionType:    "split",
+		SplitRatio:    4.0,
+		Source:        "yahoo",
+	}
+	fundID := "fund-us"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("FROM corp_action_applications")).
+		WithArgs(evt.ID, fundID).
+		WillReturnError(errNoRowsForTest)
+	mock.ExpectQuery(regexp.QuoteMeta("FROM holding_positions")).
+		WithArgs(fundID, evt.InstrumentKey).
+		WillReturnRows(sqlmock.NewRows([]string{"quantity", "cost_price", "current_price", "market_value", "unrealized_pnl"}).
+			AddRow(25.5, 600.0, 150.0, 3825.0, -11475.0))
+	// 25.5 × 4 = 102 (already integer here, but the legacy
+	// fractional-mode code path is what we want to exercise);
+	// 600 / 4 = 150; 102 × 150 = 15300; 102 × (150-150) = 0.
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE holding_positions")).
+		WithArgs(fundID, evt.InstrumentKey, 102.0, 4.0, 1.0, 150.0, 15300.0, 0.0).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE position_lots")).
+		WithArgs(fundID, evt.InstrumentKey, 4.0).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO corp_action_applications")).
+		WithArgs(evt.ID, fundID, 25.5, 102.0, 600.0, 150.0, 0.0).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, err := ApplyEvent(context.Background(), db, evt, fundID)
+	if err != nil {
+		t.Fatalf("ApplyEvent: %v", err)
+	}
+	if got.SettlementMode != "fractional" {
+		t.Errorf("SettlementMode = %q, want \"fractional\"", got.SettlementMode)
+	}
+	if got.CashResidualCredit != 0 {
+		t.Errorf("CashResidualCredit = %v, want 0 for fractional mode", got.CashResidualCredit)
+	}
+	if got.PostQuantity != 102.0 {
+		t.Errorf("PostQuantity = %v, want 102", got.PostQuantity)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("mock expectations: %v", err)

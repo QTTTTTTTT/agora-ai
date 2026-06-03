@@ -2179,6 +2179,88 @@ export interface LLMHealthRecentFallbacksResponse {
   items: LLMHealthRecentFallback[];
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 12.3 — alertmanager-ingested events.
+// ---------------------------------------------------------------------------
+
+export type AlertSeverity = "info" | "warning" | "critical";
+export type AlertStatus = "firing" | "resolved";
+
+export interface AdminAlertEvent {
+  id: string;
+  fingerprint: string;
+  alertName: string;
+  severity: AlertSeverity | string;
+  component?: string;
+  status: AlertStatus | string;
+  summary?: string;
+  description?: string;
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  startsAt: string;
+  endsAt?: string;
+  receivedAt: string;
+  acknowledgedBy?: string;
+  acknowledgedAt?: string;
+  acknowledgementNote?: string;
+}
+
+export interface ListAdminAlertsResponse {
+  events: AdminAlertEvent[];
+}
+
+export interface AcknowledgeAlertRequest {
+  note?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 13 — model A/B promotion drafts.
+// ---------------------------------------------------------------------------
+
+export type ModelABPromotionStatus = "pending" | "applied" | "rejected" | "superseded";
+
+export interface ModelABPromotionDraft {
+  id: string;
+  experiment_id: string;
+  recommended_arm_index: number;
+  recommended_arm_label: string;
+  primary_arm_index: number;
+  primary_arm_label: string;
+  streak_days: number;
+  evaluated_at: string;
+  window_from?: string;
+  window_to?: string;
+  criteria_payload?: Record<string, unknown>;
+  // Only present on the detail endpoint; the list endpoint omits the
+  // full report snapshot to keep payloads small.
+  report_snapshot?: Record<string, unknown>;
+  status: ModelABPromotionStatus | string;
+  applied_by?: string;
+  applied_at?: string;
+  rejection_reason?: string;
+  created_at: string;
+}
+
+export interface ListModelABPromotionDraftsResponse {
+  items: ModelABPromotionDraft[];
+}
+
+export interface ApplyModelABPromotionResponse {
+  ok: boolean;
+  draft_id: string;
+  experiment_id: string;
+  experiment_closed: boolean;
+  warning?: string;
+}
+
+export interface RejectModelABPromotionRequest {
+  reason?: string;
+}
+
+export interface ScanModelABPromotionsResponse {
+  drafts_upserted: number;
+}
+
 // SessionResponse mirrors GET /api/auth/session. Every field is
 // optional because the unauthenticated path returns
 // { authenticated: false } with nothing else; callers must guard

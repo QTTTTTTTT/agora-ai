@@ -148,8 +148,14 @@ CREATE INDEX IF NOT EXISTS short_position_borrow_ledger_fund_idx
 -- daily accrual loop books `borrow_fee`; the pre-trade locate
 -- adapter books `locate_fee` when the gate's verdict carries
 -- a positive LocateFee. Both are negative amounts (cash out).
-ALTER TABLE cash_ledger_entries DROP CONSTRAINT IF EXISTS cash_ledger_entry_type_chk;
-ALTER TABLE cash_ledger_entries ADD CONSTRAINT cash_ledger_entry_type_chk CHECK (
+-- The cash ledger table is named `cash_ledger` (singular), see
+-- migration 056. Earlier drafts of this migration referenced
+-- cash_ledger_entries which is wrong; the original deploy never
+-- landed because of this typo, so the bare singular name is
+-- safe and matches every code path in
+-- server/internal/repository/cash_ledger_repo.go.
+ALTER TABLE cash_ledger DROP CONSTRAINT IF EXISTS cash_ledger_entry_type_chk;
+ALTER TABLE cash_ledger ADD CONSTRAINT cash_ledger_entry_type_chk CHECK (
     entry_type IN (
         'trade_buy_notional',
         'trade_buy_commission',

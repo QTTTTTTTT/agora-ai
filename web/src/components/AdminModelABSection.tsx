@@ -488,13 +488,17 @@ export function AdminModelABSection({ language }: Props) {
       try {
         arms = JSON.parse(formArms) as ModelABArm[];
       } catch (parseErr) {
-        throw new Error(`arms JSON: ${(parseErr as Error).message}`);
+        const err = new Error(`arms JSON: ${(parseErr as Error).message}`);
+        (err as Error & { cause?: unknown }).cause = parseErr;
+        throw err;
       }
       let traffic: number[];
       try {
         traffic = JSON.parse(formTraffic) as number[];
       } catch (parseErr) {
-        throw new Error(`traffic_split JSON: ${(parseErr as Error).message}`);
+        const err = new Error(`traffic_split JSON: ${(parseErr as Error).message}`);
+        (err as Error & { cause?: unknown }).cause = parseErr;
+        throw err;
       }
       const maxTokens = Number.parseInt(formMaxTokens || "0", 10);
       if (editingDraftID) {

@@ -53,7 +53,7 @@
 -- migration would require pgcrypto + pgcrypto isn't installed in
 -- production today.
 
-BEGIN;
+-- BEGIN;  -- stripped: outer migration runner already wraps each file in a transaction
 
 -- ---------------------------------------------------------------------------
 -- 1. data_access_log — read-event chain
@@ -101,4 +101,4 @@ COMMENT ON COLUMN admin_change_log.after_hash IS
 COMMENT ON COLUMN admin_change_log.metadata_hash IS
     'SHA-256 of the canonical-JSON encoding of metadata. NULL when metadata is NULL or {}.';
 
-COMMIT;
+-- COMMIT;  -- stripped: outer migration runner already wraps each file in a transaction

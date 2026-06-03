@@ -50,6 +50,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -66,20 +67,62 @@ type Event struct {
 	Source         string
 }
 
+// Result fields PostQuantity / PostCostPrice now reflect the
+// applied integer share count for whole-share venues (A-share /
+// HK), with the fractional residual booked separately as
+// CashResidualCredit. For fractional venues (US / crypto) the post
+// values keep the legacy float semantics and CashResidualCredit is
+// 0.
+//
+// SettlementMode reports the rule used:
+//
+//	"fractional"        — legacy US-style equal scaling (post_qty may
+//	                      be non-integer; no residual cash).
+//	"whole_shares"      — A-share / HK rule: post_qty = floor, residual
+//	                      shares get cash-settled at the post-split
+//	                      reference price.
+//
+// Callers that need to render audit UI surface SettlementMode +
+// CashResidualShares + CashResidualCredit alongside the existing
+// fields.
+type extendedResult struct {
+	cashResidualShares float64
+	cashResidualCredit float64
+	settlementMode     string
+}
+
 // Result is the receipt the applier returns on success. The numbers
 // here are exactly what got persisted to corp_action_applications;
 // callers can show them in a UI or use them for audit.
+//
+// SettlementMode reports which rule the applier picked:
+//
+//	"fractional"   — US / crypto-style equal scaling. PostQuantity
+//	                 may be non-integer.
+//	"whole_shares" — A-share / HK rule (S12.2). PostQuantity is
+//	                 the integer share count after a 10送N bonus
+//	                 issue; the fractional residual (e.g. 0.6
+//	                 shares from 289 × 1.4 = 404.6) is booked as
+//	                 cash via CashResidualShares ×
+//	                 reference_price.
+//
+// CashCredit (existing field) still carries the cash-dividend
+// component. CashResidualCredit is a NEW field exposing the
+// fractional-share residual cash for whole-share venues.
 type Result struct {
-	FundID          string
-	InstrumentKey   string
-	PreQuantity     float64
-	PostQuantity    float64
-	PreCostPrice    float64
-	PostCostPrice   float64
-	PreUnrealized   float64
-	PostUnrealized  float64
-	CashCredit      float64
-	AlreadyApplied  bool // true → call was a no-op (idempotent re-run)
+	FundID             string
+	InstrumentKey      string
+	PreQuantity        float64
+	PostQuantity       float64
+	PreCostPrice       float64
+	PostCostPrice      float64
+	PreUnrealized      float64
+	PostUnrealized     float64
+	CashCredit         float64
+	CashResidualShares float64
+	CashResidualCredit float64
+	SettlementMode     string
+	AlreadyApplied     bool // true → call was a no-op (idempotent re-run)
 }
 
 // ErrEventInvalid means the Event itself was rejected before any DB
@@ -184,11 +227,51 @@ func ApplyEvent(ctx context.Context, db txBeginner, evt Event, fundID string) (R
 		return Result{}, err
 	}
 
-	postQuantity := round8(pre.quantity * evt.SplitRatio)
+	mode := settlementModeFor(evt.InstrumentKey)
+	rawPostQty := pre.quantity * evt.SplitRatio
 	postCost := round8(pre.costPrice / evt.SplitRatio)
+
+	// S12.2 — A-share / HK rule: stock dividends ("送股") are
+	// distributed in whole shares only. Any fractional residual
+	// (e.g. 289 × 1.4 = 404.6 → 404 whole + 0.6 residual) is
+	// cash-settled at the post-split reference price. The
+	// pre-event currentPrice the position carried is already
+	// split-adjusted by the upstream marketdata refresher, so we
+	// use postCost (≈ pre-split close / split_ratio) as the
+	// reference — this is the conservative cash equivalent and
+	// matches the SSE/SZSE/HKEX convention.
+	//
+	// For US / crypto venues the legacy equal-scaling stays
+	// unchanged (postQuantity is a NUMERIC(20,8) float that can
+	// legally be non-integer).
+	var (
+		postQuantity       float64
+		cashResidualShares float64
+		cashResidualCredit float64
+	)
+	switch mode {
+	case settlementWholeShares:
+		whole := math.Floor(rawPostQty)
+		postQuantity = round8(whole)
+		cashResidualShares = round8(rawPostQty - whole)
+		if cashResidualShares > 0 {
+			// Residual reference price: prefer the post-split
+			// current price (already adjusted by the
+			// marketdata refresher), fall back to postCost
+			// when current_price is missing.
+			ref := pre.currentPrice
+			if ref <= 0 {
+				ref = postCost
+			}
+			cashResidualCredit = round4(cashResidualShares * ref)
+		}
+	default:
+		postQuantity = round8(rawPostQty)
+	}
 	postMV := round4(postQuantity * pre.currentPrice)
 	postUnreal := round4(postQuantity * (pre.currentPrice - postCost))
 	cashCredit := round4(pre.quantity * evt.CashDividend) // gross, on OLD shares
+	totalCash := round4(cashCredit + cashResidualCredit)
 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE holding_positions
@@ -275,6 +358,45 @@ func ApplyEvent(ctx context.Context, db txBeginner, evt Event, fundID string) (R
 		}
 	}
 
+	// S12.2 — fractional-share residual (A-share 10送4 etc.) is
+	// cash-settled in a SECOND cash_ledger row with a distinct
+	// idempotency key, so a re-application of the event still
+	// only credits the residual once. We charge the WHOLE
+	// (cashCredit + cashResidualCredit) against current_capital
+	// in a single update? No — the cashCredit path above already
+	// credited current_capital with cashCredit; here we credit
+	// the additional cashResidualCredit.
+	if cashResidualCredit > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE funds
+			    SET current_capital = current_capital + $2,
+			        updated_at      = NOW()
+			  WHERE id = $1`,
+			fundID, cashResidualCredit,
+		); err != nil {
+			return Result{}, fmt.Errorf("corpaction: credit residual cash: %w", err)
+		}
+		idem := fmt.Sprintf("corp:%s:%s:residual", evt.ID, fundID)
+		desc := fmt.Sprintf("fractional residual %s — %.4f shares × ref → %.4f", evt.InstrumentKey, cashResidualShares, cashResidualCredit)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO cash_ledger
+			    (fund_id, posted_at, entry_type, amount, currency,
+			     corp_action_id, description, metadata, idempotency_key)
+			 VALUES ($1, NOW(), 'dividend_cash', $2, 'USD',
+			         NULLIF($3, '')::uuid, $4, $5::jsonb, $6)
+			 ON CONFLICT (fund_id, idempotency_key)
+			   WHERE idempotency_key IS NOT NULL DO NOTHING`,
+			fundID, cashResidualCredit, evt.ID, desc,
+			fmt.Sprintf(`{"instrument_key":%q,"settlement":"whole_shares","residual_shares":%g,"split_ratio":%g}`,
+				evt.InstrumentKey, cashResidualShares, evt.SplitRatio),
+			idem,
+		); err != nil {
+			return Result{}, fmt.Errorf("corpaction: append residual cash_ledger: %w", err)
+		}
+	}
+
+	_ = totalCash // documented for callers; not separately persisted (sum of two ledger rows above).
+
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO corp_action_applications
 		   (corp_action_id, fund_id, applied_at,
@@ -296,17 +418,64 @@ func ApplyEvent(ctx context.Context, db txBeginner, evt Event, fundID string) (R
 	}
 
 	return Result{
-		FundID:         fundID,
-		InstrumentKey:  evt.InstrumentKey,
-		PreQuantity:    pre.quantity,
-		PostQuantity:   postQuantity,
-		PreCostPrice:   pre.costPrice,
-		PostCostPrice:  postCost,
-		PreUnrealized:  pre.unrealizedPnl,
-		PostUnrealized: postUnreal,
-		CashCredit:     cashCredit,
-		AlreadyApplied: false,
+		FundID:             fundID,
+		InstrumentKey:      evt.InstrumentKey,
+		PreQuantity:        pre.quantity,
+		PostQuantity:       postQuantity,
+		PreCostPrice:       pre.costPrice,
+		PostCostPrice:      postCost,
+		PreUnrealized:      pre.unrealizedPnl,
+		PostUnrealized:     postUnreal,
+		CashCredit:         cashCredit,
+		CashResidualShares: cashResidualShares,
+		CashResidualCredit: cashResidualCredit,
+		SettlementMode:     string(mode),
+		AlreadyApplied:     false,
 	}, nil
+}
+
+// settlementMode identifies which corporate-action settlement rule
+// to use. A-share + HK distribute stock dividends in whole shares
+// only with a cash residual; US + crypto default to fractional
+// scaling.
+type settlementMode string
+
+const (
+	settlementFractional   settlementMode = "fractional"
+	settlementWholeShares  settlementMode = "whole_shares"
+)
+
+// settlementModeFor picks the mode from the instrument_key prefix.
+// The platform's canonical keys are venue-prefixed (SSE:600519,
+// SZSE:301308, BSE:830799, HKEX:00700, NASDAQ:AAPL, …) so prefix
+// inspection is enough — no DB lookup required.
+//
+// Defaults to fractional when the prefix is unknown, which matches
+// the legacy behaviour (won't break any non-A-share / non-HK
+// instrument added in the future).
+func settlementModeFor(instrumentKey string) settlementMode {
+	if instrumentKey == "" {
+		return settlementFractional
+	}
+	idx := -1
+	for i := 0; i < len(instrumentKey); i++ {
+		if instrumentKey[i] == ':' {
+			idx = i
+			break
+		}
+	}
+	prefix := instrumentKey
+	if idx > 0 {
+		prefix = instrumentKey[:idx]
+	}
+	switch prefix {
+	case "SSE", "SZSE", "BSE", "SHA", "SHE", "XSHG", "XSHE", "XBSE":
+		return settlementWholeShares
+	case "HKEX", "HK", "XHKG":
+		return settlementWholeShares
+	default:
+		return settlementFractional
+	}
 }
 
 // validateEvent enforces the small handful of invariants the SQL

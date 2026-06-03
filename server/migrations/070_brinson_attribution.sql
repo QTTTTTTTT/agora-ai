@@ -26,7 +26,7 @@
 -- This column stores the catalog Series.ID ("spx", "csi300",
 -- ...) which is the stable handle the UI uses.
 
-BEGIN;
+-- BEGIN;  -- stripped: outer migration runner already wraps each file in a transaction
 
 CREATE TABLE IF NOT EXISTS brinson_benchmark_compositions (
     id               UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -100,4 +100,4 @@ CREATE INDEX IF NOT EXISTS brinson_snapshots_fund_time_idx
 CREATE INDEX IF NOT EXISTS brinson_snapshots_bench_time_idx
     ON brinson_attribution_snapshots (benchmark_id, calculated_at DESC);
 
-COMMIT;
+-- COMMIT;  -- stripped: outer migration runner already wraps each file in a transaction

@@ -1320,24 +1320,24 @@ func TestRuntimePMAgentGeneratePlanPersistsMatchedSkillContext(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("plan-1"))
 	actionInsert := mock.ExpectPrepare(regexp.QuoteMeta(`INSERT INTO plan_actions (plan_id, instrument_key, symbol, market, exchange, asset_class, instrument_type, action, position_side, open_close, quantity, price, amount, stop_loss, take_profit, reasoning, confidence, supported_by, opposed_by, execution_status, sort_order, quote_currency, settlement_currency, margin_mode, leverage, contract_multiplier, expiry_date, reduce_only, sleeve, regime_tag, signal_source, exit_reason, strategy)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`))
-	// The PM budget is now capped at the fund's hard-risk per-order limit
-	// (default 10% × NAV = $10,000 for this 100k fund) AND further
-	// shrunk by PlanBudgetSafetyMargin (0.97) so the plan auto-
-	// survives risk.MaxOrderNotionalLimit at execution time even when
-	// the rest of the book drifts a few percent between write and
-	// dispatch. Effective budget = 10000 × 0.97 = 9700; at $10k mid-
-	// quote (unavailable here so price defaults to budget) we get
-	// quantity 0 → floor → 1 share at $9700 amount. The pre-fix
-	// values were 25000 (25% of NAV, hit the cap) and then 10000
-	// (exact cap, lost the cap race), both wedging the workflow.
+	// Quote-unavailable contract (production-grade as of 2026-06-03):
+	// when the quote service can't price the symbol we DOWNGRADE the
+	// LLM-generated buy to a "watch" action with no quantity / price
+	// / amount set. The previous behaviour stamped the PM budget
+	// (here $9,700 = NAV × 10% × PlanBudgetSafetyMargin 0.97) into
+	// the Price column with quantity=1, which the broker simulator
+	// faithfully honoured as a limit order — that's how the
+	// 96,226.4188 CNY/share 301308 fill on 2026-06-02 happened.
+	// Reasoning must still mention "quote unavailable" and the
+	// dollar budget on the table so operators can audit the
+	// downgrade.
 	//
 	// The four trailing AnyArg slots are sleeve / regime_tag /
 	// signal_source / exit_reason (Phase 3A-1). stampDefaultAttribution
-	// stamps sleeve="llm_pm" + signal_source="llm_pm" on this LLM-
-	// generated buy action; both are AnyArg here because the test
-	// only cares that the action made it through the gate.
+	// stamps sleeve="llm_pm" + signal_source="llm_pm" on this
+	// LLM-generated action regardless of whether it executes.
 	actionInsert.ExpectExec().
-		WithArgs("plan-1", sqlmock.AnyArg(), "NVDA", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "buy", sqlmock.AnyArg(), sqlmock.AnyArg(), 1.0, 9700.0, 9700.0, sqlmock.AnyArg(), sqlmock.AnyArg(), containsAllArg{"新能源主线延续", "quote unavailable; plan keeps a buy action and will refresh pricing before execution"}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "pending", 0, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs("plan-1", sqlmock.AnyArg(), "NVDA", sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "watch", sqlmock.AnyArg(), sqlmock.AnyArg(), nil, nil, nil, sqlmock.AnyArg(), sqlmock.AnyArg(), containsAllArg{"新能源主线延续", "quote unavailable", "NVDA", "downgraded to watch"}, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), "pending", 0, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 

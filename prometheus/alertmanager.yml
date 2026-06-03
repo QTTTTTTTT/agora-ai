@@ -1,0 +1,89 @@
+# alertmanager.yml — Sprint 12 alertmanager config example.
+#
+# Routes:
+#
+#   1. severity=critical  → on-call + the FundAI internal alerts webhook.
+#   2. severity=warning   → the internal alerts webhook only.
+#   3. severity=info      → silent unless the operator team explicitly
+#                           opens the alerts board.
+#
+# The "fundai-internal" receiver hits POST /api/admin/alerts/webhook
+# on the FundAI server (see admin_alerts.go, S12.2). That endpoint
+# stores the alert in admin_alert_events and the admin UI surfaces
+# the timeline; this is the authoritative audit trail for "who got
+# paged for what, when".
+#
+# The on-call receiver is left as a placeholder — wire your own
+# PagerDuty / OpsGenie / Lark webhook keys. The webhook secret is
+# read from the environment by the server, NOT from this file
+# (alertmanager has no concept of secret materialisation; whichever
+# secret store your deployment uses must mount FUNDAI_ALERT_WEBHOOK_SECRET
+# into both alertmanager AND the server pod).
+
+global:
+  resolve_timeout: 5m
+
+# Inhibition rules — when the critical version of an alert fires,
+# silence the warning version to avoid double-paging the on-call.
+inhibit_rules:
+  - source_match:
+      alertname: FundAIPMDecisionFallbackRateCritical
+    target_match:
+      alertname: FundAIPMDecisionFallbackRateHigh
+    equal: [component]
+
+route:
+  receiver: fundai-internal
+  group_by: [alertname, component]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical → fan out to on-call AND the internal receiver. The
+    # `continue: true` flag is important: without it the critical
+    # alert would only hit the on-call and we'd lose the audit trail
+    # in admin_alert_events.
+    - matchers:
+        - severity = "critical"
+      receiver: fundai-oncall
+      continue: true
+      group_wait: 0s
+      repeat_interval: 1h
+
+    # Info → only the internal board, never the on-call.
+    - matchers:
+        - severity = "info"
+      receiver: fundai-internal
+      group_wait: 5m
+      repeat_interval: 24h
+
+receivers:
+  - name: fundai-internal
+    webhook_configs:
+      - url: http://fundai-server:8080/api/admin/alerts/webhook
+        send_resolved: true
+        http_config:
+          # The bearer token is the shared secret between alertmanager
+          # and the server. Rotate quarterly. The server rejects
+          # unauthenticated webhooks (admin_alerts.go::webhookAuth).
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/webhook-secret
+
+  - name: fundai-oncall
+    # PLACEHOLDER — wire your real on-call integration here. Examples:
+    #
+    # pagerduty_configs:
+    #   - service_key_file: /etc/alertmanager/pagerduty-key
+    #     send_resolved: true
+    #
+    # webhook_configs:
+    #   - url: https://open.larksuite.com/open-apis/bot/v2/hook/XXX
+    #     send_resolved: true
+    webhook_configs:
+      - url: http://fundai-server:8080/api/admin/alerts/webhook
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/webhook-secret

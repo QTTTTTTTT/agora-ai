@@ -2924,6 +2924,101 @@ export type {
 } from "@fundai/api-client";
 
 // ---------------------------------------------------------------------------
+// Sprint 12.3 — alert events.
+// ---------------------------------------------------------------------------
+
+export async function fetchAdminAlerts(opts: {
+  status?: "firing" | "resolved";
+  limit?: number;
+} = {}): Promise<import("@fundai/api-client").ListAdminAlertsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<import("@fundai/api-client").ListAdminAlertsResponse>(
+    `/api/admin/alerts${tail}`,
+  );
+}
+
+export async function acknowledgeAdminAlert(
+  id: string,
+  body: import("@fundai/api-client").AcknowledgeAlertRequest = {},
+): Promise<{ ok: boolean }> {
+  return apiPatch<{ ok: boolean }>(
+    `/api/admin/alerts/${encodeURIComponent(id)}/ack`,
+    body,
+  );
+}
+
+export type {
+  AdminAlertEvent,
+  AlertSeverity,
+  AlertStatus,
+  AcknowledgeAlertRequest,
+  ListAdminAlertsResponse,
+} from "@fundai/api-client";
+
+// ---------------------------------------------------------------------------
+// Sprint 13 — model A/B promotion drafts.
+// ---------------------------------------------------------------------------
+
+export async function fetchModelABPromotionDrafts(opts: {
+  status?: "pending" | "applied" | "rejected" | "superseded";
+  limit?: number;
+} = {}): Promise<import("@fundai/api-client").ListModelABPromotionDraftsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<import("@fundai/api-client").ListModelABPromotionDraftsResponse>(
+    `/api/admin/model-ab/promotion-drafts${tail}`,
+  );
+}
+
+export async function fetchModelABPromotionDraft(
+  id: string,
+): Promise<import("@fundai/api-client").ModelABPromotionDraft> {
+  return apiGet<import("@fundai/api-client").ModelABPromotionDraft>(
+    `/api/admin/model-ab/promotion-drafts/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function scanModelABPromotionDrafts(): Promise<import("@fundai/api-client").ScanModelABPromotionsResponse> {
+  return apiPost<import("@fundai/api-client").ScanModelABPromotionsResponse>(
+    `/api/admin/model-ab/promotion-drafts/scan`,
+    {},
+  );
+}
+
+export async function applyModelABPromotionDraft(
+  id: string,
+): Promise<import("@fundai/api-client").ApplyModelABPromotionResponse> {
+  return apiPatch<import("@fundai/api-client").ApplyModelABPromotionResponse>(
+    `/api/admin/model-ab/promotion-drafts/${encodeURIComponent(id)}/apply`,
+    {},
+  );
+}
+
+export async function rejectModelABPromotionDraft(
+  id: string,
+  body: import("@fundai/api-client").RejectModelABPromotionRequest = {},
+): Promise<{ ok: boolean }> {
+  return apiPatch<{ ok: boolean }>(
+    `/api/admin/model-ab/promotion-drafts/${encodeURIComponent(id)}/reject`,
+    body,
+  );
+}
+
+export type {
+  ModelABPromotionDraft,
+  ModelABPromotionStatus,
+  ListModelABPromotionDraftsResponse,
+  ApplyModelABPromotionResponse,
+  RejectModelABPromotionRequest,
+  ScanModelABPromotionsResponse,
+} from "@fundai/api-client";
+
+// ---------------------------------------------------------------------------
 // 2FA / TOTP (P0-6)
 // ---------------------------------------------------------------------------
 

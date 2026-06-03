@@ -162,6 +162,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-secret-do-not-use-in-prod}
       MODEL_CONFIG_API_KEY_SECRET: ${MODEL_CONFIG_API_KEY_SECRET:-change_me_to_a_random_64_char_string_min_32_chars_model_cfg}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      # Sprint 12.2 — alertmanager webhook bearer token. Leave empty
+      # to disable the /api/admin/alerts/webhook endpoint (503).
+      FUNDAI_ALERT_WEBHOOK_SECRET: ${FUNDAI_ALERT_WEBHOOK_SECRET:-}
     volumes:
       - app-data:/app/data
     networks:

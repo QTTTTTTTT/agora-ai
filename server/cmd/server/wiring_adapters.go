@@ -14740,11 +14740,24 @@ func (a *runtimePMAgent) buildPlanActionsLegacy(ctx context.Context, fund *repos
 	instrument := defaultInstrumentRef(fund, workflow.FocusStock, symbol)
 	quote, err := a.quoteForAction(ctx, instrument)
 	if err != nil || quote == nil || quote.Price <= 0 {
-		reasoning := appendSkillContext(selectConsensus(roundtable, 0, "roundtable consensus"), "quote unavailable; plan keeps a buy action and will refresh pricing before execution")
-		fallbackPrice := buyAmount
-		if fallbackPrice <= 0 {
-			fallbackPrice = 1
+		// quote unavailable → DOWNGRADE to watch, never fake a buy.
+		// The previous behaviour wrote planBuyAmount into Price with
+		// Quantity=1, which the broker simulator happily honoured as a
+		// limit order — that's how the 96,226.42 CNY/share 301308 fill
+		// on 2026-06-02 happened (budget got stamped as per-share price).
+		// A production-grade trading system NEVER converts a missing
+		// quote into an executable order: it must defer until a
+		// reference price is available. We surface the missing quote
+		// reason + the budget that was on the table so the next PM run
+		// has full context.
+		errSummary := "unknown error"
+		if err != nil {
+			errSummary = err.Error()
 		}
+		reasoning := appendSkillContext(
+			selectConsensus(roundtable, 0, "roundtable consensus"),
+			fmt.Sprintf("quote unavailable for %s (%s); downgraded to watch — budget on the table was %.4f, awaiting reference price before any order", symbol, errSummary, buyAmount),
+		)
 		return a.appendUniverseWatchActions(ctx, []repository.PlanAction{{
 			InstrumentKey:      firstNonEmptyValue(instrument.InstrumentKey, buildInstrumentKey(instrument.Exchange, symbol), symbol),
 			Symbol:             symbol,
@@ -14752,12 +14765,9 @@ func (a *runtimePMAgent) buildPlanActionsLegacy(ctx context.Context, fund *repos
 			Exchange:           nullString(instrument.Exchange),
 			AssetClass:         nullString(instrument.AssetClass),
 			InstrumentType:     nullString(instrument.InstrumentType),
-			Action:             "buy",
-			Quantity:           sql.NullFloat64{Float64: 1, Valid: true},
-			Price:              sql.NullFloat64{Float64: fallbackPrice, Valid: true},
-			Amount:             sql.NullFloat64{Float64: fallbackPrice, Valid: true},
+			Action:             "watch",
 			Reasoning:          sql.NullString{String: reasoning, Valid: true},
-			Confidence:         sql.NullFloat64{Float64: 0.74, Valid: true},
+			Confidence:         sql.NullFloat64{Float64: 0.55, Valid: true},
 			SupportedBy:        []string{"roundtable"},
 			ExecutionStatus:    "pending",
 			SortOrder:          0,
@@ -16824,10 +16834,21 @@ func (a *runtimePMAgent) translateHoldAction(ctx context.Context, fund *reposito
 // translateBuyAction resolves a LLM "buy"/"add" recommendation against
 // the fund's market profile, fetches a live quote, and computes the
 // share quantity via lot-size aware NormalizeBuyQty. The notional is
-// QtyPct * TotalAssets, capped by the configured BuyBudget. If quote
-// is unavailable we still emit a buy with quantity=1 so the workflow
-// can refresh-and-retry; if quantity rounds to 0 (e.g. A-share board
-// minimum 100 shares but budget < 100 * price) we emit "watch".
+// QtyPct * TotalAssets, capped by the configured BuyBudget.
+//
+// Quote-unavailable handling
+//
+// When the quote service can't price the symbol we DOWNGRADE the
+// action to "watch" instead of synthesising an executable buy. The
+// previous behaviour stamped the *notional budget* into PlanAction.
+// Price with Quantity=1, which the broker simulator faithfully
+// honoured as a limit order — on 2026-06-02 this produced a 301308
+// fill at 96,226.4188 CNY/share (true mid was ~500). Production
+// trading systems never invent a reference price; missing quotes
+// must defer until the next plan cycle can re-price.
+//
+// If quantity rounds to 0 (e.g. A-share board minimum 100 shares but
+// budget < 100 * price) we also emit "watch".
 func (a *runtimePMAgent) translateBuyAction(ctx context.Context, fund *repository.Fund, roundtable *workflow.RoundtableResult, da decision.DecisionAction, sortIdx int) (repository.PlanAction, bool) {
 	symbol := strings.TrimSpace(da.Symbol)
 	if symbol == "" {
@@ -16864,10 +16885,21 @@ func (a *runtimePMAgent) translateBuyAction(ctx context.Context, fund *repositor
 	}
 
 	if qerr != nil || quote == nil || quote.Price <= 0 {
-		fallbackPrice := notional
-		if fallbackPrice <= 0 {
-			fallbackPrice = 1
+		// quote unavailable → DOWNGRADE to watch, never fake a buy.
+		// See the symmetric branch in pmGenerateBuyPlan for the full
+		// rationale (96,226 CNY/share fill on 2026-06-02). A
+		// production-grade trading system must not synthesize a
+		// limit price from a notional budget — the next time this
+		// symbol gets a real quote the PM will produce a properly
+		// priced order.
+		errSummary := "unknown error"
+		if qerr != nil {
+			errSummary = qerr.Error()
 		}
+		reasoning := appendSkillContext(
+			reasoning,
+			fmt.Sprintf("quote unavailable for %s (%s); downgraded to watch — notional budget on the table was %.4f, awaiting reference price before any order", symbol, errSummary, notional),
+		)
 		return repository.PlanAction{
 			InstrumentKey:      firstNonEmptyValue(instrument.InstrumentKey, buildInstrumentKey(instrument.Exchange, symbol), symbol),
 			Symbol:             symbol,
@@ -16875,11 +16907,8 @@ func (a *runtimePMAgent) translateBuyAction(ctx context.Context, fund *repositor
 			Exchange:           nullString(instrument.Exchange),
 			AssetClass:         nullString(instrument.AssetClass),
 			InstrumentType:     nullString(instrument.InstrumentType),
-			Action:             "buy",
-			Quantity:           sql.NullFloat64{Float64: 1, Valid: true},
-			Price:              sql.NullFloat64{Float64: fallbackPrice, Valid: true},
-			Amount:             sql.NullFloat64{Float64: fallbackPrice, Valid: true},
-			Reasoning:          sql.NullString{String: appendSkillContext(reasoning, "quote unavailable; plan keeps a buy action and will refresh pricing before execution"), Valid: true},
+			Action:             "watch",
+			Reasoning:          sql.NullString{String: reasoning, Valid: true},
 			Confidence:         sql.NullFloat64{Float64: confidence, Valid: true},
 			SupportedBy:        []string{"decision_engine", "roundtable"},
 			ExecutionStatus:    "pending",

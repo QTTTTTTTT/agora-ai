@@ -45,7 +45,7 @@
 -- the existing INSERT statements in fund_repo.go keep working
 -- without code change until the engine starts populating them.
 
-BEGIN;
+-- BEGIN;  -- stripped: outer migration runner already wraps each file in a transaction
 
 -- ---------------------------------------------------------------------------
 -- 1. Extend order_type vocabulary
@@ -160,4 +160,4 @@ CREATE INDEX IF NOT EXISTS idx_trade_executions_gtd_expiry
     ON trade_executions (good_till_date)
     WHERE good_till_date IS NOT NULL AND status IN ('pending', 'working');
 
-COMMIT;
+-- COMMIT;  -- stripped: outer migration runner already wraps each file in a transaction

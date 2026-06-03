@@ -28,7 +28,9 @@ import AdminBrinsonCompositionsSection from "../components/AdminBrinsonCompositi
 import AdminAgentReputationSection from "../components/AdminAgentReputationSection";
 import { AdminWorkflowCheckpointsSection } from "../components/AdminWorkflowCheckpointsSection";
 import { AdminModelABSection } from "../components/AdminModelABSection";
+import { AdminModelABPromotionSection } from "../components/AdminModelABPromotionSection";
 import { AdminLLMHealthSection } from "../components/AdminLLMHealthSection";
+import { AdminAlertsSection } from "../components/AdminAlertsSection";
 import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
@@ -1228,9 +1230,15 @@ const Admin: React.FC = () => {
           {/* S10.3 / S10.4 — model A/B experiments (list, report, CRUD). */}
           <AdminModelABSection language={language} />
 
+          {/* S13.3 — model A/B auto-promotion drafts (one-click apply / reject). */}
+          <AdminModelABPromotionSection language={language} />
+
           {/* S11.4 — LLM health dashboard: decision_source / fallback */}
           {/* aggregates + recent fallback rows with raw provider summaries. */}
           <AdminLLMHealthSection language={language} />
+
+          {/* S12.3 — alertmanager-ingested events + ack flow. */}
+          <AdminAlertsSection language={language} />
 
           <AdminWSFeedSection language={language} />
 

@@ -320,8 +320,13 @@ func TestBuildPlanActionsFallsBackWhenDecisionEngineFails(t *testing.T) {
 
 // Buy translation: LLM returns a buy against a fund without
 // positions; the wiring layer hits the watch fallback because no
-// quote provider is wired in the test, but still tags the action
-// with decision_engine and carries through the LLM rationale.
+// quote provider is wired in the test. Quote-unavailable contract
+// (production-grade as of 2026-06-03): the action is DOWNGRADED
+// to "watch" — we no longer synthesise a buy with the budget
+// stamped into the price, which is what produced the 96,226 CNY/
+// share 301308 fill on 2026-06-02. The action still carries the
+// decision_engine tag + the LLM rationale so the Decision Center
+// surfaces the deferred intent.
 func TestBuildPlanActionsTranslatesLLMBuyAction(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -363,14 +368,23 @@ func TestBuildPlanActionsTranslatesLLMBuyAction(t *testing.T) {
 		t.Fatalf("expected 1 action, got %d", len(actions))
 	}
 	got := actions[0]
-	if got.Action != "buy" {
-		t.Errorf("Action = %q, want buy (quote-unavailable buy fallback still emits buy)", got.Action)
+	if got.Action != "watch" {
+		t.Errorf("Action = %q, want watch (quote-unavailable must downgrade — see 96,226 CNY/share regression on 2026-06-02)", got.Action)
+	}
+	if got.Price.Valid {
+		t.Errorf("Price.Valid=true (=%v) on quote-unavailable; must NOT synthesise a price from the budget", got.Price.Float64)
+	}
+	if got.Quantity.Valid {
+		t.Errorf("Quantity.Valid=true (=%v) on watch action; must be unset", got.Quantity.Float64)
 	}
 	if got.Symbol != "AAPL" {
 		t.Errorf("Symbol = %q, want AAPL", got.Symbol)
 	}
 	if !strings.Contains(got.Reasoning.String, "expanding services revenue") {
 		t.Errorf("Reasoning should carry LLM rationale; got %q", got.Reasoning.String)
+	}
+	if !strings.Contains(got.Reasoning.String, "quote unavailable") {
+		t.Errorf("Reasoning should explain the downgrade; got %q", got.Reasoning.String)
 	}
 	found := false
 	for _, s := range got.SupportedBy {

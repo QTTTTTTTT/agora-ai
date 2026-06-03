@@ -239,6 +239,142 @@ func WithBorrowGate(gate BorrowGate) SimulatorOption {
 	}
 }
 
+// PriceCollarGate is the fourth pre-trade gate. It runs last among
+// the four (marketstatus → lockup → borrow → price-collar) so:
+//
+//   - hard-reject reasons (halted, calendar, lockup, borrow) keep
+//     precedence in the surfaced RejectReason;
+//   - the collar's reject metadata (intended vs reference price)
+//     is only computed when the order would otherwise have made
+//     it to the matcher.
+//
+// The collar's job is the broker-side fat-finger / bad-quote safety
+// net: when the LIMIT price deviates from a recent reference quote
+// by more than the configured tolerance (default 11% / 21% for
+// A-share boards, 15% for US equity, 30% for crypto), the order
+// gets rejected before the matcher books it. Trigger story for
+// the gate's introduction was the 2026-06-02 301308 fill at
+// 96,226.4188 CNY/share when the true mid was ~500 CNY — a PM
+// fallback path had stamped the budget into the limit price.
+type PriceCollarGate interface {
+	CheckOrder(ctx context.Context, probe PriceCollarProbe) PriceCollarVerdict
+}
+
+// PriceCollarProbe is the gate input. We pass IntendedPrice=0 for
+// market orders so the engine can short-circuit and allow.
+type PriceCollarProbe struct {
+	FundID        string
+	InstrumentKey string
+	Symbol        string
+	Market        string
+	AssetClass    string
+	Side          string
+	Quantity      float64
+	IntendedPrice float64
+	ClientOrderID string
+}
+
+// PriceCollarVerdict mirrors the other gates' shape. ReferencePrice
+// and ToleranceBps are populated on reject for audit.
+type PriceCollarVerdict struct {
+	Rejected       bool
+	RejectReason   string
+	Warnings       []string
+	ReferencePrice float64
+	ToleranceBps   int
+}
+
+// WithPriceCollarGate wires the collar gate into the simulator.
+// Default = nil (no gate). Production wiring lives in cmd/server.
+func WithPriceCollarGate(gate PriceCollarGate) SimulatorOption {
+	return func(s *Simulator) {
+		s.priceCollarGate = gate
+	}
+}
+
+// LotSizeGate is the fifth pre-trade gate. It runs LAST among the
+// five gates (marketstatus → lockup → borrow → price-collar →
+// lot-size) so hard-reject reasons keep precedence in the
+// surfaced reason, and the lot-size verdict only needs to be
+// computed for orders that would otherwise have reached the
+// matcher.
+//
+// The gate's job is the broker-side market-microstructure safety
+// net. Every venue has rules about the smallest legal trade unit
+// and the increment above it:
+//
+//   - A-share SH/SZ main + ChiNext (300/301): MinLot 100, Step 100.
+//   - A-share STAR (688/689): MinLot 200, Step 1.
+//   - A-share BSE (43/83/87/88/92): MinLot 100, Step 1.
+//   - Hong Kong equities: per-symbol lot table (00700=100,
+//     00939=1000, 09988=100, …); odd-lot board handles residuals
+//     but a regular order MUST be a lot multiple.
+//   - US equities: integer shares by default; fractional shares
+//     only when the venue's Capabilities advertise it.
+//   - Futures (CN): integer "hands" of contract_multiplier.
+//   - Crypto: per-pair step_size + min_notional.
+//
+// Sell-side semantics: an "odd-lot residual" sell that liquidates
+// the remaining position is always legal (handled by the engine,
+// not by short-circuiting the gate). A partial sell that would
+// leave an odd-lot residual must be expanded to liquidate the
+// whole position — the engine returns Rejected with a Suggestion
+// quantity so the wiring layer can re-submit.
+//
+// Trigger story for the gate's introduction was the 2026-06-02/03
+// bad fills: 301308 buy 1 share (ChiNext minimum 100) and
+// 688195 sell 85 / 688205 sell 62 (STAR Market step 1 but the
+// odd-lot residual rule was bypassed because no broker-side gate
+// existed).
+type LotSizeGate interface {
+	CheckOrder(ctx context.Context, probe LotSizeProbe) LotSizeVerdict
+}
+
+// LotSizeProbe is the gate input. The probe deliberately does NOT
+// carry the position quantity — the production gate implementation
+// looks it up via its own positions repository so the broker
+// package stays free of the positions domain. Tests can pass
+// fakes that ignore the lookup.
+//
+// S12.5 — LimitPrice is included so the gate can also enforce the
+// per-venue tick size on limit orders (A-share 0.01 CNY, US ≥$1
+// 0.01 USD, HK banded by price tier, crypto per pair). 0 means
+// "market order" and the tick check is skipped.
+type LotSizeProbe struct {
+	FundID         string
+	InstrumentKey  string
+	Symbol         string
+	Market         string
+	Exchange       string
+	AssetClass     string
+	InstrumentType string
+	Side           string
+	Quantity       float64
+	LimitPrice     float64
+	ClientOrderID  string
+}
+
+// LotSizeVerdict mirrors the other gates' shape. SuggestedQty is
+// populated on reject when the engine can propose a legal
+// quantity (e.g. floor to the step, or expand to liquidate the
+// residual); callers can use it to re-submit programmatically
+// without an extra round trip.
+type LotSizeVerdict struct {
+	Rejected     bool
+	RejectReason string
+	Warnings     []string
+	SuggestedQty float64
+}
+
+// WithLotSizeGate wires the lot-size gate into the simulator.
+// Default = nil (no gate), preserving the old behaviour. Production
+// wiring lives in cmd/server.
+func WithLotSizeGate(gate LotSizeGate) SimulatorOption {
+	return func(s *Simulator) {
+		s.lotSizeGate = gate
+	}
+}
+
 // Simulator is an in-process Broker that fills orders against
 // matching.Engine.
 type Simulator struct {
@@ -248,9 +384,11 @@ type Simulator struct {
 	idFn         func() string
 	nowFn        func() time.Time
 	streamBuf    int
-	gate         MarketStatusGate
-	lockupGate   LockupGate
-	borrowGate   BorrowGate
+	gate            MarketStatusGate
+	lockupGate      LockupGate
+	borrowGate      BorrowGate
+	priceCollarGate PriceCollarGate
+	lotSizeGate     LotSizeGate
 	orders       map[string]*Order        // brokerOrderID -> order
 	clientIndex  map[string]string        // (fundID|clientOrderID) -> brokerOrderID
 	subscribers  map[string][]chan Fill   // fundID -> subscribers
@@ -438,6 +576,78 @@ func (s *Simulator) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (*Ord
 				reason = "rejected by borrow gate"
 			}
 			return nil, fmt.Errorf("%w: %s", ErrBorrowRejected, reason)
+		}
+		gateWarnings = append(gateWarnings, verdict.Warnings...)
+	}
+
+	// Pre-trade price-collar gate: fat-finger / bad-quote safety
+	// net (limit price too far from a recent reference quote).
+	// Runs after the regulatory gates so a more dramatic reject
+	// (halted, calendar, lockup, borrow) takes precedence in the
+	// surfaced reason. Market orders are short-circuited inside
+	// the gate's engine — collar checks only apply to limits.
+	if s.priceCollarGate != nil {
+		intended := req.LimitPrice
+		if intended <= 0 {
+			intended = req.StopPrice
+		}
+		verdict := s.priceCollarGate.CheckOrder(ctx, PriceCollarProbe{
+			FundID:        req.FundID,
+			InstrumentKey: req.InstrumentKey,
+			Symbol:        req.Symbol,
+			Market:        req.Market,
+			AssetClass:    req.AssetClass,
+			Side:          string(req.Side),
+			Quantity:      req.Quantity,
+			IntendedPrice: intended,
+			ClientOrderID: req.ClientOrderID,
+		})
+		if verdict.Rejected {
+			s.mu.Unlock()
+			reason := verdict.RejectReason
+			if reason == "" {
+				reason = "rejected by price-collar gate"
+			}
+			return nil, fmt.Errorf("%w: %s", ErrPriceCollarRejected, reason)
+		}
+		gateWarnings = append(gateWarnings, verdict.Warnings...)
+	}
+
+	// Pre-trade lot-size gate: market-microstructure safety net.
+	// Catches A-share board minimums (100/200) and step (100/1),
+	// HK custom per-symbol lot, futures integer hands, crypto
+	// step_size, US fractional-share capability. Runs LAST in the
+	// gate chain so the regulatory rejects (status / lockup /
+	// borrow) and the price-collar fat-finger reject keep
+	// precedence in the surfaced reason. The gate sees the fund's
+	// current position quantity so it can apply the A-share
+	// odd-lot residual rule on partial sells.
+	if s.lotSizeGate != nil {
+		intended := req.LimitPrice
+		if intended <= 0 {
+			intended = req.StopPrice
+		}
+		verdict := s.lotSizeGate.CheckOrder(ctx, LotSizeProbe{
+			FundID:        req.FundID,
+			InstrumentKey: req.InstrumentKey,
+			Symbol:        req.Symbol,
+			Market:        req.Market,
+			AssetClass:    req.AssetClass,
+			Side:          string(req.Side),
+			Quantity:      req.Quantity,
+			LimitPrice:    intended,
+			ClientOrderID: req.ClientOrderID,
+		})
+		if verdict.Rejected {
+			s.mu.Unlock()
+			reason := verdict.RejectReason
+			if reason == "" {
+				reason = "rejected by lot-size gate"
+			}
+			if verdict.SuggestedQty > 0 {
+				reason = fmt.Sprintf("%s (suggested qty=%g)", reason, verdict.SuggestedQty)
+			}
+			return nil, fmt.Errorf("%w: %s", ErrLotSizeRejected, reason)
 		}
 		gateWarnings = append(gateWarnings, verdict.Warnings...)
 	}

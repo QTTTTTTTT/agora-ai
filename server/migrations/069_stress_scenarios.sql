@@ -30,7 +30,7 @@
 -- instrument shocks are mutually exclusive — the highest-priority
 -- match wins.
 
-BEGIN;
+-- BEGIN;  -- stripped: outer migration runner already wraps each file in a transaction
 
 CREATE TABLE IF NOT EXISTS stress_scenarios (
     id           UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -102,4 +102,4 @@ CREATE INDEX IF NOT EXISTS portfolio_stress_results_fund_time_idx
 CREATE INDEX IF NOT EXISTS portfolio_stress_results_scenario_idx
     ON portfolio_stress_results (scenario_id, calculated_at DESC);
 
-COMMIT;
+-- COMMIT;  -- stripped: outer migration runner already wraps each file in a transaction

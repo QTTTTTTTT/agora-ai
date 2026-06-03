@@ -145,6 +145,15 @@ type adminHandler struct {
 	// Nil-safe; when unwired the llm-health routes stay
 	// unregistered.
 	llmHealthRepo *repository.LLMHealthRepo
+
+	// alertEventRepo backs the Sprint 12.2 alertmanager webhook
+	// receiver + admin acknowledgement flow. Nil-safe.
+	alertEventRepo *repository.AlertEventRepo
+
+	// modelABPromotionDraftRepo + modelABPromotionScanLoop back
+	// the Sprint 13.3 promotion endpoints. Nil-safe.
+	modelABPromotionDraftRepo *modelab.DraftRepo
+	modelABPromotionScanLoop  *promotionScanLoop
 }
 
 // adminSuperAdminChecker implements audit.SuperAdminChecker by reading
@@ -303,6 +312,9 @@ func newAdminHandler(svc *Services) *adminHandler {
 		modelABRepo:     svc.ModelABRepo,
 		modelABReporter: svc.ModelABReporter,
 		llmHealthRepo:   svc.LLMHealthRepo,
+		alertEventRepo:  svc.AlertEventRepo,
+		modelABPromotionDraftRepo: svc.ModelABPromotionDraftRepo,
+		modelABPromotionScanLoop:  svc.ModelABPromotionScanLoop,
 	}
 	if svc.LLMRuntime != nil {
 		h.modelABResolver = svc.LLMRuntime.ModelABResolver()
@@ -397,6 +409,8 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	// S10.3 / 10.4 — model A/B experiment list / report / CRUD.
 	h.registerModelABAdminRoutes(mux)
 	h.registerLLMHealthAdminRoutes(mux)
+	h.registerAlertAdminRoutes(mux)
+	h.registerModelABPromotionRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

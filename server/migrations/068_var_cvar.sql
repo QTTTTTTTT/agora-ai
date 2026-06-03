@@ -31,7 +31,7 @@
 -- -1.8%" side by side — the spread itself is a fat-tail
 -- diagnostic.
 
-BEGIN;
+-- BEGIN;  -- stripped: outer migration runner already wraps each file in a transaction
 
 CREATE TABLE IF NOT EXISTS portfolio_var_snapshots (
     id                  BIGSERIAL PRIMARY KEY,
@@ -113,4 +113,4 @@ CREATE INDEX IF NOT EXISTS portfolio_var_snapshots_fund_time_idx
 CREATE INDEX IF NOT EXISTS portfolio_var_snapshots_latest_idx
     ON portfolio_var_snapshots (fund_id, method, confidence, horizon_days, calculated_at DESC);
 
-COMMIT;
+-- COMMIT;  -- stripped: outer migration runner already wraps each file in a transaction
