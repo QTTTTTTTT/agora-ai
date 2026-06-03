@@ -646,7 +646,13 @@ type Services struct {
 	// AlertEventRepo (Sprint 12.2) backs the alertmanager
 	// webhook + admin acknowledgement flow. Nil-safe.
 	AlertEventRepo *repository.AlertEventRepo
-	WSFeedConfig   wsFeedConfig
+	// PlatformLLMProviderRepo (S13) backs the admin LLM-provider
+	// CRUD + hot-reload flow. The wiring layer calls
+	// LoadFromDBOrSeedFromEnv on startup to populate the router;
+	// the admin handler calls Upsert/Delete + reloader to update
+	// the router in-place without a process restart. Nil-safe.
+	PlatformLLMProviderRepo *repository.PlatformLLMProviderRepo
+	WSFeedConfig            wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
 	WSFeedBridge           *wsFeedSubscriptionBridge
@@ -729,7 +735,20 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	modelConfigService := subscription.NewModelConfigService(db)
 	budgetService := subscription.NewBudgetService(db)
 	quotaService := quota.NewService(db)
-	llmRuntime, err := newLLMRuntime(context.Background(), modelConfigService, usageTracker, subscriptionService, budgetService, quotaService, metrics, cfg.LLMDefaults)
+	platformLLMProviderRepo := repository.NewPlatformLLMProviderRepo(db)
+	// auditLogger is created lazily inside newAdminHandler; for the
+	// S13 initial env-seed (only fires on a brand-new database) we
+	// build a temporary one here so the audit row lands in the
+	// admin_change_log table from the first boot. Subsequent
+	// reloads use llmRuntime.auditLogger (same underlying DB).
+	envSeedAudit := audit.NewDBLogger(db)
+	llmRuntime, err := newLLMRuntimeWithProviderRepo(
+		context.Background(),
+		modelConfigService, usageTracker,
+		subscriptionService, budgetService, quotaService,
+		metrics, cfg.LLMDefaults,
+		platformLLMProviderRepo, envSeedAudit,
+	)
 	if err != nil {
 		usageTracker.Stop()
 		return nil, err
@@ -1109,6 +1128,9 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	services.LLMHealthRepo = repository.NewLLMHealthRepo(db)
 	// Sprint 12.2 — alertmanager webhook + admin ack flow.
 	services.AlertEventRepo = repository.NewAlertEventRepo(db)
+	// S13 — platform LLM provider table (managed via admin UI,
+	// hot-reloaded into the router on every Upsert/Delete).
+	services.PlatformLLMProviderRepo = platformLLMProviderRepo
 
 	// Sprint 9.3 — social sentiment ingestion. The registry
 	// reads per-platform env flags; when no provider is enabled
@@ -1316,6 +1338,13 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 func buildRouter(svc *Services, cfg *Config) http.Handler {
 	mux := http.NewServeMux()
 	adminHandler := newAdminHandler(svc)
+	// S13 — attach the LLM router + reloader onto the admin
+	// handler now that both halves of the service graph exist.
+	// nil-safe: missing runtime/repo means the LLM provider
+	// admin routes simply return 503 / never trigger reloads.
+	if adminHandler != nil && svc != nil && svc.LLMRuntime != nil {
+		adminHandler.attachLLMRuntime(svc.LLMRuntime.router, svc.LLMRuntime)
+	}
 
 	// ---- Health & meta ----
 	mux.HandleFunc("GET /api/health", handleHealth(svc))

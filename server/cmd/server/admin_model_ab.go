@@ -256,6 +256,21 @@ func (h *adminHandler) handleCreateModelABExperiment(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusBadRequest, errorPayload("invalid_experiment", err.Error()))
 		return
 	}
+	// S13 gate: refuse to persist an arm whose provider has no
+	// active key in the platform LLM provider table. Without this
+	// the experiment would silently route both arms to whatever
+	// provider DOES have a key (typically the LLM_API_KEY default),
+	// producing meaningless "gemini vs gemini" comparisons — the
+	// exact failure mode that motivated S13.
+	if missing := h.missingProviderKeys(r.Context(), exp.Arms); len(missing) > 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":             "provider_not_configured",
+			"detail":            "one or more arms reference a provider with no active platform key",
+			"missing_providers": missing,
+			"hint":              "configure the missing provider under Admin → LLM Providers, or pick a different arm provider",
+		})
+		return
+	}
 	id, err := h.modelABRepo.CreateExperiment(r.Context(), exp)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorPayload("create_failed", err.Error()))
@@ -395,6 +410,15 @@ func (h *adminHandler) handleUpdateModelABExperiment(w http.ResponseWriter, r *h
 		Arms:           arms,
 		TrafficSplit:   req.TrafficSplit,
 		MaxTotalTokens: req.MaxTotalTokens,
+	}
+	if missing := h.missingProviderKeys(r.Context(), patched.Arms); len(missing) > 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":             "provider_not_configured",
+			"detail":            "one or more arms reference a provider with no active platform key",
+			"missing_providers": missing,
+			"hint":              "configure the missing provider under Admin → LLM Providers, or pick a different arm provider",
+		})
+		return
 	}
 	if err := h.modelABRepo.UpdateDraft(r.Context(), id, patched); err != nil {
 		switch {

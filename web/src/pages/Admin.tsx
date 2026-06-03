@@ -31,6 +31,7 @@ import { AdminModelABSection } from "../components/AdminModelABSection";
 import { AdminModelABPromotionSection } from "../components/AdminModelABPromotionSection";
 import { AdminLLMHealthSection } from "../components/AdminLLMHealthSection";
 import { AdminAlertsSection } from "../components/AdminAlertsSection";
+import { AdminLLMProvidersSection } from "../components/AdminLLMProvidersSection";
 import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
@@ -1226,6 +1227,11 @@ const Admin: React.FC = () => {
 
           {/* S9.2 — per-step workflow checkpoint timeline + resume. */}
           <AdminWorkflowCheckpointsSection language={language} />
+
+          {/* S13 — platform LLM provider admin (CRUD + hot reload). */}
+          {/* Renders ABOVE A/B so operators configure providers first; */}
+          {/* the A/B form's provider dropdown pulls from this table. */}
+          <AdminLLMProvidersSection language={language} />
 
           {/* S10.3 / S10.4 — model A/B experiments (list, report, CRUD). */}
           <AdminModelABSection language={language} />

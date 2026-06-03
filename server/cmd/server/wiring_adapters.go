@@ -263,6 +263,46 @@ type llmRuntime struct {
 	// LLMClient() so all decision/agent paths see it. nil when
 	// no resolver / repo / client is wired.
 	modelABDispatcher *modelab.ShadowDispatcher
+
+	// S13 — platform LLM provider table. Owned by the admin UI;
+	// hot-reload pushes a fresh (systemAPIKeys, tierDefaults)
+	// snapshot into the router via ReplaceSystemConfig. nil =
+	// pre-S13 / test wiring; ReloadPlatformProviders is then a
+	// no-op so legacy tests keep working.
+	platformLLMProviderRepo *repository.PlatformLLMProviderRepo
+	envDefaults             LLMDefaultsConfig
+	auditLogger             *audit.DBLogger
+}
+
+// ReloadPlatformProviders re-reads the platform_llm_providers
+// table, rebuilds the systemAPIKeys + tierDefaults pair, and
+// pushes the result into the router with no app restart.
+// Implements the providerReloader interface consumed by the
+// admin handler.
+func (r *llmRuntime) ReloadPlatformProviders(ctx context.Context) error {
+	if r == nil || r.platformLLMProviderRepo == nil || r.router == nil {
+		return nil
+	}
+	snap, err := loadPlatformProviders(ctx, r.platformLLMProviderRepo, r.envDefaults, r.auditLogger)
+	if err != nil {
+		return fmt.Errorf("reload providers: %w", err)
+	}
+	r.router.ReplaceSystemConfig(snap.SystemAPIKeys, snap.TierDefaults)
+	r.systemAPIKeys = snap.SystemAPIKeys
+	r.tierDefaults = snap.TierDefaults
+	// Re-attach the model-A/B hook with the fresh snapshot so
+	// arm resolution uses the new keys / endpoints. Safe no-op
+	// when no resolver is wired.
+	if r.modelABResolver != nil {
+		r.router.SetModelABHook(r.modelABResolver.AsLLMHook(modelab.HookContext{
+			SystemAPIKeys: r.systemAPIKeys,
+			TierDefaults:  r.tierDefaults,
+		}))
+	}
+	slog.Info("platform_llm_providers: hot reload complete",
+		"reload_generation", llm.ReloadGeneration(),
+		"active_provider_keys", len(snap.SystemAPIKeys))
+	return nil
 }
 
 // agentModelLister narrows repository.AgentRepo to the two methods
@@ -450,15 +490,43 @@ func (a *modelConfigServiceAdapter) TestConnection(ctx context.Context, config *
 }
 
 func newLLMRuntime(ctx context.Context, modelConfigs *subscription.ModelConfigService, usageTracker *subscription.UsageTracker, subscriptionService *subscription.SubscriptionService, budgetService *subscription.BudgetService, quotaService *quota.Service, metrics *serverMetrics, defaults LLMDefaultsConfig) (*llmRuntime, error) {
-	defaultModels := buildPlatformDefaultModels(defaults)
-	systemKeys := loadSystemLLMKeys(defaults)
+	return newLLMRuntimeWithProviderRepo(ctx, modelConfigs, usageTracker, subscriptionService, budgetService, quotaService, metrics, defaults, nil, nil)
+}
+
+// newLLMRuntimeWithProviderRepo is the S13 entry point. When repo
+// is non-nil it loads the (systemAPIKeys, tierDefaults) pair from
+// the platform_llm_providers table (env-seeded on first boot);
+// when repo is nil the runtime falls back to pre-S13 env-only
+// behaviour. auditLogger is used for the initial_env_seed audit
+// trail and may be nil in tests.
+func newLLMRuntimeWithProviderRepo(
+	ctx context.Context,
+	modelConfigs *subscription.ModelConfigService,
+	usageTracker *subscription.UsageTracker,
+	subscriptionService *subscription.SubscriptionService,
+	budgetService *subscription.BudgetService,
+	quotaService *quota.Service,
+	metrics *serverMetrics,
+	defaults LLMDefaultsConfig,
+	providerRepo *repository.PlatformLLMProviderRepo,
+	auditLogger *audit.DBLogger,
+) (*llmRuntime, error) {
+	snap, err := loadPlatformProviders(ctx, providerRepo, defaults, auditLogger)
+	if err != nil {
+		return nil, fmt.Errorf("platform_llm_providers: load: %w", err)
+	}
+	systemKeys := snap.SystemAPIKeys
+	defaultModels := snap.TierDefaults
 	runtime := &llmRuntime{
-		modelConfigs:        modelConfigs,
-		subscriptionService: subscriptionService,
-		metrics:             metrics,
-		systemAPIKeys:       systemKeys,
-		tierDefaults:        defaultModels,
-		syncedUsers:         make(map[string]struct{}),
+		modelConfigs:            modelConfigs,
+		subscriptionService:     subscriptionService,
+		metrics:                 metrics,
+		systemAPIKeys:           systemKeys,
+		tierDefaults:            defaultModels,
+		syncedUsers:             make(map[string]struct{}),
+		platformLLMProviderRepo: providerRepo,
+		envDefaults:             defaults,
+		auditLogger:             auditLogger,
 	}
 	router := llm.NewModelRouter(systemKeys, defaultModels, newUsageRecorderAdapter(usageTracker), runtime)
 	client := llm.NewMultiProviderClientWithObserver(router, systemKeys, runtime.metrics)

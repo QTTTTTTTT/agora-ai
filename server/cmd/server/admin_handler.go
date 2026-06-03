@@ -17,6 +17,7 @@ import (
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/brinson"
 	"github.com/fundai/server/internal/factorexposure"
+	"github.com/fundai/server/internal/llm"
 	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketimpact"
@@ -154,6 +155,36 @@ type adminHandler struct {
 	// the Sprint 13.3 promotion endpoints. Nil-safe.
 	modelABPromotionDraftRepo *modelab.DraftRepo
 	modelABPromotionScanLoop  *promotionScanLoop
+
+	// platformLLMProviderRepo + modelRouter + providerReloader
+	// back the S13 platform LLM provider admin CRUD + hot reload.
+	// platformLLMProviderRepo is the DB authority; modelRouter is
+	// queried to render the live state ("which providers does the
+	// in-process router actually have keys for?"); providerReloader
+	// rebuilds the router's systemAPIKeys + tierDefaults map after
+	// every mutation so a config change does NOT require restart.
+	// All three are nil-safe; missing repo means the routes stay
+	// unregistered.
+	platformLLMProviderRepo *repository.PlatformLLMProviderRepo
+	modelRouter             *llm.ModelRouter
+	providerReloader        providerReloader
+}
+
+// attachLLMRuntime wires the in-process model router + reloader
+// AFTER the LLM runtime has been constructed. main.go calls this
+// once both adminHandler and llmRuntime exist; nil-safe so partial
+// wiring (e.g. tests without a full runtime) does not panic. The
+// adminHandler captures the runtime references so:
+//   - the live "router_active_keys" view in handleListLLMProviders
+//     reflects the current in-process state (not just the DB);
+//   - mutations (Upsert/Delete/SetDefault) push a fresh map into
+//     the router via providerReloader.ReloadPlatformProviders.
+func (h *adminHandler) attachLLMRuntime(router *llm.ModelRouter, reloader providerReloader) {
+	if h == nil {
+		return
+	}
+	h.modelRouter = router
+	h.providerReloader = reloader
 }
 
 // adminSuperAdminChecker implements audit.SuperAdminChecker by reading
@@ -315,7 +346,12 @@ func newAdminHandler(svc *Services) *adminHandler {
 		alertEventRepo:  svc.AlertEventRepo,
 		modelABPromotionDraftRepo: svc.ModelABPromotionDraftRepo,
 		modelABPromotionScanLoop:  svc.ModelABPromotionScanLoop,
+		platformLLMProviderRepo:   svc.PlatformLLMProviderRepo,
 	}
+	// S13 — modelRouter + providerReloader come from the LLM
+	// runtime which is constructed in a later wave of initServices
+	// than newAdminHandler. main.go calls h.attachLLMRuntime() to
+	// fill these once both sides exist.
 	if svc.LLMRuntime != nil {
 		h.modelABResolver = svc.LLMRuntime.ModelABResolver()
 	}
@@ -411,6 +447,7 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerLLMHealthAdminRoutes(mux)
 	h.registerAlertAdminRoutes(mux)
 	h.registerModelABPromotionRoutes(mux)
+	h.registerLLMProviderRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

@@ -17,6 +17,7 @@ import {
   createModelABExperiment,
   formatApiError,
   getModelABReport,
+  listAdminLLMProviders,
   listModelABExperiments,
   setModelABExperimentStatus,
   updateModelABExperiment,
@@ -292,6 +293,33 @@ export function AdminModelABSection({ language }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // S13 — pull the live set of active providers from the platform
+  // LLM provider table. Used to (a) render a small "available
+  // providers" chip strip above the arms textarea so operators know
+  // which provider strings the backend will accept, and (b)
+  // client-side reject submissions whose arms reference a provider
+  // that isn't configured. The backend still has the 422 gate as a
+  // hard guarantee — this is the friendlier first line of defense.
+  const [availableProviders, setAvailableProviders] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await listAdminLLMProviders({ status: "active" });
+        if (cancelled) return;
+        const set = new Set<string>();
+        for (const row of resp.providers ?? []) {
+          set.add(row.provider.toLowerCase());
+        }
+        setAvailableProviders(set);
+      } catch {
+        // Non-fatal: fall back to no client-side gate.
+        if (!cancelled) setAvailableProviders(new Set());
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const [selectedID, setSelectedID] = useState("");
   const [report, setReport] = useState<ModelABReport | null>(null);
   const [reportError, setReportError] = useState("");
@@ -492,6 +520,25 @@ export function AdminModelABSection({ language }: Props) {
         (err as Error & { cause?: unknown }).cause = parseErr;
         throw err;
       }
+      // S13 — block submission if any arm references a provider
+      // that isn't configured in the platform LLM provider table.
+      // The backend would 422 anyway, but failing client-side
+      // gives a sharper error before the network round-trip.
+      if (availableProviders.size > 0) {
+        const armProviders = new Set<string>();
+        for (const arm of arms) {
+          if (arm.provider) armProviders.add(String(arm.provider).toLowerCase());
+        }
+        const missing: string[] = [];
+        for (const p of armProviders) {
+          if (!availableProviders.has(p)) missing.push(p);
+        }
+        if (missing.length > 0) {
+          throw new Error(
+            `provider 未在平台 LLM Provider 表中配置: ${missing.join(", ")}。请先到上方 "LLM 模型供应商" 配置 active 行，或修改 arms 改用已配置的 provider。`,
+          );
+        }
+      }
       let traffic: number[];
       try {
         traffic = JSON.parse(formTraffic) as number[];
@@ -542,6 +589,7 @@ export function AdminModelABSection({ language }: Props) {
     formStartImmediate,
     fetchList,
     t.error,
+    availableProviders,
   ]);
 
   return (
@@ -887,6 +935,24 @@ export function AdminModelABSection({ language }: Props) {
           </label>
           <label className="md:col-span-2 flex flex-col gap-1 text-sm text-zinc-300">
             <span>{t.createArmsLabel}</span>
+            {availableProviders.size > 0 && (
+              <div className="flex flex-wrap items-center gap-1 text-xs text-zinc-400">
+                <span>可用 provider:</span>
+                {Array.from(availableProviders).sort().map((p) => (
+                  <span
+                    key={p}
+                    className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] uppercase text-emerald-200"
+                  >
+                    {p}
+                  </span>
+                ))}
+              </div>
+            )}
+            {availableProviders.size === 0 && (
+              <div className="text-xs text-amber-300">
+                平台 LLM Provider 表为空，所有 arm 提交都会被后端 422 拒绝。请先到上方 "LLM 模型供应商" 配置 active 行。
+              </div>
+            )}
             <textarea
               value={formArms}
               onChange={(e) => setFormArms(e.target.value)}

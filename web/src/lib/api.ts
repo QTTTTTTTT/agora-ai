@@ -4743,3 +4743,120 @@ export async function assistCreateFund(
     throw err;
   }
 }
+
+// ---------------------------------------------------------------------------
+// S13 — Platform LLM Provider Admin
+// ---------------------------------------------------------------------------
+//
+// Hot-reloaded CRUD for the platform_llm_providers table. The admin
+// UI uses these four (technically five) calls; the Model A/B form
+// also pulls from listAdminLLMProviders to populate its provider
+// dropdown so the user can't accidentally pick an unconfigured one.
+// API keys NEVER round-trip — the response carries only the
+// fingerprint + masked preview.
+
+export interface AdminLLMProvider {
+  id: string;
+  provider: string;
+  label: string;
+  model_tier?: string;
+  model_name: string;
+  base_url: string;
+  api_key_fingerprint: string;
+  api_key_masked_preview: string;
+  api_key_configured: boolean;
+  max_tokens: number;
+  temperature: number;
+  input_price_per_1m?: number;
+  output_price_per_1m?: number;
+  cost_per_1m?: number;
+  status: "active" | "disabled" | "draft";
+  is_platform_default: boolean;
+  last_health_check_at?: string;
+  last_health_check_result?: {
+    ok?: boolean;
+    latency_ms?: number;
+    http_status?: number;
+    message?: string;
+    echoed_model?: string;
+    checked_at?: string;
+  };
+  source: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminLLMProvidersListResponse {
+  providers: AdminLLMProvider[];
+  reload_generation: number;
+  router_active_keys: Record<string, boolean> | null;
+}
+
+export interface UpsertAdminLLMProviderRequest {
+  id?: string;
+  provider: string;
+  label: string;
+  model_tier?: string;
+  model_name: string;
+  base_url: string;
+  api_key?: string;
+  max_tokens?: number;
+  temperature?: number;
+  input_price_per_1m?: number;
+  output_price_per_1m?: number;
+  cost_per_1m?: number;
+  status?: "active" | "disabled" | "draft";
+}
+
+export interface TestAdminLLMProviderRequest {
+  id?: string;
+  provider: string;
+  model_name: string;
+  base_url: string;
+  api_key?: string;
+}
+
+export interface TestAdminLLMProviderResponse {
+  ok: boolean;
+  latency_ms: number;
+  http_status?: number;
+  message?: string;
+  echoed_model?: string;
+}
+
+export async function listAdminLLMProviders(opts: {
+  provider?: string;
+  status?: "active" | "disabled" | "draft";
+  tier?: string;
+} = {}): Promise<AdminLLMProvidersListResponse> {
+  const qs = new URLSearchParams();
+  if (opts.provider) qs.set("provider", opts.provider);
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.tier) qs.set("tier", opts.tier);
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<AdminLLMProvidersListResponse>(`/api/admin/llm-providers${tail}`);
+}
+
+export async function upsertAdminLLMProvider(
+  body: UpsertAdminLLMProviderRequest,
+): Promise<AdminLLMProvider> {
+  return apiPut<AdminLLMProvider>(`/api/admin/llm-providers`, body);
+}
+
+export async function deleteAdminLLMProvider(id: string): Promise<{ ok: boolean; deleted_id: string }> {
+  return apiDelete<{ ok: boolean; deleted_id: string }>(
+    `/api/admin/llm-providers/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function setAdminLLMProviderDefault(id: string): Promise<AdminLLMProvider> {
+  return apiPost<AdminLLMProvider>(
+    `/api/admin/llm-providers/${encodeURIComponent(id)}/default`,
+  );
+}
+
+export async function testAdminLLMProvider(
+  body: TestAdminLLMProviderRequest,
+): Promise<TestAdminLLMProviderResponse> {
+  return apiPost<TestAdminLLMProviderResponse>(`/api/admin/llm-providers/test`, body);
+}
