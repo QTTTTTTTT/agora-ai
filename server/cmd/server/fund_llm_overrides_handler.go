@@ -15,12 +15,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/fundai/server/internal/api"
+	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/repository"
 	"github.com/google/uuid"
 )
@@ -30,6 +32,11 @@ type fundLLMOverridesHandler struct {
 	providerRepo *repository.PlatformLLMProviderRepo
 	fundRepo     *repository.FundRepo
 	companyRepo  *repository.FundCompanyRepo
+	// auditLogger writes a mutation event for every upsert/delete.
+	// Nil = best-effort skip (handler still works, just no audit).
+	// In production wiring this is always a DBLogger; tests can
+	// stub with audit.NopLogger or a fake to assert calls.
+	auditLogger audit.Logger
 }
 
 // newFundLLMOverridesHandler wires the dependencies. Returns nil
@@ -44,6 +51,11 @@ func newFundLLMOverridesHandler(svc *Services) *fundLLMOverridesHandler {
 		providerRepo: svc.PlatformLLMProviderRepo,
 		fundRepo:     repository.NewFundRepo(svc.DB),
 		companyRepo:  repository.NewFundCompanyRepo(svc.DB),
+		// One audit logger per handler; the underlying DBLogger
+		// is stateless beyond its sql.DB handle so creating a new
+		// instance is cheap. We mirror the pattern in
+		// admin_llm_providers.go for consistency.
+		auditLogger: audit.NewDBLogger(svc.DB),
 	}
 }
 
@@ -180,6 +192,10 @@ func (h *fundLLMOverridesHandler) handleUpsert(w http.ResponseWriter, r *http.Re
 		Enabled:   req.Enabled,
 		Note:      req.Note,
 	}
+	// Capture "before" state for the audit row BEFORE the write so
+	// the chain reflects the actual transition. For creates (no ID)
+	// before stays nil.
+	var before *repository.FundLLMOverrideRow
 	if req.ID != "" {
 		id, err := uuid.Parse(req.ID)
 		if err != nil {
@@ -187,6 +203,12 @@ func (h *fundLLMOverridesHandler) handleUpsert(w http.ResponseWriter, r *http.Re
 			return
 		}
 		params.ID = &id
+		if prev, gerr := h.overrideRepo.Get(r.Context(), id); gerr == nil {
+			before = prev
+		}
+		// A Get error here is non-fatal: the row may not exist yet
+		// (treated as create) or the DB may be transiently unhappy.
+		// We do NOT block the mutation on audit-state collection.
 	}
 	if req.AgentID != nil && strings.TrimSpace(*req.AgentID) != "" {
 		agentID, err := uuid.Parse(strings.TrimSpace(*req.AgentID))
@@ -221,12 +243,27 @@ func (h *fundLLMOverridesHandler) handleUpsert(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusInternalServerError, errorPayload("upsert_failed", err.Error()))
 		return
 	}
+	// Emit audit: distinguish create (before=nil) from update
+	// (before!=nil). Marketplace economics demand we can answer
+	// "who replaced gemini with claude on fund X at 14:32?" — that
+	// answer lives in admin_change_log.
+	action := "fund_llm_override.create"
+	if before != nil {
+		action = "fund_llm_override.update"
+	}
+	h.auditChange(r.Context(), r, action, userID, fundUUID, row, before, row)
 	writeJSON(w, http.StatusOK, h.dtoFromRow(r, row))
 }
 
 func (h *fundLLMOverridesHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := h.authorize(r); err != nil {
+	userID, fundID, err := h.authorize(r)
+	if err != nil {
 		writeFundOverrideAuthError(w, err)
+		return
+	}
+	fundUUID, perr := uuid.Parse(fundID)
+	if perr != nil {
+		writeJSON(w, http.StatusBadRequest, errorPayload("invalid_path", "fund id is not a UUID"))
 		return
 	}
 	idStr := strings.TrimSpace(r.PathValue("id"))
@@ -235,6 +272,9 @@ func (h *fundLLMOverridesHandler) handleDelete(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadRequest, errorPayload("invalid_id", "id is not a UUID"))
 		return
 	}
+	// Capture before-snapshot for the audit row. Missing-row case
+	// is handled below (the Delete itself returns ErrNotFound).
+	before, _ := h.overrideRepo.Get(r.Context(), id)
 	if err := h.overrideRepo.Delete(r.Context(), id); err != nil {
 		if errors.Is(err, repository.ErrFundLLMOverrideNotFound) {
 			writeJSON(w, http.StatusNotFound, errorPayload("not_found", err.Error()))
@@ -243,7 +283,94 @@ func (h *fundLLMOverridesHandler) handleDelete(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusInternalServerError, errorPayload("delete_failed", err.Error()))
 		return
 	}
+	h.auditChange(r.Context(), r, "fund_llm_override.delete", userID, fundUUID, before, before, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted_id": id.String()})
+}
+
+// auditChange writes one mutation event for a fund-llm-override
+// create/update/delete. Failures are intentionally swallowed: an
+// audit row going missing is bad, but it MUST NOT roll back the
+// mutation we already committed (admin_change_log is append-only
+// observability, not a control-plane gate).
+//
+// rowForTarget is whichever row best identifies the resource for
+// the TargetID column — for delete that's the pre-delete row, for
+// upsert it's the new row.
+func (h *fundLLMOverridesHandler) auditChange(ctx context.Context, r *http.Request, action, actorUserID string, fundID uuid.UUID, rowForTarget *repository.FundLLMOverrideRow, before, after *repository.FundLLMOverrideRow) {
+	if h == nil || h.auditLogger == nil {
+		return
+	}
+	targetID := ""
+	if rowForTarget != nil {
+		targetID = rowForTarget.ID.String()
+	}
+	meta := map[string]any{
+		"fund_id": fundID.String(),
+	}
+	// IP and user-agent help an operator trace a hostile change
+	// back to a specific session. Both are best-effort; missing
+	// values just degrade the diagnostic, never break the audit.
+	if r != nil {
+		if ip := strings.TrimSpace(clientIP(r)); ip != "" {
+			meta["client_ip"] = ip
+		}
+		if ua := strings.TrimSpace(r.UserAgent()); ua != "" {
+			meta["user_agent"] = ua
+		}
+	}
+	_ = h.auditLogger.LogMutation(ctx, audit.MutationEvent{
+		ActorUserID: strings.TrimSpace(actorUserID),
+		Action:      action,
+		TargetType:  "fund_llm_overrides",
+		TargetID:    targetID,
+		Before:      fundOverrideAuditPayload(before),
+		After:       fundOverrideAuditPayload(after),
+		Metadata:    meta,
+	})
+}
+
+// fundOverrideAuditPayload projects a row into a stable JSON map for
+// the audit log. We omit unconstrained free-text (note) is INCLUDED
+// because operators sometimes record "why" in the note and the audit
+// is the only place we keep that. created_by/updated_by are also
+// included so a forensic reader can correlate to admin_change_log.
+func fundOverrideAuditPayload(row *repository.FundLLMOverrideRow) any {
+	if row == nil {
+		return nil
+	}
+	out := map[string]any{
+		"id":         row.ID.String(),
+		"fund_id":    row.FundID.String(),
+		"provider":   row.Provider,
+		"enabled":    row.Enabled,
+		"created_at": row.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		"updated_at": row.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	if row.AgentID.Valid {
+		out["agent_id"] = row.AgentID.UUID.String()
+	}
+	if row.Role.Valid {
+		out["role"] = row.Role.String
+	}
+	if row.ModelTier.Valid {
+		out["model_tier"] = row.ModelTier.String
+	}
+	if row.Label.Valid {
+		out["label"] = row.Label.String
+	}
+	if row.ModelName.Valid {
+		out["model_name"] = row.ModelName.String
+	}
+	if row.Note.Valid {
+		out["note"] = row.Note.String
+	}
+	if row.CreatedBy.Valid {
+		out["created_by"] = row.CreatedBy.UUID.String()
+	}
+	if row.UpdatedBy.Valid {
+		out["updated_by"] = row.UpdatedBy.UUID.String()
+	}
+	return out
 }
 
 // --- Helpers -----------------------------------------------------------------

@@ -9,14 +9,48 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/fundai/server/internal/api"
+	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/repository"
 	"github.com/google/uuid"
 )
+
+// recordingAuditLogger captures every LogMutation call so audit
+// tests can assert "what was written" without touching the DB.
+// Concurrent-safe because tests sometimes drive handlers from
+// multiple goroutines via httptest.
+type recordingAuditLogger struct {
+	mu        sync.Mutex
+	mutations []audit.MutationEvent
+}
+
+func (l *recordingAuditLogger) LogMutation(_ context.Context, ev audit.MutationEvent) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.mutations = append(l.mutations, ev)
+	return nil
+}
+func (l *recordingAuditLogger) LogMutationTx(_ context.Context, _ *sql.Tx, ev audit.MutationEvent) error {
+	return l.LogMutation(nil, ev) //nolint:staticcheck // ctx irrelevant for fake
+}
+func (l *recordingAuditLogger) LogAccess(_ context.Context, _, _, _, _ string, _ map[string]any) error {
+	return nil
+}
+func (l *recordingAuditLogger) LogAccessTx(_ context.Context, _ *sql.Tx, _, _, _, _ string, _ map[string]any) error {
+	return nil
+}
+func (l *recordingAuditLogger) snapshot() []audit.MutationEvent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]audit.MutationEvent, len(l.mutations))
+	copy(out, l.mutations)
+	return out
+}
 
 func newFundOverrideTestHandler(t *testing.T) (*fundLLMOverridesHandler, sqlmock.Sqlmock, func()) {
 	t.Helper()
@@ -204,6 +238,184 @@ func TestFundLLMOverridesHandler_List_HappyPath(t *testing.T) {
 	}
 	if row.EffectiveModelName != "gpt-4o" {
 		t.Fatalf("effective model name expected gpt-4o, got %q", row.EffectiveModelName)
+	}
+}
+
+// TestFundLLMOverridesHandler_Delete_EmitsAuditEvent verifies the
+// audit trail invariant added on top of S14.B: every delete that
+// reaches the repo MUST produce one mutation event with action
+// "fund_llm_override.delete", the row id as target_id, fund_id in
+// metadata, and the pre-delete snapshot in Before.
+//
+// This is the only place the marketplace operator can later answer
+// "who switched fund X off claude on 2026-06-04?" so the assertion
+// is on the chain content, not just call count.
+func TestFundLLMOverridesHandler_Delete_EmitsAuditEvent(t *testing.T) {
+	h, mock, done := newFundOverrideTestHandler(t)
+	defer done()
+	rec := &recordingAuditLogger{}
+	h.auditLogger = rec
+
+	fundID := uuid.New().String()
+	companyID := uuid.New().String()
+	userID := uuid.New().String()
+	rowID := uuid.New()
+	now := time.Now()
+	fundUUID, _ := uuid.Parse(fundID)
+
+	expectFundAuth(t, mock, fundID, companyID, userID)
+
+	// before-snapshot Get returns the row about to be deleted.
+	mock.ExpectQuery(regexp.QuoteMeta("WHERE id = $1")).
+		WithArgs(rowID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "fund_id", "agent_id", "role", "model_tier",
+			"provider", "label", "model_name",
+			"enabled", "note",
+			"created_at", "updated_at", "created_by", "updated_by",
+		}).AddRow(rowID, fundUUID, nil, nil, nil,
+			"openai", sql.NullString{Valid: true, String: "openai-prod"}, nil,
+			true, nil, now, now, nil, nil))
+
+	// the actual DELETE.
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM fund_llm_overrides WHERE id")).
+		WithArgs(rowID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	req := fundOverrideReq(t, http.MethodDelete,
+		"/api/funds/"+fundID+"/llm-overrides/"+rowID.String(), nil, userID)
+	req.Header.Set("User-Agent", "smoke-test/1.0")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	events := rec.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(events))
+	}
+	ev := events[0]
+	if ev.Action != "fund_llm_override.delete" {
+		t.Errorf("action: got %q want fund_llm_override.delete", ev.Action)
+	}
+	if ev.TargetType != "fund_llm_overrides" {
+		t.Errorf("target_type: got %q", ev.TargetType)
+	}
+	if ev.TargetID != rowID.String() {
+		t.Errorf("target_id: got %q want %s", ev.TargetID, rowID.String())
+	}
+	if ev.ActorUserID != userID {
+		t.Errorf("actor: got %q want %s", ev.ActorUserID, userID)
+	}
+	if got := ev.Metadata["fund_id"]; got != fundID {
+		t.Errorf("metadata.fund_id: got %v want %s", got, fundID)
+	}
+	if got := ev.Metadata["client_ip"]; got != "203.0.113.7" {
+		t.Errorf("metadata.client_ip: got %v want 203.0.113.7", got)
+	}
+	if got := ev.Metadata["user_agent"]; got != "smoke-test/1.0" {
+		t.Errorf("metadata.user_agent: got %v", got)
+	}
+	// Delete contract: Before holds the pre-delete row, After is nil.
+	if ev.Before == nil {
+		t.Fatalf("Before must be the pre-delete snapshot, got nil")
+	}
+	if ev.After != nil {
+		t.Errorf("After must be nil on delete, got %+v", ev.After)
+	}
+	if before, ok := ev.Before.(map[string]any); ok {
+		if before["provider"] != "openai" {
+			t.Errorf("Before.provider: got %v want openai", before["provider"])
+		}
+		if before["label"] != "openai-prod" {
+			t.Errorf("Before.label: got %v want openai-prod", before["label"])
+		}
+	} else {
+		t.Errorf("Before payload not a map: %T", ev.Before)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+// TestFundLLMOverridesHandler_Upsert_Create_EmitsAuditEvent covers
+// the create branch: no ID in the request body → Before is nil, the
+// new row is in After, action is "fund_llm_override.create".
+func TestFundLLMOverridesHandler_Upsert_Create_EmitsAuditEvent(t *testing.T) {
+	h, mock, done := newFundOverrideTestHandler(t)
+	defer done()
+	rec := &recordingAuditLogger{}
+	h.auditLogger = rec
+
+	fundID := uuid.New().String()
+	companyID := uuid.New().String()
+	userID := uuid.New().String()
+	newRowID := uuid.New()
+	now := time.Now()
+
+	expectFundAuth(t, mock, fundID, companyID, userID)
+
+	// provider validation: EXISTS check by (provider, label).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM platform_llm_providers WHERE provider")).
+		WithArgs("openai", "openai-prod").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	// Repo Upsert(no-ID): INSERT ... RETURNING id (1 column), then
+	// Get(id) (14 columns). Two distinct query mocks.
+	mock.ExpectQuery("INSERT INTO fund_llm_overrides").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(newRowID))
+	mock.ExpectQuery(regexp.QuoteMeta("WHERE id = $1")).
+		WithArgs(newRowID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "fund_id", "agent_id", "role", "model_tier",
+			"provider", "label", "model_name",
+			"enabled", "note",
+			"created_at", "updated_at", "created_by", "updated_by",
+		}).AddRow(newRowID, uuid.MustParse(fundID), nil, nil, nil,
+			"openai", sql.NullString{Valid: true, String: "openai-prod"}, nil,
+			true, nil, now, now, nil, nil))
+
+	body, _ := json.Marshal(upsertFundLLMOverrideRequest{
+		Provider: "openai",
+		Label:    "openai-prod",
+		Enabled:  true,
+		Note:     "create-via-test",
+	})
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	req := fundOverrideReq(t, http.MethodPut,
+		"/api/funds/"+fundID+"/llm-overrides", body, userID)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	events := rec.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(events))
+	}
+	ev := events[0]
+	if ev.Action != "fund_llm_override.create" {
+		t.Errorf("action: got %q want fund_llm_override.create", ev.Action)
+	}
+	if ev.TargetID != newRowID.String() {
+		t.Errorf("target_id: got %q want %s", ev.TargetID, newRowID.String())
+	}
+	if ev.Before != nil {
+		t.Errorf("Before must be nil on create, got %+v", ev.Before)
+	}
+	if ev.After == nil {
+		t.Fatalf("After must be the new row, got nil")
+	}
+	if after, ok := ev.After.(map[string]any); ok {
+		if after["provider"] != "openai" {
+			t.Errorf("After.provider: got %v want openai", after["provider"])
+		}
 	}
 }
 
