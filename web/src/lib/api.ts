@@ -4970,3 +4970,68 @@ export async function getAdminProviderHistory(
     `/api/admin/llm-providers/${encodeURIComponent(providerId)}/history?range=${range}&limit=${limit}`,
   );
 }
+
+// ===== S14.B — per-fund LLM provider overrides ===================
+// These endpoints live under /api/funds/{fundId}/... (not /admin/)
+// because the strategy owner — not necessarily a platform admin —
+// manages them. The server enforces fund-ownership via authorizeFundAccess.
+
+export interface FundLLMOverride {
+  id: string;
+  fund_id: string;
+  agent_id?: string | null;
+  role?: string;
+  model_tier?: string;
+  provider: string;
+  label?: string;
+  model_name?: string;
+  effective_provider?: string;
+  effective_label?: string;
+  effective_model_name?: string;
+  enabled: boolean;
+  note?: string;
+  specificity: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ListFundLLMOverridesResponse {
+  overrides: FundLLMOverride[];
+}
+
+export interface UpsertFundLLMOverrideRequest {
+  id?: string;
+  agent_id?: string | null;
+  role?: string;
+  model_tier?: string;
+  provider: string;
+  label?: string;
+  model_name?: string;
+  enabled: boolean;
+  note?: string;
+}
+
+export async function listFundLLMOverrides(fundId: string): Promise<ListFundLLMOverridesResponse> {
+  return apiGet<ListFundLLMOverridesResponse>(
+    `/api/funds/${encodeURIComponent(fundId)}/llm-overrides`,
+  );
+}
+
+export async function upsertFundLLMOverride(
+  fundId: string,
+  body: UpsertFundLLMOverrideRequest,
+): Promise<FundLLMOverride> {
+  return apiPut<FundLLMOverride>(
+    `/api/funds/${encodeURIComponent(fundId)}/llm-overrides`,
+    body,
+  );
+}
+
+export async function deleteFundLLMOverride(
+  fundId: string,
+  overrideId: string,
+): Promise<{ ok: boolean; deleted_id: string }> {
+  return apiDelete<{ ok: boolean; deleted_id: string }>(
+    `/api/funds/${encodeURIComponent(fundId)}/llm-overrides/${encodeURIComponent(overrideId)}`,
+  );
+}

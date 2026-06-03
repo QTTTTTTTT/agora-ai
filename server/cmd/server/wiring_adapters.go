@@ -272,6 +272,14 @@ type llmRuntime struct {
 	platformLLMProviderRepo *repository.PlatformLLMProviderRepo
 	envDefaults             LLMDefaultsConfig
 	auditLogger             *audit.DBLogger
+
+	// S14.B — fund_llm_overrides. The runtime captures the repo so
+	// ReloadFundOverrides can be exposed (the admin handler calls
+	// it after PUT/DELETE so subsequent LLM calls observe the change
+	// even though the hook itself reads DB live; the call is mostly
+	// a forensic audit + metrics tick, NOT a cache invalidation).
+	// nil = pre-S14.B / test wiring.
+	fundLLMOverrideRepo *repository.FundLLMOverrideRepo
 }
 
 // ReloadPlatformProviders re-reads the platform_llm_providers
@@ -491,6 +499,24 @@ func (a *modelConfigServiceAdapter) TestConnection(ctx context.Context, config *
 
 func newLLMRuntime(ctx context.Context, modelConfigs *subscription.ModelConfigService, usageTracker *subscription.UsageTracker, subscriptionService *subscription.SubscriptionService, budgetService *subscription.BudgetService, quotaService *quota.Service, metrics *serverMetrics, defaults LLMDefaultsConfig) (*llmRuntime, error) {
 	return newLLMRuntimeWithProviderRepo(ctx, modelConfigs, usageTracker, subscriptionService, budgetService, quotaService, metrics, defaults, nil, nil)
+}
+
+// SetFundLLMOverrideRepo wires the S14.B override repo + installs
+// the fund-override hook onto the router. Called by main.go right
+// after the override repo is constructed. Safe to call once; passing
+// nil disables the hook (e.g. tests).
+func (r *llmRuntime) SetFundLLMOverrideRepo(repo *repository.FundLLMOverrideRepo) {
+	if r == nil || r.router == nil {
+		return
+	}
+	r.fundLLMOverrideRepo = repo
+	rt := newFundOverrideRuntime(repo, r.platformLLMProviderRepo, slog.Default())
+	if rt == nil {
+		r.router.SetFundOverrideHook(nil)
+		return
+	}
+	r.router.SetFundOverrideHook(rt.Hook())
+	slog.Info("fund_llm_overrides: hook installed")
 }
 
 // newLLMRuntimeWithProviderRepo is the S13 entry point. When repo

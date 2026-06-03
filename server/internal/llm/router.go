@@ -107,6 +107,11 @@ type ModelRouter struct {
 	// resolution (so operator-initiated experiments override
 	// user defaults within their scope). nil = no A/B routing.
 	modelABHook ModelABHook
+
+	// S14.B — fund-level provider override hook. Sits between
+	// the A/B hook and per-user resolution. See fund_override_hook.go
+	// for the priority-chain rationale. nil = no fund overrides.
+	fundOverrideHook FundOverrideHook
 }
 
 // NewModelRouter 创建 ModelRouter。
@@ -193,6 +198,23 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
 			cfg := decision.Config.Clone()
 			r.ensureAPIKey(cfg, owner)
+			return r.finalizeConfig(ctx, req, tier, cfg)
+		}
+	}
+
+	// --- 1.6. S14.B — fund-level provider override ---
+	// The hook implementation (llmRuntime in cmd/server) reads
+	// fund_llm_overrides, ranks by specificity (agent + role + tier
+	// + label) and translates the row into a fully-formed ModelConfig
+	// including API key + base URL fetched from platform_llm_providers.
+	// We DO NOT call ensureAPIKey here because the hook is required
+	// to return a complete config — the fund's strategy owner is
+	// asserting "use exactly this", not "use the platform key for
+	// this provider". If the hook returns nil, the chain continues
+	// to per-user resolution below.
+	if hook := r.fundOverrideHook; hook != nil {
+		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
+			cfg := decision.Config.Clone()
 			return r.finalizeConfig(ctx, req, tier, cfg)
 		}
 	}

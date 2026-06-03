@@ -131,6 +131,59 @@ func (r *PlatformLLMProviderRepo) Get(ctx context.Context, id uuid.UUID) (*Platf
 	return row, nil
 }
 
+// GetByProviderLabel returns the row matching (provider, label).
+// label MUST be non-empty — for the "any label / default" case the
+// fund override resolver uses GetPlatformDefault below. Surfaces
+// ErrPlatformLLMProviderNotFound on miss so the resolver can fall
+// through to the next priority layer (the override silently fails
+// rather than crashing the LLM call).
+func (r *PlatformLLMProviderRepo) GetByProviderLabel(ctx context.Context, provider, label string) (*PlatformLLMProviderRow, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("platform_llm_provider_repo: nil db")
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	label = strings.TrimSpace(label)
+	if provider == "" || label == "" {
+		return nil, errors.New("platform_llm_provider_repo: provider+label both required")
+	}
+	row := &PlatformLLMProviderRow{}
+	err := r.db.QueryRowContext(ctx, baseSelect+` WHERE provider=$1 AND label=$2`, provider, label).Scan(scanArgs(row)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrPlatformLLMProviderNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("platform_llm_provider_repo: get %s/%s: %w", provider, label, err)
+	}
+	return row, nil
+}
+
+// GetActiveDefaultForProvider returns the row the runtime should
+// use when a fund override pins (provider, NULL-label). Preference:
+//   1. is_platform_default = TRUE for this provider
+//   2. status = 'active' && lowest created_at (deterministic tie-break)
+// Returns ErrPlatformLLMProviderNotFound when no active row exists.
+func (r *PlatformLLMProviderRepo) GetActiveDefaultForProvider(ctx context.Context, provider string) (*PlatformLLMProviderRow, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("platform_llm_provider_repo: nil db")
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil, errors.New("platform_llm_provider_repo: provider required")
+	}
+	row := &PlatformLLMProviderRow{}
+	err := r.db.QueryRowContext(ctx, baseSelect+`
+		WHERE provider = $1 AND status = 'active'
+		ORDER BY is_platform_default DESC, created_at ASC
+		LIMIT 1`, provider).Scan(scanArgs(row)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrPlatformLLMProviderNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("platform_llm_provider_repo: default for %s: %w", provider, err)
+	}
+	return row, nil
+}
+
 // ListFilters narrows ListAll. All fields are optional; zero value
 // means "no filter on this dimension". The repo always orders by
 // (is_platform_default DESC, provider, label) so the UI gets a

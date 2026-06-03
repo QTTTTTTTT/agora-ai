@@ -5,6 +5,7 @@ import { formatMoneyForDisplay, formatNumberForLanguage, useAppPreferences } fro
 import BrokerLinksSection from "../components/BrokerLinksSection";
 import FundingSection from "../components/FundingSection";
 import FundBaseCurrencySection from "../components/FundBaseCurrencySection";
+import FundLLMOverridesSection from "../components/FundLLMOverridesSection";
 
 type TradingMode = "simulation" | "live" | "paper";
 type FundStatus = "active" | "paused" | "closed";
@@ -1330,6 +1331,9 @@ const FundSettings: React.FC = () => {
           language={language}
           defaultExpanded={fund.tradingMode === "live"}
         />
+      ) : null}
+      {fundId ? (
+        <FundLLMOverridesSection fundId={fundId} language={language} />
       ) : null}
     </div>
   );

@@ -666,6 +666,11 @@ type Services struct {
 	// LLMCostRollupLoop (S14.A) — hourly job that re-folds usage
 	// entries into per-day rollups. Stops via context cancellation.
 	LLMCostRollupLoop *llmCostRollupLoop
+	// FundLLMOverrideRepo (S14.B) — per-fund / per-agent provider
+	// override table. Read by the LLM router on every call (via
+	// the fund-override hook); written by the fund settings admin
+	// endpoints. Nil-safe.
+	FundLLMOverrideRepo *repository.FundLLMOverrideRepo
 	WSFeedConfig            wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -1165,6 +1170,16 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	rollupLoop.Start(context.Background())
 	services.LLMCostRollupLoop = rollupLoop
 
+	// S14.B — fund_llm_overrides. Owned by the fund settings page;
+	// hot-resolved on every LLM call. The hook lives in llmRuntime
+	// so it can dereference (provider, label) into the platform_llm_providers
+	// row that holds the encrypted API key. Nil-safe: missing repo
+	// means the hook is disabled and the router falls through to
+	// the pre-S14 priority chain.
+	fundLLMOverrideRepo := repository.NewFundLLMOverrideRepo(db)
+	services.FundLLMOverrideRepo = fundLLMOverrideRepo
+	llmRuntime.SetFundLLMOverrideRepo(fundLLMOverrideRepo)
+
 	// Sprint 9.3 — social sentiment ingestion. The registry
 	// reads per-platform env flags; when no provider is enabled
 	// the call returns nil and the workflow's sentiment block
@@ -1531,6 +1546,14 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// trigger) live on *adminHandler.
 	if rh := newAgentReputationHandler(svc); rh != nil {
 		rh.RegisterRoutes(mux)
+	}
+
+	// S14.B — per-fund LLM provider overrides. Owned by the fund's
+	// company owner (auth via authorizeFundAccess). Nil-safe: when
+	// the override repo is absent the routes stay unregistered and
+	// the fund settings UI hides its override section.
+	if fh := newFundLLMOverridesHandler(svc); fh != nil {
+		fh.RegisterRoutes(mux)
 	}
 
 	// ---- SPA fallback: serve React static files ----
