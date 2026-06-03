@@ -136,9 +136,11 @@ function inferMethod({ line, backward, forward }) {
     if (lower.includes("submitauth")) return "POST";
     if (lower.includes("apipost") || /\bpost\s*\(/.test(text) || /method\s*:\s*['"]post['"]/i.test(text)) return "POST";
     if (lower.includes("apiput") || /\bput\s*\(/.test(text) || /method\s*:\s*['"]put['"]/i.test(text)) return "PUT";
+    if (lower.includes("apipatch") || /\bpatch\s*\(/.test(text) || /method\s*:\s*['"]patch['"]/i.test(text)) return "PATCH";
     if (lower.includes("apidelete") || /\bdel\s*\(/.test(text) || /method\s*:\s*['"]delete['"]/i.test(text)) return "DELETE";
     if (/request\s*\([^,)]*,\s*['"`]POST['"`]/i.test(text)) return "POST";
     if (/request\s*\([^,)]*,\s*['"`]PUT['"`]/i.test(text)) return "PUT";
+    if (/request\s*\([^,)]*,\s*['"`]PATCH['"`]/i.test(text)) return "PATCH";
     if (/request\s*\([^,)]*,\s*['"`]DELETE['"`]/i.test(text)) return "DELETE";
     // Explicit GET hint stops the inference here so a literal
     // sitting next to a sibling POST helper isn't mis-tagged.

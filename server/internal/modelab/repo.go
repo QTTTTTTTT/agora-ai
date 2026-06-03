@@ -172,6 +172,143 @@ func (r *Repo) ListRunningMatching(ctx context.Context, fundID, agentID, agentRo
 	return out, rows.Err()
 }
 
+// UpdateDraft replaces the mutable columns of a draft
+// experiment. Returns ErrNotEditable when the row is not in
+// draft state (running / paused / completed / archived
+// experiments are append-only past status flips), and
+// ErrNotFound when there is no such row.
+//
+// Why "draft only": once an experiment has emitted shadow rows
+// the report metrics are computed against a specific arm
+// layout. Editing the arms mid-flight would silently invalidate
+// every shadow row collected so far. The operator must clone +
+// stop the old experiment instead.
+func (r *Repo) UpdateDraft(ctx context.Context, id string, e *Experiment) error {
+	if r == nil || r.db == nil {
+		return errors.New("modelab: repo not initialised")
+	}
+	if e == nil {
+		return errors.New("modelab: nil experiment update")
+	}
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	armsJSON, err := MarshalArms(e.Arms)
+	if err != nil {
+		return fmt.Errorf("modelab: marshal arms: %w", err)
+	}
+	stepFilter := e.StepFilter
+	if stepFilter == nil {
+		stepFilter = []string{}
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE model_ab_experiments
+		SET name = $1,
+		    description = $2,
+		    scope = $3,
+		    scope_target = $4,
+		    step_filter = $5,
+		    arms = $6,
+		    traffic_split = $7,
+		    max_total_tokens = $8,
+		    updated_at = NOW()
+		WHERE id = $9::uuid
+		  AND status = 'draft'
+	`,
+		e.Name,
+		nullableString(e.Description),
+		string(e.Scope),
+		nullableString(e.ScopeTarget),
+		pq.Array(stepFilter),
+		armsJSON,
+		pq.Array(e.TrafficSplit),
+		nullableInt64(e.MaxTotalTokens),
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("modelab: update draft: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Either the row doesn't exist OR it's not in draft.
+		// Distinguish for the caller via a GetExperiment probe.
+		ex, getErr := r.GetExperiment(ctx, id)
+		if getErr != nil {
+			return getErr
+		}
+		_ = ex
+		return ErrNotEditable
+	}
+	return nil
+}
+
+// Clone duplicates an experiment as a new draft. The original
+// is unchanged. The newName argument overrides the source's
+// name; pass "" to copy as "<original> (clone)". Useful for
+// "I want the same arm layout but with a different scope" or
+// "tweak one arm".
+//
+// Returns the new experiment ID. The clone's arms, traffic
+// split, scope, step_filter and max_total_tokens are deep
+// copied; status starts as draft regardless of the source.
+func (r *Repo) Clone(ctx context.Context, sourceID, newName, createdBy string) (string, error) {
+	if r == nil || r.db == nil {
+		return "", errors.New("modelab: repo not initialised")
+	}
+	src, err := r.GetExperiment(ctx, sourceID)
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSpace(newName)
+	if name == "" {
+		name = src.Name + " (clone)"
+	}
+	dst := &Experiment{
+		Name:           name,
+		Description:    src.Description,
+		Scope:          src.Scope,
+		ScopeTarget:    src.ScopeTarget,
+		StepFilter:     append([]string(nil), src.StepFilter...),
+		Arms:           append([]ArmConfig(nil), src.Arms...),
+		TrafficSplit:   append([]float64(nil), src.TrafficSplit...),
+		MaxTotalTokens: src.MaxTotalTokens,
+		CreatedBy:      createdBy,
+		Status:         StatusDraft,
+	}
+	return r.CreateExperiment(ctx, dst)
+}
+
+// BulkSetStatus flips many experiments to the same status in a
+// single statement. Useful for "archive all completed
+// experiments older than X". Returns the number of rows that
+// were actually modified — a row already in the target status
+// is NOT counted.
+func (r *Repo) BulkSetStatus(ctx context.Context, ids []string, status ExperimentStatus) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("modelab: repo not initialised")
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE model_ab_experiments
+		SET status = $1, updated_at = NOW(),
+		    end_at = COALESCE(end_at, CASE WHEN $1 IN ('completed','archived') THEN NOW() ELSE NULL END)
+		WHERE id = ANY($2::uuid[])
+		  AND status <> $1
+	`, string(status), pq.Array(ids))
+	if err != nil {
+		return 0, fmt.Errorf("modelab: bulk set status: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// ErrNotEditable is the sentinel UpdateDraft returns when the
+// target row exists but is past the draft state. The admin
+// handler maps it to a 409 Conflict.
+var ErrNotEditable = errors.New("modelab: experiment is not in draft state")
+
 // SetStatus updates the lifecycle column. Returns ErrNotFound if
 // no row was affected, so callers know whether the experiment
 // even exists.

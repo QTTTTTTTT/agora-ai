@@ -12,11 +12,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  bulkSetModelABStatus,
+  cloneModelABExperiment,
   createModelABExperiment,
   formatApiError,
   getModelABReport,
   listModelABExperiments,
   setModelABExperimentStatus,
+  updateModelABExperiment,
   type ModelABArm,
   type ModelABArmMetric,
   type ModelABExperiment,
@@ -79,6 +82,24 @@ interface Messages {
   flipArchive: string;
   flipSuccess: string;
   flipError: string;
+  cloneAction: string;
+  cloneBusy: string;
+  cloneError: string;
+  cloneSuccess: string;
+  editDraftMode: string;
+  editDraftStart: string;
+  editDraftSave: string;
+  editDraftCancel: string;
+  editDraftHint: string;
+  bulkSelectColumn: string;
+  bulkBarTitle: string;
+  bulkArchive: string;
+  bulkPause: string;
+  bulkComplete: string;
+  bulkBusy: string;
+  bulkError: string;
+  bulkSuccess: string;
+  bulkSelected: string;
 }
 
 const messages: Record<Language, Messages> = {
@@ -136,6 +157,25 @@ const messages: Record<Language, Messages> = {
     flipArchive: "归档",
     flipSuccess: "状态已更新",
     flipError: "状态更新失败",
+    cloneAction: "克隆为草稿",
+    cloneBusy: "克隆中…",
+    cloneError: "克隆失败",
+    cloneSuccess: "已克隆为草稿，可在草稿列表里编辑",
+    editDraftMode: "编辑草稿",
+    editDraftStart: "编辑此草稿",
+    editDraftSave: "保存草稿",
+    editDraftCancel: "取消编辑",
+    editDraftHint:
+      "只能编辑 draft 状态的实验；线上实验请先克隆再修改克隆体。保存后流量分配、Arm 配置都会被覆盖。",
+    bulkSelectColumn: "选择",
+    bulkBarTitle: "批量操作",
+    bulkArchive: "批量归档",
+    bulkPause: "批量暂停",
+    bulkComplete: "批量完成",
+    bulkBusy: "处理中…",
+    bulkError: "批量操作失败",
+    bulkSuccess: "批量操作成功",
+    bulkSelected: "已选",
   },
   "en-US": {
     title: "Model A/B experiments",
@@ -192,6 +232,25 @@ const messages: Record<Language, Messages> = {
     flipArchive: "Archive",
     flipSuccess: "Status updated",
     flipError: "Status update failed",
+    cloneAction: "Clone as draft",
+    cloneBusy: "Cloning…",
+    cloneError: "Clone failed",
+    cloneSuccess: "Cloned as draft — edit it in the draft list",
+    editDraftMode: "Edit draft",
+    editDraftStart: "Edit this draft",
+    editDraftSave: "Save draft",
+    editDraftCancel: "Cancel edit",
+    editDraftHint:
+      "Only draft experiments can be edited. To change a live experiment, clone it first. Saving overwrites arms and traffic split.",
+    bulkSelectColumn: "Select",
+    bulkBarTitle: "Bulk actions",
+    bulkArchive: "Archive selected",
+    bulkPause: "Pause selected",
+    bulkComplete: "Complete selected",
+    bulkBusy: "Working…",
+    bulkError: "Bulk update failed",
+    bulkSuccess: "Bulk update applied",
+    bulkSelected: "selected",
   },
 };
 
@@ -241,8 +300,18 @@ export function AdminModelABSection({ language }: Props) {
   const [flipBusy, setFlipBusy] = useState(false);
   const [flipFeedback, setFlipFeedback] = useState<string>("");
 
-  // Create form state — strings so the textarea can be edited freely;
-  // JSON.parse happens on submit.
+  const [cloneBusy, setCloneBusy] = useState(false);
+  const [cloneFeedback, setCloneFeedback] = useState<string>("");
+
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkFeedback, setBulkFeedback] = useState<string>("");
+  const [selectedIDs, setSelectedIDs] = useState<Set<string>>(new Set());
+
+  // Create / edit form state — strings so the textarea can be edited
+  // freely; JSON.parse happens on submit. When editingDraftID is set
+  // the form switches to "edit draft" mode and the submit button calls
+  // updateModelABExperiment instead of createModelABExperiment.
+  const [editingDraftID, setEditingDraftID] = useState<string>("");
   const [formName, setFormName] = useState("");
   const [formScope, setFormScope] = useState<ModelABScope>("global");
   const [formScopeTarget, setFormScopeTarget] = useState("");
@@ -255,6 +324,21 @@ export function AdminModelABSection({ language }: Props) {
   const [formBusy, setFormBusy] = useState(false);
   const [formError, setFormError] = useState("");
   const [formSuccess, setFormSuccess] = useState("");
+
+  const resetForm = useCallback(() => {
+    setEditingDraftID("");
+    setFormName("");
+    setFormScope("global");
+    setFormScopeTarget("");
+    setFormArms(
+      '[\n  {"name":"ctrl","provider":"openai","model_name":"gpt-4o","model_tier":"critical"},\n  {"name":"treat","provider":"claude","model_name":"claude-opus-4","model_tier":"critical"}\n]',
+    );
+    setFormTraffic("[0.5, 0.5]");
+    setFormMaxTokens("0");
+    setFormStartImmediate(false);
+    setFormError("");
+    setFormSuccess("");
+  }, []);
 
   const fetchList = useCallback(async () => {
     setLoading(true);
@@ -322,6 +406,79 @@ export function AdminModelABSection({ language }: Props) {
     [selectedID, fetchList, t.flipError, t.flipSuccess],
   );
 
+  const handleClone = useCallback(
+    async (exp: ModelABExperiment) => {
+      setCloneBusy(true);
+      setCloneFeedback("");
+      try {
+        const cloned = await cloneModelABExperiment(exp.id, {});
+        setCloneFeedback(`${t.cloneSuccess} · id=${cloned.id}`);
+        await fetchList();
+      } catch (err) {
+        setCloneFeedback(`${t.cloneError}: ${formatApiError(err, t.cloneError)}`);
+      } finally {
+        setCloneBusy(false);
+      }
+    },
+    [fetchList, t.cloneSuccess, t.cloneError],
+  );
+
+  const handleStartEditDraft = useCallback(
+    (exp: ModelABExperiment) => {
+      if (exp.status !== "draft") {
+        return;
+      }
+      setEditingDraftID(exp.id);
+      setFormName(exp.name);
+      setFormScope(exp.scope as ModelABScope);
+      setFormScopeTarget(exp.scope_target ?? "");
+      setFormArms(JSON.stringify(exp.arms, null, 2));
+      setFormTraffic(JSON.stringify(exp.traffic_split));
+      setFormMaxTokens(String(exp.max_total_tokens ?? 0));
+      setFormStartImmediate(false);
+      setFormError("");
+      setFormSuccess("");
+      if (typeof window !== "undefined") {
+        window.scrollTo({ top: window.scrollY + 300, behavior: "smooth" });
+      }
+    },
+    [],
+  );
+
+  const toggleSelected = useCallback((id: string) => {
+    setSelectedIDs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleBulk = useCallback(
+    async (status: ModelABExperimentStatus) => {
+      if (selectedIDs.size === 0) return;
+      setBulkBusy(true);
+      setBulkFeedback("");
+      try {
+        const resp = await bulkSetModelABStatus({
+          ids: Array.from(selectedIDs),
+          status,
+        });
+        setBulkFeedback(`${t.bulkSuccess} · ${resp.updated}`);
+        setSelectedIDs(new Set());
+        await fetchList();
+      } catch (err) {
+        setBulkFeedback(`${t.bulkError}: ${formatApiError(err, t.bulkError)}`);
+      } finally {
+        setBulkBusy(false);
+      }
+    },
+    [selectedIDs, fetchList, t.bulkSuccess, t.bulkError],
+  );
+
   const handleSubmitCreate = useCallback(async () => {
     setFormBusy(true);
     setFormError("");
@@ -340,6 +497,19 @@ export function AdminModelABSection({ language }: Props) {
         throw new Error(`traffic_split JSON: ${(parseErr as Error).message}`);
       }
       const maxTokens = Number.parseInt(formMaxTokens || "0", 10);
+      if (editingDraftID) {
+        const updated = await updateModelABExperiment(editingDraftID, {
+          name: formName,
+          scope: formScope,
+          scope_target: formScopeTarget || undefined,
+          arms,
+          traffic_split: traffic,
+          max_total_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : undefined,
+        });
+        setFormSuccess(`OK · id=${updated.id}`);
+        await fetchList();
+        return;
+      }
       const created = await createModelABExperiment({
         name: formName,
         scope: formScope,
@@ -358,6 +528,7 @@ export function AdminModelABSection({ language }: Props) {
       setFormBusy(false);
     }
   }, [
+    editingDraftID,
     formName,
     formScope,
     formScopeTarget,
@@ -405,46 +576,117 @@ export function AdminModelABSection({ language }: Props) {
 
         {error && <p className="mt-3 text-sm text-rose-300">{`${t.error}: ${error}`}</p>}
 
+        {selectedIDs.size > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+            <span className="font-medium">{t.bulkBarTitle}</span>
+            <span className="text-xs text-amber-200">
+              {selectedIDs.size} {t.bulkSelected}
+            </span>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => void handleBulk("archived")}
+              className="rounded-md border border-zinc-500 bg-zinc-700 px-3 py-1 text-xs text-zinc-100 hover:bg-zinc-600 disabled:opacity-50"
+            >
+              {t.bulkArchive}
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => void handleBulk("paused")}
+              className="rounded-md border border-amber-500 bg-amber-700 px-3 py-1 text-xs text-zinc-100 hover:bg-amber-600 disabled:opacity-50"
+            >
+              {t.bulkPause}
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => void handleBulk("completed")}
+              className="rounded-md border border-sky-500 bg-sky-700 px-3 py-1 text-xs text-zinc-100 hover:bg-sky-600 disabled:opacity-50"
+            >
+              {t.bulkComplete}
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => setSelectedIDs(new Set())}
+              className="ml-auto rounded-md border border-zinc-600 bg-zinc-800 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+            >
+              {bulkBusy ? t.bulkBusy : "×"}
+            </button>
+            {bulkFeedback && <span className="text-xs text-zinc-200">{bulkFeedback}</span>}
+          </div>
+        )}
+
         <div className="mt-4 overflow-x-auto">
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-zinc-700 text-zinc-400">
               <tr>
+                <th className="px-3 py-2 w-8">{t.bulkSelectColumn}</th>
                 <th className="px-3 py-2">{t.colName}</th>
                 <th className="px-3 py-2">{t.colScope}</th>
                 <th className="px-3 py-2">{t.colArms}</th>
                 <th className="px-3 py-2">{t.colTraffic}</th>
                 <th className="px-3 py-2">{t.colStatus}</th>
                 <th className="px-3 py-2">{t.colCreated}</th>
+                <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
               {experiments.length === 0 && !loading ? (
                 <tr>
-                  <td colSpan={6} className="px-3 py-6 text-center text-zinc-500">
+                  <td colSpan={8} className="px-3 py-6 text-center text-zinc-500">
                     {t.empty}
                   </td>
                 </tr>
               ) : (
                 experiments.map((e) => {
                   const selected = e.id === selectedID;
+                  const checked = selectedIDs.has(e.id);
                   return (
                     <tr
                       key={e.id}
-                      onClick={() => setSelectedID(e.id)}
-                      className={`cursor-pointer border-b border-zinc-800 ${
+                      className={`border-b border-zinc-800 ${
                         selected ? "bg-zinc-800/60" : "hover:bg-zinc-800/30"
                       }`}
                     >
-                      <td className="px-3 py-2 text-zinc-100">{e.name}</td>
-                      <td className="px-3 py-2 text-zinc-300">
+                      <td className="px-3 py-2" onClick={(ev) => ev.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSelected(e.id)}
+                          aria-label={`select ${e.name}`}
+                        />
+                      </td>
+                      <td
+                        className="cursor-pointer px-3 py-2 text-zinc-100"
+                        onClick={() => setSelectedID(e.id)}
+                      >
+                        {e.name}
+                      </td>
+                      <td
+                        className="cursor-pointer px-3 py-2 text-zinc-300"
+                        onClick={() => setSelectedID(e.id)}
+                      >
                         {e.scope}
                         {e.scope_target ? ` · ${e.scope_target}` : ""}
                       </td>
-                      <td className="px-3 py-2 text-zinc-300">{e.arms.length}</td>
-                      <td className="px-3 py-2 text-zinc-300">
+                      <td
+                        className="cursor-pointer px-3 py-2 text-zinc-300"
+                        onClick={() => setSelectedID(e.id)}
+                      >
+                        {e.arms.length}
+                      </td>
+                      <td
+                        className="cursor-pointer px-3 py-2 text-zinc-300"
+                        onClick={() => setSelectedID(e.id)}
+                      >
                         {e.traffic_split.map((p) => p.toFixed(2)).join("/")}
                       </td>
-                      <td className="px-3 py-2">
+                      <td
+                        className="cursor-pointer px-3 py-2"
+                        onClick={() => setSelectedID(e.id)}
+                      >
                         <span
                           className={`rounded border px-2 py-0.5 text-xs ${
                             STATUS_BADGES[e.status as ModelABExperimentStatus]
@@ -453,7 +695,33 @@ export function AdminModelABSection({ language }: Props) {
                           {statusLabel(e.status as ModelABExperimentStatus, t)}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-zinc-400">{e.created_at?.slice(0, 19)}</td>
+                      <td
+                        className="cursor-pointer px-3 py-2 text-zinc-400"
+                        onClick={() => setSelectedID(e.id)}
+                      >
+                        {e.created_at?.slice(0, 19)}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <div className="flex justify-end gap-1">
+                          {e.status === "draft" && (
+                            <button
+                              type="button"
+                              onClick={() => handleStartEditDraft(e)}
+                              className="rounded border border-sky-500 px-2 py-0.5 text-xs text-sky-200 hover:bg-sky-700/30"
+                            >
+                              {t.editDraftStart}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={cloneBusy}
+                            onClick={() => void handleClone(e)}
+                            className="rounded border border-zinc-600 px-2 py-0.5 text-xs text-zinc-200 hover:bg-zinc-700/40 disabled:opacity-50"
+                          >
+                            {cloneBusy ? t.cloneBusy : t.cloneAction}
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })
@@ -461,6 +729,7 @@ export function AdminModelABSection({ language }: Props) {
             </tbody>
           </table>
         </div>
+        {cloneFeedback && <p className="mt-2 text-xs text-zinc-300">{cloneFeedback}</p>}
       </div>
 
       <div className="rounded-2xl border border-zinc-700/70 bg-zinc-900/50 p-6 shadow-lg">
@@ -549,9 +818,24 @@ export function AdminModelABSection({ language }: Props) {
       </div>
 
       <div className="rounded-2xl border border-zinc-700/70 bg-zinc-900/50 p-6 shadow-lg">
-        <header className="mb-4">
-          <h3 className="text-lg font-semibold text-zinc-100">{t.createTitle}</h3>
-          <p className="mt-1 text-sm text-zinc-400">{t.createHint}</p>
+        <header className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-semibold text-zinc-100">
+              {editingDraftID ? t.editDraftMode : t.createTitle}
+            </h3>
+            <p className="mt-1 text-sm text-zinc-400">
+              {editingDraftID ? t.editDraftHint : t.createHint}
+            </p>
+          </div>
+          {editingDraftID && (
+            <button
+              type="button"
+              onClick={resetForm}
+              className="rounded-md border border-zinc-600 bg-zinc-800 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+            >
+              {t.editDraftCancel}
+            </button>
+          )}
         </header>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           <label className="flex flex-col gap-1 text-sm text-zinc-300">
@@ -617,14 +901,16 @@ export function AdminModelABSection({ language }: Props) {
             />
             <span className="text-xs text-zinc-500">{t.createTrafficHint}</span>
           </label>
-          <label className="md:col-span-2 flex items-center gap-2 text-sm text-zinc-300">
-            <input
-              type="checkbox"
-              checked={formStartImmediate}
-              onChange={(e) => setFormStartImmediate(e.target.checked)}
-            />
-            <span>{t.createStartImmediate}</span>
-          </label>
+          {!editingDraftID && (
+            <label className="md:col-span-2 flex items-center gap-2 text-sm text-zinc-300">
+              <input
+                type="checkbox"
+                checked={formStartImmediate}
+                onChange={(e) => setFormStartImmediate(e.target.checked)}
+              />
+              <span>{t.createStartImmediate}</span>
+            </label>
+          )}
         </div>
         <div className="mt-4 flex items-center gap-3">
           <button
@@ -633,7 +919,11 @@ export function AdminModelABSection({ language }: Props) {
             onClick={() => void handleSubmitCreate()}
             className="rounded-md border border-sky-500 bg-sky-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {formBusy ? t.createSubmitting : t.createSubmit}
+            {formBusy
+              ? t.createSubmitting
+              : editingDraftID
+                ? t.editDraftSave
+                : t.createSubmit}
           </button>
           {formError && <span className="text-sm text-rose-300">{formError}</span>}
           {formSuccess && <span className="text-sm text-emerald-300">{formSuccess}</span>}

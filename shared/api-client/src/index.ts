@@ -2079,6 +2079,34 @@ export interface SetModelABStatusRequest {
   status: ModelABExperimentStatus;
 }
 
+// UpdateModelABExperimentRequest mirrors CreateModelABExperimentRequest
+// minus start_immediate. The server only honours edits while the
+// target experiment is still in draft state; otherwise it returns
+// HTTP 409 with error code "not_editable".
+export interface UpdateModelABExperimentRequest {
+  name: string;
+  description?: string;
+  scope: ModelABScope;
+  scope_target?: string;
+  step_filter?: string[];
+  arms: ModelABArm[];
+  traffic_split: number[];
+  max_total_tokens?: number;
+}
+
+export interface CloneModelABExperimentRequest {
+  name?: string;
+}
+
+export interface BulkSetModelABStatusRequest {
+  ids: string[];
+  status: ModelABExperimentStatus;
+}
+
+export interface BulkSetModelABStatusResponse {
+  updated: number;
+}
+
 export interface ModelABReport {
   experiment: {
     id: string;

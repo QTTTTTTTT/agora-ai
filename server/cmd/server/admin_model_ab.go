@@ -43,7 +43,10 @@ func (h *adminHandler) registerModelABAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/model-ab/experiments/{id}", h.handleGetModelABExperiment)
 	mux.HandleFunc("GET /api/admin/model-ab/experiments/{id}/report", h.handleGetModelABReport)
 	mux.HandleFunc("POST /api/admin/model-ab/experiments", h.handleCreateModelABExperiment)
+	mux.HandleFunc("PATCH /api/admin/model-ab/experiments/{id}", h.handleUpdateModelABExperiment)
 	mux.HandleFunc("PATCH /api/admin/model-ab/experiments/{id}/status", h.handleSetModelABExperimentStatus)
+	mux.HandleFunc("POST /api/admin/model-ab/experiments/{id}/clone", h.handleCloneModelABExperiment)
+	mux.HandleFunc("POST /api/admin/model-ab/experiments/bulk-status", h.handleBulkSetModelABStatus)
 }
 
 // --- wire types ---------------------------------------------------------------
@@ -336,6 +339,176 @@ func (h *adminHandler) handleSetModelABExperimentStatus(w http.ResponseWriter, r
 		return
 	}
 	writeJSON(w, http.StatusOK, wireExperiment(updated))
+}
+
+// updateModelABExperimentRequest mirrors createModelABExperimentRequest
+// minus the start_immediate field — edits never auto-start the
+// experiment. The body schema is otherwise identical so frontend
+// forms can reuse the create form when editing a draft.
+type updateModelABExperimentRequest struct {
+	Name           string           `json:"name"`
+	Description    string           `json:"description"`
+	Scope          string           `json:"scope"`
+	ScopeTarget    string           `json:"scope_target"`
+	StepFilter     []string         `json:"step_filter"`
+	Arms           []modelABArmWire `json:"arms"`
+	TrafficSplit   []float64        `json:"traffic_split"`
+	MaxTotalTokens int64            `json:"max_total_tokens"`
+}
+
+func (h *adminHandler) handleUpdateModelABExperiment(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	actorID, _ := api.AuthenticatedUserID(r)
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorPayload("missing_id", "id is required"))
+		return
+	}
+	var req updateModelABExperimentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorPayload("invalid_body", err.Error()))
+		return
+	}
+	arms := make([]modelab.ArmConfig, len(req.Arms))
+	for i, a := range req.Arms {
+		arms[i] = modelab.ArmConfig{
+			Name:        a.Name,
+			Provider:    llm.Provider(strings.TrimSpace(a.Provider)),
+			ModelName:   a.ModelName,
+			BaseURL:     a.BaseURL,
+			ModelTier:   llm.ModelTier(strings.TrimSpace(a.ModelTier)),
+			Temperature: a.Temperature,
+			MaxTokens:   a.MaxTokens,
+		}
+	}
+	if req.StepFilter == nil {
+		req.StepFilter = []string{}
+	}
+	patched := &modelab.Experiment{
+		Name:           req.Name,
+		Description:    req.Description,
+		Scope:          modelab.Scope(req.Scope),
+		ScopeTarget:    req.ScopeTarget,
+		StepFilter:     req.StepFilter,
+		Arms:           arms,
+		TrafficSplit:   req.TrafficSplit,
+		MaxTotalTokens: req.MaxTotalTokens,
+	}
+	if err := h.modelABRepo.UpdateDraft(r.Context(), id, patched); err != nil {
+		switch {
+		case errors.Is(err, modelab.ErrNotFound):
+			writeJSON(w, http.StatusNotFound, errorPayload("not_found", "experiment not found"))
+		case errors.Is(err, modelab.ErrNotEditable):
+			writeJSON(w, http.StatusConflict, errorPayload("not_editable",
+				"only draft experiments can be edited; clone the experiment instead"))
+		default:
+			writeJSON(w, http.StatusBadRequest, errorPayload("update_failed", err.Error()))
+		}
+		return
+	}
+	h.logModelABMutation(r, actorID, "model_ab.experiment.update_draft", id, map[string]any{
+		"name":  patched.Name,
+		"arms":  len(patched.Arms),
+		"scope": string(patched.Scope),
+	})
+	updated, err := h.modelABRepo.GetExperiment(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorPayload("read_after_update_failed", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, wireExperiment(updated))
+}
+
+type cloneModelABExperimentRequest struct {
+	Name string `json:"name"`
+}
+
+func (h *adminHandler) handleCloneModelABExperiment(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	actorID, _ := api.AuthenticatedUserID(r)
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorPayload("missing_id", "id is required"))
+		return
+	}
+	var req cloneModelABExperimentRequest
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorPayload("invalid_body", err.Error()))
+			return
+		}
+	}
+	newID, err := h.modelABRepo.Clone(r.Context(), id, req.Name, actorID)
+	if err != nil {
+		if errors.Is(err, modelab.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, errorPayload("not_found", "source experiment not found"))
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, errorPayload("clone_failed", err.Error()))
+		return
+	}
+	h.logModelABMutation(r, actorID, "model_ab.experiment.clone", newID, map[string]any{
+		"source_experiment_id": id,
+		"name":                 req.Name,
+	})
+	cloned, err := h.modelABRepo.GetExperiment(r.Context(), newID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorPayload("read_after_clone_failed", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusCreated, wireExperiment(cloned))
+}
+
+type bulkSetModelABStatusRequest struct {
+	IDs    []string `json:"ids"`
+	Status string   `json:"status"`
+}
+
+type bulkSetModelABStatusResponse struct {
+	Updated int64 `json:"updated"`
+}
+
+func (h *adminHandler) handleBulkSetModelABStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	actorID, _ := api.AuthenticatedUserID(r)
+	var req bulkSetModelABStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorPayload("invalid_body", err.Error()))
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, errorPayload("missing_ids", "ids[] is required"))
+		return
+	}
+	target := modelab.ExperimentStatus(strings.TrimSpace(req.Status))
+	switch target {
+	case modelab.StatusDraft, modelab.StatusRunning, modelab.StatusPaused,
+		modelab.StatusCompleted, modelab.StatusArchived:
+	default:
+		writeJSON(w, http.StatusBadRequest, errorPayload("invalid_status",
+			"status must be one of draft|running|paused|completed|archived"))
+		return
+	}
+	updated, err := h.modelABRepo.BulkSetStatus(r.Context(), req.IDs, target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorPayload("bulk_update_failed", err.Error()))
+		return
+	}
+	if h.modelABResolver != nil {
+		h.modelABResolver.Invalidate()
+	}
+	h.logModelABMutation(r, actorID, "model_ab.experiment.bulk_set_status", "_bulk_", map[string]any{
+		"ids":     req.IDs,
+		"status":  string(target),
+		"updated": updated,
+	})
+	writeJSON(w, http.StatusOK, bulkSetModelABStatusResponse{Updated: updated})
 }
 
 // --- shared helpers ----------------------------------------------------------

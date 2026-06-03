@@ -2847,6 +2847,35 @@ export async function setModelABExperimentStatus(
   );
 }
 
+export async function updateModelABExperiment(
+  id: string,
+  body: import("@fundai/api-client").UpdateModelABExperimentRequest,
+): Promise<import("@fundai/api-client").ModelABExperiment> {
+  return apiPatch<import("@fundai/api-client").ModelABExperiment>(
+    `/api/admin/model-ab/experiments/${encodeURIComponent(id)}`,
+    body,
+  );
+}
+
+export async function cloneModelABExperiment(
+  id: string,
+  body?: import("@fundai/api-client").CloneModelABExperimentRequest,
+): Promise<import("@fundai/api-client").ModelABExperiment> {
+  return apiPost<import("@fundai/api-client").ModelABExperiment>(
+    `/api/admin/model-ab/experiments/${encodeURIComponent(id)}/clone`,
+    body ?? {},
+  );
+}
+
+export async function bulkSetModelABStatus(
+  body: import("@fundai/api-client").BulkSetModelABStatusRequest,
+): Promise<import("@fundai/api-client").BulkSetModelABStatusResponse> {
+  return apiPost<import("@fundai/api-client").BulkSetModelABStatusResponse>(
+    `/api/admin/model-ab/experiments/bulk-status`,
+    body,
+  );
+}
+
 export type {
   ModelABArm,
   ModelABExperiment,
@@ -2855,6 +2884,10 @@ export type {
   ListModelABExperimentsResponse,
   CreateModelABExperimentRequest,
   SetModelABStatusRequest,
+  UpdateModelABExperimentRequest,
+  CloneModelABExperimentRequest,
+  BulkSetModelABStatusRequest,
+  BulkSetModelABStatusResponse,
   ModelABReport,
   ModelABArmMetric,
 } from "@fundai/api-client";

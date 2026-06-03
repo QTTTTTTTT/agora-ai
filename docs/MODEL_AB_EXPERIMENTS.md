@@ -156,11 +156,54 @@ The shared API client (`@fundai/api-client`) exports the new types
 `web/src/lib/api.ts` exposes them via typed `apiGet` / `apiPost` /
 `apiPatch` helpers — same pattern as workflow-checkpoints.
 
+## Sprint 10.4 — Operator ergonomics (delivered)
+
+Once `S10.3` shipped, the next pain point was that any change to a
+running experiment required deleting and re-creating it. `S10.4` adds
+three repo + admin endpoints that close that gap without weakening
+the integrity story:
+
+1. **Edit-draft** — `PATCH /api/admin/model-ab/experiments/{id}`
+   replaces the mutable columns of an experiment **only while the
+   target row is still in `draft` state**. The first guard is in SQL
+   (`UPDATE … WHERE status = 'draft'` returns 0 affected rows for
+   non-drafts) and the repo translates the empty result into
+   `modelab.ErrNotEditable`; the handler then returns HTTP `409` with
+   error code `not_editable`. This protects historical comparability:
+   a running experiment's arm definitions never change underneath
+   already-recorded assignments and shadow responses.
+
+2. **Clone** — `POST /api/admin/model-ab/experiments/{id}/clone`
+   reads the source row and inserts a brand-new `draft` experiment
+   carrying the same scope, arms and traffic split. Operators use
+   this when they want to tweak a live experiment: clone, edit the
+   draft, then start the clone. The original keeps running so the
+   metrics window stays intact.
+
+3. **Bulk status** — `POST /api/admin/model-ab/experiments/bulk-status`
+   flips many experiments to the same target status in a single
+   `UPDATE … WHERE id = ANY($2::uuid[])` statement. Used to archive
+   sweeps of one-shot experiments at end-of-sprint. The handler also
+   calls `Resolver.Invalidate()` so the cached arm map drops the
+   archived rows immediately instead of waiting for the next refresh.
+
+All three endpoints write an `admin_change_log` row via
+`audit.MutationEvent` so the operator surface is auditable in the
+exact same shape as `create_experiment` and `set_status`.
+
+UI changes (`web/src/components/AdminModelABSection.tsx`):
+
+- Each row now has a `Clone` button (always available) and an
+  `Edit draft` button (only on `draft` rows).
+- Clicking `Edit draft` switches the bottom form into "edit draft"
+  mode — same fields, but the submit button calls `updateModelABExperiment`
+  and the `start_immediate` checkbox is hidden because edits never
+  auto-start.
+- A checkbox column drives a contextual bulk-action bar that appears
+  once one or more rows are selected: bulk archive / pause / complete.
+
 ## What's still missing (later sprints)
 
-- **S10.4** — extra admin niceties (clone existing experiment, edit
-  arms / traffic split on a draft, archive bulk). The current CRUD is
-  enough to run a productive A/B; S10.4 adds operator ergonomics.
 - **S11** — orthogonal: surface LLM-failure-fallback as a first-class
   `decision_source` marker so users can see which calls were actually
   LLM-generated vs rule-based fallback.
@@ -185,7 +228,7 @@ revisions.
 - `server/internal/llm/model_ab_hook.go` — typed hook interface installed on `ModelRouter`
 - `server/internal/llm/client.go` — `MultiProviderClient.ChatWithConfig`
 - `server/cmd/server/wiring_adapters.go` — `llmRuntime.AttachModelABResolver`
-- `server/cmd/server/admin_model_ab.go` — admin REST handlers (list / report / create / set-status)
+- `server/cmd/server/admin_model_ab.go` — admin REST handlers (list / report / create / set-status / update-draft / clone / bulk-status)
 - `server/cmd/server/main.go` — `modelab.NewRepo(db)` + attach call
 - `shared/api-client/src/index.ts` — TypeScript types
 - `web/src/lib/api.ts` — client wrappers
