@@ -18371,7 +18371,8 @@ func (e *runtimeTradingEngine) executePlanAction(
 		if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
 			return "rejected", err
 		}
-		rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
+		// Equity buy: no realized PnL on an open.
+		rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy, sql.NullFloat64{})
 		if err != nil {
 			return "rejected", err
 		}
@@ -18395,7 +18396,11 @@ func (e *runtimeTradingEngine) executePlanAction(
 	if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
 		return "rejected", err
 	}
-	rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
+	// Equity sell: T7's realizedPnL leg is futures-only, so equity
+	// sells always pass the zero value. (Equity realized PnL is
+	// already captured by the trade_sell_notional credit + the
+	// FIFO lot ledger; v2 doesn't change that.)
+	rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy, sql.NullFloat64{})
 	if err != nil {
 		return "rejected", err
 	}
@@ -19117,6 +19122,16 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	// even before the splitter actually carves a parent into children
 	// (B-step2 follow-up).
 	strategy string,
+	// realizedPnL is signed (positive = profit, negative = loss).
+	// Carries a Valid value ONLY on a futures CLOSE; equity paths
+	// and futures opens pass the zero-value sql.NullFloat64{}. The
+	// cash-ledger dispatcher routes futures fills on opted-in funds
+	// (futures_cash_ledger_v2 flag) through the v2 path that writes
+	// margin_post / margin_release / realized_pnl instead of the
+	// equity-shaped trade_*_notional pair. Callers that aren't
+	// closing a futures position can safely pass the zero value;
+	// the dispatcher treats Valid=false as "no PnL leg to write".
+	realizedPnL sql.NullFloat64,
 ) (rolledStatus string, err error) {
 	// rolledStatus return:
 	//
@@ -19193,6 +19208,7 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 			planPrice, amount, status, filledPrice,
 			feeCommission, feeStampTax, feeTransfer,
 			normalizedStrategy, slippagePct, executedAt,
+			realizedPnL,
 		)
 	}
 
@@ -19278,7 +19294,10 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		if filledPrice.Valid && filledPrice.Float64 > 0 {
 			filledExecutionPrice = filledPrice.Float64
 		}
-		e.recordCashLedgerForFill(ctx, fund, plan, action, tradeID, side, quantity, filledExecutionPrice, amount, feeCommission, feeStampTax, feeTransfer, executedAt)
+		// realizedPnL is non-Valid for equity + futures-open paths
+		// and Valid (signed) for a futures CLOSE — see the
+		// tradeRepoCreateAndFill docstring for the contract.
+		e.recordCashLedgerForFill(ctx, fund, plan, action, tradeID, side, quantity, filledExecutionPrice, amount, feeCommission, feeStampTax, feeTransfer, executedAt, realizedPnL)
 	}
 	// Single-row path: caller keeps its own status — see the
 	// return-value docstring at the function head.
@@ -19342,6 +19361,12 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 	normalizedStrategy string,
 	slippagePct sql.NullFloat64,
 	executedAt time.Time,
+	// realizedPnL: same contract as tradeRepoCreateAndFill.
+	// Splitter today is gated off for futures so this is always
+	// the zero value in production; the param exists to keep the
+	// signatures aligned and unblock the futures-splitter unlock
+	// without another wire change.
+	realizedPnL sql.NullFloat64,
 ) (rolledStatus string, err error) {
 	childQtys := splitParentIntoChildren(quantity, normalizedStrategy)
 	if len(childQtys) <= 1 {
@@ -19503,8 +19528,23 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 		childTotalFees := commissionByChild[childIdx] + stampByChild[childIdx] + transferByChild[childIdx]
 		e.recordLotFill(ctx, fund, action, childID, side, childQty, filledPrice, planPrice, childTotalFees, executedAt, status)
 		if status == "filled" {
+			// realizedPnL: splitter today only runs for equity
+			// (futures are gated off in splitterEnabledForSide)
+			// so a per-child PnL split is moot. When futures
+			// splitting unlocks we'll pro-rate the parent PnL
+			// across children by childQty/totalQty here; for
+			// now pass through the parent's value so the wire
+			// is plumbed and unit tests can assert it without
+			// needing a futures-aware splitter gate change.
+			childPnL := sql.NullFloat64{}
+			if realizedPnL.Valid {
+				childPnL = sql.NullFloat64{
+					Float64: realizedPnL.Float64 * float64(childQty) / float64(quantity),
+					Valid:   true,
+				}
+			}
 			e.recordCashLedgerForFill(ctx, fund, plan, action, childID, side, childQty, executionPrice, childNotional,
-				commissionByChild[childIdx], stampByChild[childIdx], transferByChild[childIdx], executedAt)
+				commissionByChild[childIdx], stampByChild[childIdx], transferByChild[childIdx], executedAt, childPnL)
 		}
 
 		// Capture per-child status for the aggregated rollup
@@ -19619,11 +19659,30 @@ func (e *runtimeTradingEngine) recordCashLedgerForFill(
 	notional float64,
 	feeCommission, feeStampTax, feeTransfer float64,
 	executedAt time.Time,
+	// realizedPnL is signed: positive = profit, negative = loss.
+	// Only carries a Valid value on a FUTURES CLOSE; equity paths
+	// and futures opens pass the zero value (Valid=false). The
+	// dispatcher below routes the call to recordCashLedgerFuturesForFill
+	// when the fund has opted into the v2 cash flow model
+	// (futures_cash_ledger_v2 flag); legacy funds keep writing
+	// trade_buy_notional / trade_sell_notional even on futures.
+	realizedPnL sql.NullFloat64,
 ) {
 	if e == nil || e.cashLedger == nil {
 		return
 	}
 	if fund == nil || fund.ID == "" || tradeID == "" {
+		return
+	}
+	// T7 dispatch: futures fills on opted-in funds go through
+	// the v2 path so the journal records margin movement +
+	// realized PnL instead of the misleading "full notional"
+	// cash flow that the equity model assumes.
+	if strings.EqualFold(strings.TrimSpace(action.AssetClass.String), "futures") &&
+		futuresCashLedgerV2Enabled(fund.Config) {
+		e.recordCashLedgerFuturesForFill(ctx, fund, plan, action, tradeID, side, quantity,
+			executionPrice, notional, feeCommission, feeStampTax, feeTransfer,
+			executedAt, realizedPnL)
 		return
 	}
 	currency := "USD"
@@ -19689,6 +19748,144 @@ func (e *runtimeTradingEngine) recordCashLedgerForFill(
 		}
 		if _, err := e.cashLedger.Append(ctx, params); err != nil {
 			slog.Warn("cash_ledger: append failed",
+				"fund_id", fund.ID,
+				"trade_id", tradeID,
+				"entry_type", l.entryType,
+				"err", err.Error())
+			if e.metrics != nil {
+				e.metrics.RecordCashLedgerWriteFailure(l.entryType)
+			}
+		}
+	}
+}
+
+// recordCashLedgerFuturesForFill is the T7 futures-aware writer.
+// Called only via recordCashLedgerForFill's dispatch when the fund
+// has opted into the v2 model (futures_cash_ledger_v2 flag).
+//
+// Cash flow model:
+//
+//   OPEN (open_close == "open" / unset on a buy intent):
+//     futures_margin_post     amount = -initialMargin
+//     trade_buy_commission    amount = -feeCommission
+//     trade_buy_transfer_fee  amount = -feeTransfer
+//     (stamp tax not material for futures; included only when
+//      caller supplies a non-zero value.)
+//
+//   CLOSE (open_close == "close" or any close-like flag):
+//     futures_margin_release  amount = +initialMargin
+//     futures_realized_pnl    amount = realizedPnL (signed)
+//     trade_sell_commission   amount = -feeCommission
+//     trade_sell_transfer_fee amount = -feeTransfer
+//
+// Margin is derived from the action's leverage + the trade's
+// notional via futuresMarginRequired — same function the cash-
+// check gate in executePlanAction uses, so the journal entry
+// matches the cash that was reserved at gate time.
+//
+// realizedPnL is sql.NullFloat64 to distinguish "caller forgot
+// to pass it" (Valid=false → we skip the PnL leg and log a
+// warning) from "PnL is genuinely zero" (Valid=true, Float64=0).
+// On an OPEN the leg is never written regardless; on a CLOSE
+// missing PnL is a bug worth surfacing.
+//
+// Idempotency keys are namespaced under "trade:<id>:futures:<leg>"
+// so a replay can't collide with the legacy "trade:<id>:notional"
+// key (different vocabulary, different row).
+func (e *runtimeTradingEngine) recordCashLedgerFuturesForFill(
+	ctx context.Context,
+	fund *repository.Fund,
+	plan *repository.InvestmentPlan,
+	action repository.PlanAction,
+	tradeID string,
+	side string,
+	quantity int,
+	executionPrice float64,
+	notional float64,
+	feeCommission, feeStampTax, feeTransfer float64,
+	executedAt time.Time,
+	realizedPnL sql.NullFloat64,
+) {
+	currency := "USD"
+	if action.QuoteCurrency.Valid && strings.TrimSpace(action.QuoteCurrency.String) != "" {
+		currency = strings.ToUpper(strings.TrimSpace(action.QuoteCurrency.String))
+	}
+	tradingDate := executedAt
+	planID := ""
+	if plan != nil {
+		planID = plan.ID
+		if !plan.TradingDate.IsZero() {
+			tradingDate = plan.TradingDate
+		}
+	}
+	desc := fmt.Sprintf("futures %s %d %s @ %.4f", side, quantity, action.Symbol, executionPrice)
+	commonMeta := map[string]any{
+		"symbol":    action.Symbol,
+		"quantity":  quantity,
+		"price":     executionPrice,
+		"action_id": action.ID,
+	}
+
+	initialMargin := futuresMarginRequired(notional, action.Leverage)
+	openClose := strings.ToLower(strings.TrimSpace(action.OpenClose.String))
+	// Default to "open" when unset to match the runtime engine's
+	// own default in the futures branch of executePlanAction.
+	if openClose == "" {
+		openClose = "open"
+	}
+
+	type leg struct {
+		entryType string
+		amount    float64
+		key       string
+	}
+	var legs []leg
+	if openClose == "open" {
+		legs = []leg{
+			{entryType: repository.CashEntryFuturesMarginPost, amount: -initialMargin, key: "margin_post"},
+			{entryType: repository.CashEntryTradeBuyCommission, amount: -feeCommission, key: "commission"},
+			{entryType: repository.CashEntryTradeBuyTransfer, amount: -feeTransfer, key: "transfer"},
+			{entryType: repository.CashEntryTradeBuyStampTax, amount: -feeStampTax, key: "stamp_tax"},
+		}
+	} else {
+		legs = []leg{
+			{entryType: repository.CashEntryFuturesMarginRelease, amount: initialMargin, key: "margin_release"},
+			{entryType: repository.CashEntryTradeSellCommission, amount: -feeCommission, key: "commission"},
+			{entryType: repository.CashEntryTradeSellTransfer, amount: -feeTransfer, key: "transfer"},
+			{entryType: repository.CashEntryTradeSellStampTax, amount: -feeStampTax, key: "stamp_tax"},
+		}
+		if realizedPnL.Valid {
+			legs = append(legs, leg{entryType: repository.CashEntryFuturesRealizedPnL, amount: realizedPnL.Float64, key: "realized_pnl"})
+		} else {
+			// CLOSE without realizedPnL is almost certainly a
+			// caller bug — log loudly but don't fail the trade.
+			slog.Warn("cash_ledger: futures CLOSE missing realizedPnL — PnL leg skipped",
+				"fund_id", fund.ID,
+				"trade_id", tradeID,
+				"action_id", action.ID,
+			)
+		}
+	}
+	for _, l := range legs {
+		if l.amount == 0 {
+			continue
+		}
+		params := repository.AppendParams{
+			FundID:         fund.ID,
+			PostedAt:       executedAt,
+			TradingDate:    &tradingDate,
+			EntryType:      l.entryType,
+			Amount:         roundCurrency(l.amount),
+			Currency:       currency,
+			TradeID:        tradeID,
+			PlanID:         planID,
+			PlanActionID:   action.ID,
+			Description:    desc,
+			Metadata:       commonMeta,
+			IdempotencyKey: fmt.Sprintf("trade:%s:futures:%s", tradeID, l.key),
+		}
+		if _, err := e.cashLedger.Append(ctx, params); err != nil {
+			slog.Warn("cash_ledger: append failed (futures)",
 				"fund_id", fund.ID,
 				"trade_id", tradeID,
 				"entry_type", l.entryType,
@@ -20737,7 +20934,11 @@ func (e *runtimeTradingEngine) executeFuturesPlanAction(
 		if totalDebit > *availableCash+0.0001 {
 			return "rejected", api.ErrConflict
 		}
-		rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
+		// Futures open: no realized PnL leg — opening a position
+		// doesn't realize anything. Pass the zero value so the
+		// v2 cash flow records margin_post + fees, with the PnL
+		// row deliberately skipped.
+		rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy, sql.NullFloat64{})
 		if err != nil {
 			return "rejected", err
 		}
@@ -20763,14 +20964,20 @@ func (e *runtimeTradingEngine) executeFuturesPlanAction(
 	if position.FundID == "" || position.Quantity < float64(quantity)-0.0001 {
 		return "rejected", api.ErrConflict
 	}
-	rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
-	if err != nil {
-		return "rejected", err
-	}
+	// Futures close: compute realized PnL UP FRONT so we can
+	// pass it down to the cash-ledger writer. PnL sign convention:
+	//   long close:  (close - cost) * qty * multiplier
+	//   short close: (cost - close) * qty * multiplier
+	// Both are dollars-realized (positive = profit), matching
+	// what funds.current_capital expects to net in below.
 	releasedMargin := futuresMarginRequired(roundCurrency(position.CostPrice*float64(quantity)*contractMultiplierValue(position.ContractMultiplier)), position.Leverage)
 	realizedPnL := roundCurrency((orderPrice - position.CostPrice) * float64(quantity) * contractMultiplierValue(position.ContractMultiplier))
 	if strings.EqualFold(strings.TrimSpace(position.PositionSide.String), "short") {
 		realizedPnL = roundCurrency((position.CostPrice - orderPrice) * float64(quantity) * contractMultiplierValue(position.ContractMultiplier))
+	}
+	rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy, sql.NullFloat64{Float64: realizedPnL, Valid: true})
+	if err != nil {
+		return "rejected", err
 	}
 	remainingQty := position.Quantity - float64(quantity)
 	if remainingQty <= 0.0001 {

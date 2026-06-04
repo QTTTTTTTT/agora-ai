@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire landed; futures + short-side pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire + futures cash ledger v2 (margin + realized PnL) landed; short-side + futures splitter gate pending**
 
 ## Why this doc exists
 
@@ -263,18 +263,39 @@ runtimeTradingEngine.executePlanAction (PER action)
 
 **Deferred to follow-up PRs (still TODO):**
 
-- [ ] Wire **futures long open / close** through the splitter
-      (today the gate excludes asset_class=futures across the
-      board). The blocker is `recordCashLedgerForFill`: it
-      writes one SellNotional cash row for any sell-side fill
-      regardless of asset_class. For equity that's correct
-      (proceeds hit cash); for a futures close it's a
-      simplification — the real entries should be per-child
-      margin release + a single realized PnL booking. The
-      legacy single-row path has the same simplification, but
-      the splitter must not amplify it 5× across children until
-      `recordCashLedgerForFill` learns the asset_class=futures
-      branch. Touches the cash ledger, not the splitter itself.
+- [x] **Futures cash ledger v2 (T7 commit).** The blocker
+      called out below has been resolved: migration 089 adds
+      three new entry_type values (`futures_margin_post`,
+      `futures_margin_release`, `futures_realized_pnl`), and
+      `recordCashLedgerForFill` dispatches to a new
+      `recordCashLedgerFuturesForFill` helper when the fund
+      has opted into `futures_cash_ledger_v2`. The v2 path
+      writes margin_post on an open (debit = -initialMargin)
+      and margin_release + signed realized_pnl on a close,
+      with commission / transfer fees reusing the existing
+      `trade_{buy,sell}_commission` entry types. realizedPnL
+      is now propagated through `tradeRepoCreateAndFill` as
+      a new `sql.NullFloat64` parameter; the futures-close
+      branch in `executePlanAction` computes it upfront and
+      passes the signed value, equity paths pass the zero
+      value. Per-fund flag (default false) keeps every
+      production fund on the legacy `trade_buy_notional` /
+      `trade_sell_notional` path until operator explicitly
+      opts in — flipping the flag changes cash math on every
+      futures fill so this is a deliberate per-fund migration,
+      not a global rollout. 3-case sqlmock test pins
+      open-writes-margin_post, close-writes-margin_release-
+      plus-pnl, and flag-off-keeps-legacy.
+
+      What's STILL pending here: the **splitter gate** for
+      futures (`splitterEnabledForSide` still returns false
+      for `asset_class=futures`). The cash ledger now handles
+      the per-child case correctly thanks to pro-rata PnL
+      split in `tradeRepoCreateAndFillSplit`, but the gate
+      hasn't been flipped yet because the lot-ledger side
+      still needs futures-aware accounting before the splitter
+      can fan a futures open across N children without lot
+      writes silently dropping (see futures recordLotFill).
 - [ ] Wire **futures short / equity short** (the symmetric
       blocker on the position_side axis) — needs the parallel
       short-lot ledger to land before the splitter can fan out

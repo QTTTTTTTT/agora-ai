@@ -167,7 +167,7 @@ func TestTradeRepoCreateAndFillSplit_BuyTWAPHappyPath(t *testing.T) {
 		fund, plan, action,
 		"buy", 4000, 100, 400000, "filled",
 		filledPrice, 10.0, 0.0, 0.0,
-		"twap",
+		"twap", sql.NullFloat64{},
 	)
 	if err != nil {
 		t.Fatalf("tradeRepoCreateAndFill: %v", err)
@@ -219,7 +219,7 @@ func TestTradeRepoCreateAndFill_FlagOffStaysSingleRow(t *testing.T) {
 		"buy", 4000, 100, 400000, "filled",
 		sql.NullFloat64{Float64: 100, Valid: true},
 		10.0, 0.0, 0.0,
-		"twap",
+		"twap", sql.NullFloat64{},
 	)
 	if err == nil {
 		// Single-row path: rolledStatus must be "" so the
@@ -295,7 +295,7 @@ func TestTradeRepoCreateAndFillSplit_SellTWAPHappyPath(t *testing.T) {
 		fund, plan, action,
 		"sell", 4000, 100, 400000, "filled",
 		filledPrice, 10.0, 0.0, 0.0,
-		"twap",
+		"twap", sql.NullFloat64{},
 	)
 	if err != nil {
 		t.Fatalf("tradeRepoCreateAndFill sell split: %v", err)
@@ -341,7 +341,7 @@ func TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow(t *testing.T) {
 		"sell", 4000, 100, 400000, "filled", // sell + short → gate forces single row
 		sql.NullFloat64{Float64: 100, Valid: true},
 		10.0, 0.0, 0.0,
-		"twap",
+		"twap", sql.NullFloat64{},
 	)
 	if err != nil {
 		t.Fatalf("flag-on-but-short path: %v", err)

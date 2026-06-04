@@ -78,6 +78,24 @@ const (
 	// cash_ledger_entries is the cash movement.
 	CashEntryLocateFee = "locate_fee"
 	CashEntryBorrowFee = "borrow_fee"
+	// T7 futures cash flow (migration 089):
+	//   - futures_margin_post     debit at open;
+	//                             amount = -initial_margin
+	//   - futures_margin_release  credit at close;
+	//                             amount = +initial_margin
+	//   - futures_realized_pnl    signed at close;
+	//                             long close: +(close-cost)*qty*mult
+	//                             short close: +(cost-close)*qty*mult
+	// Commission / transfer fees on a futures trade still use
+	// the existing trade_{buy,sell}_commission etc. so reports
+	// that subtotal commissions don't need futures-specific
+	// buckets. Whether a fill writes the v2 quartet (margin +
+	// pnl + fees) instead of the legacy notional+fees pair is
+	// gated by the per-fund futures_cash_ledger_v2 flag in
+	// the runtime (default false → no behaviour change).
+	CashEntryFuturesMarginPost    = "futures_margin_post"
+	CashEntryFuturesMarginRelease = "futures_margin_release"
+	CashEntryFuturesRealizedPnL   = "futures_realized_pnl"
 )
 
 // validEntryTypes is the closed vocabulary the repo accepts. Kept
@@ -100,8 +118,11 @@ var validEntryTypes = map[string]bool{
 	CashEntryFundingWithdraw:     true,
 	CashEntryAdjustment:          true,
 	CashEntryReversal:            true,
-	CashEntryLocateFee:           true,
-	CashEntryBorrowFee:           true,
+	CashEntryLocateFee:            true,
+	CashEntryBorrowFee:            true,
+	CashEntryFuturesMarginPost:    true,
+	CashEntryFuturesMarginRelease: true,
+	CashEntryFuturesRealizedPnL:   true,
 }
 
 // CashLedgerEntry is the persisted shape, returned by reads.
