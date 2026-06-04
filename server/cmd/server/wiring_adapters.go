@@ -18209,6 +18209,15 @@ func (e *runtimeTradingEngine) executePlanAction(
 		filledPrice = sql.NullFloat64{Float64: orderPrice, Valid: orderPrice > 0}
 	}
 
+	// Trader-style execution strategy label (B-step1: record only, no
+	// child-order splitting yet). The PM-direct-fill engine still
+	// emits one trade_execution per action; this just tags the row
+	// with the strategy a real TraderAgent would have picked, so
+	// analytics + the daily-review LLM can reason about execution
+	// intent ("today's trader logged TWAP intent on a 4000-share buy
+	// that filled at +3bps"). See pm_path_execution_strategy.go.
+	strategy := selectPMPathExecutionStrategy(action, quantity)
+
 	if side == "buy" {
 		totalDebit := amount + feeCommission + feeTransfer + feeStampTax
 		if totalDebit > *availableCash+0.0001 {
@@ -18217,7 +18226,7 @@ func (e *runtimeTradingEngine) executePlanAction(
 		if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
 			return "rejected", err
 		}
-		if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer); err != nil {
+		if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
 			return "rejected", err
 		}
 		position = mergeBoughtPosition(position, fund.ID, action, quantity, orderPrice)
@@ -18234,7 +18243,7 @@ func (e *runtimeTradingEngine) executePlanAction(
 	if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
 		return "rejected", err
 	}
-	if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer); err != nil {
+	if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
 		return "rejected", err
 	}
 	remainingQty := position.Quantity - float64(quantity)
@@ -18944,6 +18953,14 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	feeCommission float64,
 	feeStampTax float64,
 	feeTransfer float64,
+	// strategy is the agent.TraderAgent-style execution style label
+	// ("immediate" / "limit" / "twap" / "vwap"). Caller picks it via
+	// selectPMPathExecutionStrategy. Persisted on
+	// trade_executions.strategy so downstream analytics + the daily-
+	// review LLM can see which execution intent the trade fell into,
+	// even before the splitter actually carves a parent into children
+	// (B-step2 follow-up).
+	strategy string,
 ) error {
 	// price (the column) holds the plan reference price the user
 	// approved at. filled_price holds the actual execution price.
@@ -19000,6 +19017,26 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		SlippagePct:          slippagePct,
 		ClientIdempotencyKey: clientIdempotencyKey,
 	}
+	// Strategy is recorded as a structured log line, NOT a column,
+	// until B-step2 (real child-order splitting) lands. Persisting it
+	// to trade_executions today would mean opening a schema column
+	// that has at most one distinct value per parent action (because
+	// we still write exactly one row per action). Logging it keeps
+	// the decision audit-trailable for analytics + the daily-review
+	// LLM while leaving the schema work for the splitter PR that
+	// will use it on every child row.
+	normalizedStrategy := normalizePMPathStrategy(strategy)
+	slog.Info("pm-path execute trade",
+		"fund_id", fund.ID,
+		"plan_id", plan.ID,
+		"action_id", action.ID,
+		"symbol", action.Symbol,
+		"side", side,
+		"quantity", quantity,
+		"strategy", normalizedStrategy,
+		"plan_price", planPrice,
+		"status", status,
+	)
 	tradeID, err := e.tradeRepo.Create(ctx, trade)
 	if err != nil {
 		return mapRepositoryError(err)
@@ -20174,12 +20211,16 @@ func (e *runtimeTradingEngine) executeFuturesPlanAction(
 		openClose = "open"
 	}
 	marginRequired := futuresMarginRequired(amount, action.Leverage)
+	// Strategy label (B-step1) — same selector as equity path so a
+	// futures TWAP-eligible open shows up with strategy='twap' even
+	// though we still write one trade_execution per action.
+	strategy := selectPMPathExecutionStrategy(action, quantity)
 	if openClose == "open" {
 		totalDebit := marginRequired + feeCommission + feeTransfer + feeStampTax
 		if totalDebit > *availableCash+0.0001 {
 			return "rejected", api.ErrConflict
 		}
-		if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer); err != nil {
+		if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
 			return "rejected", err
 		}
 		position = applyActionMetadataToPosition(position, fund.ID, action)
@@ -20197,7 +20238,7 @@ func (e *runtimeTradingEngine) executeFuturesPlanAction(
 	if position.FundID == "" || position.Quantity < float64(quantity)-0.0001 {
 		return "rejected", api.ErrConflict
 	}
-	if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer); err != nil {
+	if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
 		return "rejected", err
 	}
 	releasedMargin := futuresMarginRequired(roundCurrency(position.CostPrice*float64(quantity)*contractMultiplierValue(position.ContractMultiplier)), position.Leverage)
