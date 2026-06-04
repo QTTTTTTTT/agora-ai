@@ -46,6 +46,39 @@ type ContextOptions struct {
 	// SectionHeading is the top-level markdown heading.
 	// Defaults to "## Agent Track Record & Alpha Lessons".
 	SectionHeading string
+
+	// TeamProvider, when non-nil, supplies the cross-fund
+	// retrieval params at render time. The callback is invoked
+	// exactly once with the querying fundID and must return:
+	//   - The UUIDs of agents currently on the fund's team
+	//     (typically the active rows of fund_team_members).
+	//     An empty slice disables the cross-fund branch.
+	//   - The CurrentRegime label (e.g. "trend_up") so the AP5
+	//     regime gate can suppress regime-mismatched lessons.
+	//     Empty string disables the gate.
+	//   - The OptedOut bool that mirrors
+	//     fund.config.allow_agent_portable_imports=false. When
+	//     true the cross-fund branch is hard-disabled even
+	//     with a populated team list.
+	//
+	// When nil, BuildContext skips all three lookups and
+	// ListLessons is called with the fund-only legacy
+	// parameter set — no behavioural change for pre-AP8
+	// callers.
+	//
+	// The two-stage shape (ContextOptions field, not
+	// BuildContext parameter) keeps the public BuildContext
+	// signature stable while letting each caller wire its own
+	// data source (FundRepo, regime classifier, fund config
+	// reader) without dragging those types into this package.
+	TeamProvider func(ctx context.Context, fundID string) (teamAgentIDs []string, currentRegime string, optedOut bool)
+
+	// InheritedLabel customises the marker rendered next to
+	// each lesson that came in via the cross-fund branch
+	// (LessonRow.InheritedFromOtherFund=true). Defaults to
+	// " [inherited]". Localised callers (CN PMs) might pass
+	// " [继承自其他基金]".
+	InheritedLabel string
 }
 
 func (o ContextOptions) normalize() ContextOptions {
@@ -66,6 +99,9 @@ func (o ContextOptions) normalize() ContextOptions {
 	}
 	if strings.TrimSpace(o.SectionHeading) == "" {
 		o.SectionHeading = "## Agent Track Record & Alpha Lessons"
+	}
+	if strings.TrimSpace(o.InheritedLabel) == "" {
+		o.InheritedLabel = " [inherited]"
 	}
 	return o
 }
@@ -123,10 +159,22 @@ func BuildContext(
 
 	var lessons []LessonRow
 	if lessonRepo != nil {
-		l, err := lessonRepo.ListLessons(ctx, ListLessonsParams{
+		params := ListLessonsParams{
 			FundID: fundID,
 			Limit:  opts.MaxLessons,
-		})
+		}
+		// AP8 wiring: when the caller supplied a
+		// TeamProvider, resolve cross-fund params and pass
+		// them down to ListLessons. Errors / nils degrade
+		// gracefully — a nil provider OR an empty team list
+		// silently collapses to the legacy fund-only path.
+		if opts.TeamProvider != nil {
+			team, regime, optedOut := opts.TeamProvider(ctx, fundID)
+			params.TeamAgentIDs = team
+			params.CurrentRegime = regime
+			params.ExplicitlyOptedOut = optedOut
+		}
+		l, err := lessonRepo.ListLessons(ctx, params)
 		if err == nil {
 			lessons = l
 		}
@@ -145,7 +193,18 @@ func BuildContext(
 			if !l.Title.Valid || strings.TrimSpace(title) == "" {
 				title = l.Content
 			}
-			fmt.Fprintf(&sb, "- %s [α=%+.2f%%]\n", oneLine(title), alpha*100)
+			// AP8 surface: mark inherited lessons so the
+			// LLM (and any human reading the decision log)
+			// can see at a glance which lessons came in
+			// from another fund's history rather than being
+			// learned at this fund. Default suffix is
+			// " [inherited]" — operators can localise via
+			// ContextOptions.InheritedLabel.
+			suffix := ""
+			if l.InheritedFromOtherFund {
+				suffix = opts.InheritedLabel
+			}
+			fmt.Fprintf(&sb, "- %s [α=%+.2f%%]%s\n", oneLine(title), alpha*100, suffix)
 		}
 	}
 
