@@ -4886,6 +4886,17 @@ func convertTrade(trade *repository.TradeExecution) api.Trade {
 		value := trade.SlippagePct.Float64
 		result.SlippagePct = &value
 	}
+	// T1-step2: surface the execution-strategy intent and the
+	// child-of-parent link to the UI. Empty for legacy rows
+	// (strategy column was added in migration 088); the json
+	// `omitempty` tag drops them from the wire payload so the
+	// API contract stays additive.
+	if trade.Strategy.Valid {
+		result.Strategy = trade.Strategy.String
+	}
+	if trade.StrategyParentTradeID.Valid {
+		result.StrategyParentTradeID = trade.StrategyParentTradeID.String
+	}
 	if !trade.PlanID.Valid {
 		result.PlanID = ""
 	}
@@ -19336,6 +19347,16 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 	stampByChild := proRataFeeSplit(feeStampTax, childQtys)
 	transferByChild := proRataFeeSplit(feeTransfer, childQtys)
 
+	// Collected per-child (status, filledQty) so the parent log
+	// line can carry an aggregated execution_status that future
+	// async / partial-fill paths can drop into plan_actions
+	// without touching the splitter. Today's broker.Simulator
+	// fills everything synchronously at `status` so the rollup
+	// will read "filled"; the helper is here so the contract is
+	// pinned before live-broker integrations (Alpaca / IBKR)
+	// land and start emitting genuinely partial children.
+	childStatuses := make([]ChildStatus, 0, len(childQtys))
+
 	// Notional is the row's signed-price * qty input.
 	// Recompute per child rather than pro-rata-dividing the
 	// parent's notional so rounding stays consistent with the
@@ -19401,7 +19422,41 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 			e.recordCashLedgerForFill(ctx, fund, plan, action, childID, side, childQty, executionPrice, childNotional,
 				commissionByChild[childIdx], stampByChild[childIdx], transferByChild[childIdx], executedAt)
 		}
+
+		// Capture per-child status for the aggregated rollup
+		// emitted below. FilledQty == childQty when status =
+		// "filled" (the synchronous broker.Simulator path);
+		// future live-broker integrations may set partial qty
+		// here, at which point aggregateChildrenStatus picks
+		// the right "partial:NN" label.
+		childFilled := 0.0
+		if status == "filled" {
+			childFilled = float64(childQty)
+		}
+		childStatuses = append(childStatuses, ChildStatus{
+			Status:    status,
+			FilledQty: childFilled,
+		})
 	}
+
+	// Rollup the per-child statuses into a single parent-level
+	// label. Today this is "filled" for every code path because
+	// broker.Simulator fills synchronously; the value is logged
+	// as the parent's execution_status so any downstream consumer
+	// reading log-derived analytics sees the same string the
+	// frontend would compute after the live-broker rollup lands.
+	// The DB column plan_actions.execution_status is still
+	// populated by the caller (executePlanAction) based on the
+	// trade-engine's overall status; we don't double-write here.
+	rolledStatus := aggregateChildrenStatus(childStatuses, float64(quantity))
+	slog.Info("pm-path execute trade rollup",
+		"fund_id", fund.ID,
+		"plan_id", plan.ID,
+		"action_id", action.ID,
+		"parent_trade_id", parentID,
+		"child_count", len(childQtys),
+		"rolled_status", rolledStatus,
+	)
 	return nil
 }
 

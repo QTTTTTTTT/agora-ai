@@ -3490,6 +3490,19 @@ export interface DecisionTraceTrade {
   // rollout. UI surfaces this on the trade-detail view as a "drift +0.42%"
   // chip so users can spot trades that filled materially off the plan.
   slippagePct?: number | null;
+  // Execution strategy the PM direct-fill path chose for this row.
+  // One of "immediate" / "limit" / "twap" / "vwap" / "iceberg" / "pov".
+  // Empty (undefined) on legacy rows (pre-088 migration). All children
+  // of a TWAP parent share the parent's value.
+  strategy?: string;
+  // Set when this row is one slice of a multi-child execution (TWAP /
+  // VWAP / iceberg / POV); points back at the parent trade ID. Empty
+  // means this row IS the parent (or the trade pre-dates child
+  // splitting). UI list views should hide rows where this is set so
+  // the trade list shows one aggregated parent per plan_action;
+  // detail views can drill into children via a follow-up endpoint.
+  // Distinct from any OCO / bracket parent linkage.
+  strategyParentTradeId?: string;
   createdAt?: string;
 }
 

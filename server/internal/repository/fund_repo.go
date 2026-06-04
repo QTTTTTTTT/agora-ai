@@ -1326,12 +1326,51 @@ func (r *TradeRepo) ListByFund(ctx context.Context, fundID string, from, to time
 }
 
 func (r *TradeRepo) ListByFundPage(ctx context.Context, fundID string, from, to time.Time, limit, offset int) ([]TradeExecution, error) {
+	return r.ListByFundPageOpts(ctx, fundID, from, to, limit, offset, TradeListOpts{})
+}
+
+// TradeListOpts adds optional filters to the list APIs without
+// breaking the historical signatures. The default-value (all-false)
+// instance reproduces the pre-088 behaviour, so existing callers
+// can keep passing the zero struct (or use the un-suffixed list
+// methods which do that for them).
+type TradeListOpts struct {
+	// ExcludeChildSlices, when true, omits trade rows that have
+	// strategy_parent_trade_id IS NOT NULL — i.e. only the parent
+	// rows + the legacy non-split rows survive. This is the view
+	// the UI list page wants when the per-fund child-splitting
+	// flag is on: one row per plan_action that aggregates the
+	// summed qty + summed fees + parent-level strategy label,
+	// with the per-child slices reachable via a separate
+	// "show details" drilldown (TBD).
+	//
+	// Implementation note: the WHERE clause is
+	//
+	//   strategy_parent_trade_id IS NULL
+	//
+	// which trivially short-circuits on the partial index
+	// idx_trade_executions_strategy_parent (migration 088 only
+	// indexes the NOT-NULL slice, so the planner sees a tiny
+	// "everything else" set covered by the heap). Adding a
+	// covering index is a follow-up if the heap walk becomes
+	// hot.
+	ExcludeChildSlices bool
+}
+
+// ListByFundPageOpts is the explicit-options variant of
+// ListByFundPage. See TradeListOpts for the available filters.
+// Existing callers that just want a paged window in created_at
+// order can keep calling ListByFundPage; UI callers that want
+// the "parent + standalone only" view pass
+// TradeListOpts{ExcludeChildSlices: true} here.
+func (r *TradeRepo) ListByFundPageOpts(ctx context.Context, fundID string, from, to time.Time, limit, offset int, opts TradeListOpts) ([]TradeExecution, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT `+tradeExecutionColumns+`
 		 FROM trade_executions
 		 WHERE fund_id = $1 AND created_at >= $2 AND created_at <= $3
+		   AND ($6 = false OR strategy_parent_trade_id IS NULL)
 		 ORDER BY created_at DESC LIMIT $4 OFFSET $5`,
-		fundID, from, to, limit, offset,
+		fundID, from, to, limit, offset, opts.ExcludeChildSlices,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("trade_repo: list by fund: %w", err)
@@ -1341,15 +1380,48 @@ func (r *TradeRepo) ListByFundPage(ctx context.Context, fundID string, from, to 
 }
 
 func (r *TradeRepo) ListByPlan(ctx context.Context, planID string) ([]TradeExecution, error) {
+	return r.ListByPlanOpts(ctx, planID, TradeListOpts{})
+}
+
+// ListByPlanOpts is the explicit-options variant of ListByPlan.
+// See TradeListOpts.ExcludeChildSlices for the use case.
+func (r *TradeRepo) ListByPlanOpts(ctx context.Context, planID string, opts TradeListOpts) ([]TradeExecution, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT `+tradeExecutionColumns+`
 		 FROM trade_executions
 		 WHERE plan_id = $1
+		   AND ($2 = false OR strategy_parent_trade_id IS NULL)
 		 ORDER BY created_at DESC, id DESC`,
-		planID,
+		planID, opts.ExcludeChildSlices,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("trade_repo: list by plan: %w", err)
+	}
+	defer rows.Close()
+	return scanTradeExecutions(rows)
+}
+
+// ListChildrenByStrategyParent returns every child row whose
+// strategy_parent_trade_id equals the given parent ID. Used by
+// the "show details" drilldown on the UI list page when an
+// operator clicks an aggregated parent row to see its slices.
+//
+// Returns an empty slice (not an error) when the parent has no
+// children — that's the legacy / non-split path, the UI should
+// just display the parent itself.
+func (r *TradeRepo) ListChildrenByStrategyParent(ctx context.Context, parentTradeID string) ([]TradeExecution, error) {
+	if strings.TrimSpace(parentTradeID) == "" {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+tradeExecutionColumns+`
+		 FROM trade_executions
+		 WHERE strategy_parent_trade_id = $1
+		 ORDER BY created_at, id`,
+		parentTradeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("trade_repo: list children by strategy_parent: %w", err)
 	}
 	defer rows.Close()
 	return scanTradeExecutions(rows)

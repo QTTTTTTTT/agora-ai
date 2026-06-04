@@ -1677,8 +1677,9 @@ func TestRuntimeMemorySystemBuildLearningContextUsesRequestedTradingDate(t *test
 	cancelled_at, cancel_reason, replaced_at, replace_count
 		 FROM trade_executions
 		 WHERE plan_id = $1
+		   AND ($2 = false OR strategy_parent_trade_id IS NULL)
 		 ORDER BY created_at DESC, id DESC`)).
-		WithArgs("plan-1").
+		WithArgs("plan-1", false).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "fund_id", "plan_id", "plan_action_id", "instrument_key", "symbol", "market", "exchange", "asset_class", "instrument_type", "side", "position_side", "open_close", "order_type", "quantity", "price", "amount", "filled_qty", "filled_price", "fee_commission", "fee_stamp_tax", "fee_transfer", "trading_mode", "broker_order_id", "mcp_server_id", "status", "executed_at", "quote_currency", "settlement_currency", "margin_mode", "leverage", "contract_multiplier", "expiry_date", "reduce_only", "slippage_pct", "stop_price", "trail_amount", "trail_percent", "display_qty", "time_in_force", "good_till_date", "parent_trade_id", "strategy", "strategy_parent_trade_id", "client_idempotency_key", "created_at", "cancelled_at", "cancel_reason", "replaced_at", "replace_count"}).
 			AddRow("trade-1", "fund-1", sql.NullString{String: "plan-1", Valid: true}, sql.NullString{String: "action-1", Valid: true}, "NVDA", "NVDA", sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, "buy", sql.NullString{}, sql.NullString{}, "limit", 10.0, sql.NullFloat64{Float64: 100, Valid: true}, sql.NullFloat64{}, 10.0, sql.NullFloat64{Float64: 100, Valid: true}, 0.0, 0.0, 0.0, "simulation", sql.NullString{}, sql.NullString{}, "filled", sql.NullTime{Time: targetDate.Add(15 * time.Hour), Valid: true}, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullTime{}, sql.NullBool{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullString{}, sql.NullTime{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, sql.NullString{}, now, sql.NullTime{}, sql.NullString{}, sql.NullTime{}, 0))
 

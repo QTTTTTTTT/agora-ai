@@ -203,8 +203,24 @@ type Trade struct {
 	// reference price (Price) and the actual fill price (FilledPrice).
 	// nil means the trade predates the SlippageGuard rollout or was a
 	// sell/non-priced fill where the metric isn't meaningful.
-	SlippagePct *float64  `json:"slippagePct,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
+	SlippagePct *float64 `json:"slippagePct,omitempty"`
+	// Strategy is the execution strategy the PM direct-fill path
+	// selected for this row ("immediate" / "limit" / "twap" / "vwap"
+	// / "iceberg" / "pov"). Empty for legacy rows (pre-088 migration).
+	// All children of a TWAP parent share the parent's value.
+	Strategy string `json:"strategy,omitempty"`
+	// StrategyParentTradeID points back at the parent trade row
+	// when this row is one slice of a multi-child execution
+	// (TWAP / VWAP / iceberg / POV). Empty means "this IS the
+	// parent" (or this trade pre-dates child splitting). UIs
+	// listing trades should hide rows where this is non-empty
+	// to show one aggregated parent row per plan_action, then
+	// drill down into children on click. Distinct from the
+	// existing ParentTradeID bracket-parent pointer (OCO /
+	// stop-loss siblings) which is intentionally NOT surfaced
+	// in this API today.
+	StrategyParentTradeID string    `json:"strategyParentTradeId,omitempty"`
+	CreatedAt             time.Time `json:"createdAt"`
 }
 
 type FundUniverse struct {

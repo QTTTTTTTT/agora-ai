@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + equity long-side sell landed; futures + short-side pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + equity long-side sell + execution_status rollup helper + parent/child list filter API landed; futures + short-side + UI hide-children pending**
 
 ## Why this doc exists
 
@@ -197,8 +197,56 @@ runtimeTradingEngine.executePlanAction (PER action)
       "short" → false, any "futures" → false) covered
       explicitly so a regression there is caught at unit-test
       time.
+- [x] **execution_status rollup helper (T3 follow-up commit).**
+      `aggregateChildrenStatus(children, parentQty)` in
+      `pm_path_children_status.go` turns N per-child
+      (status, filled_qty) pairs into a single parent-level
+      label: "filled" / "partial:NN" (with NN floored to 99 so
+      "filled" stays reserved for the all-filled terminal
+      happy path) / "pending" / "rejected" / "" (empty cue
+      to fall back to caller-decided status). Today the
+      splitter logs this label as `rolled_status` on the
+      `pm-path execute trade rollup` slog line — the database
+      column `plan_actions.execution_status` is still driven
+      by `executePlanAction` (caller-decided status) because
+      `broker.Simulator` fills every child synchronously and
+      the rollup would always read "filled". The helper is
+      in place so the next live-broker integration
+      (Alpaca / IBKR async partial fills) just has to switch
+      `executePlanAction` to feed the rollup result through
+      `syncPlanActionStatuses`. 13-case unit-test matrix
+      pins each precedence rule.
+- [x] **Parent + child list API surfaces (T3 follow-up
+      commit).** `repository.TradeRepo` gained three
+      additions:
+      - `TradeListOpts.ExcludeChildSlices` flag and matching
+        `ListByFundPageOpts` / `ListByPlanOpts` wrappers around
+        the legacy `ListByFundPage` / `ListByPlan` methods.
+        The new opts methods inject
+        `AND ($N = false OR strategy_parent_trade_id IS NULL)`
+        into the WHERE clause; the legacy methods just forward
+        the zero-value opts so existing callers keep their
+        full-rowset behaviour and nothing in production rolled
+        over.
+      - `ListChildrenByStrategyParent(parentTradeID)` for the
+        drilldown query (show me the slices of TWAP parent X).
+        Empty parent ID returns the empty slice rather than
+        a query error so a stale UI parameter is safe.
+      - `api.Trade` JSON model now carries `strategy` +
+        `strategyParentTradeId` so the frontend can identify
+        which rows are children. `web/src/lib/api.ts` mirrors
+        the new fields. Tsc clean; existing UIs are unaffected
+        (additive, both omitempty).
 
 **Deferred to follow-up PRs (still TODO):**
+
+- [ ] **UI hide-children rollout.** The repo API + the JSON
+      shape are landed; the frontend `TradeHistory.tsx` page
+      still calls the no-opts list endpoint and renders every
+      child row inline. Switching it to call the
+      `excludeChildSlices=true` variant + adding a "show N
+      slices" drilldown on parent rows is a frontend-only
+      follow-up.
 
 - [ ] Wire **futures long open / close** through the splitter
       (today the gate excludes asset_class=futures across the
@@ -227,10 +275,17 @@ runtimeTradingEngine.executePlanAction (PER action)
 - [ ] Aggregate slippage across distinct-price children for the
       parent row (today every child + parent carry the same
       slippage because the price is shared).
-- [ ] `plan_action.execution_status` aggregation: when a parent
-      partially fills (3 of 5 TWAP slices land), roll the children
-      into one parent-level status string so the planner UI shows
-      "partial: 60% filled" rather than 5 individual rows.
+- [ ] `plan_action.execution_status` async wiring: the
+      `aggregateChildrenStatus` helper + the splitter's
+      `rolled_status` log line are in place (T3 commit). What's
+      left is the live-broker integration that switches
+      `executePlanAction` to drive
+      `plan_actions.execution_status` off the rollup helper
+      when (and only when) child statuses can genuinely
+      disagree — i.e. once Alpaca / IBKR's async partial-fill
+      paths land. The current synchronous-fill world already
+      collapses to "filled" on every code path so flipping
+      the wire today would be a no-op with extra moving parts.
 - [ ] Daily-review LLM context builder: surface "TWAP intent on
       N shares, M% filled by close" as a Trader-role learning
       signal (the structured rows are already on disk now;
