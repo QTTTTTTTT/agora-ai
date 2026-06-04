@@ -7,6 +7,7 @@ package main
 // data-in-data-out, useful for property-testing without a DB.
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/fundai/server/internal/repository"
@@ -58,6 +59,35 @@ import (
 // but the splitter must not amplify it across N children until
 // per-child margin release is wired (see ADR "deferred").
 func splitterEnabledForSide(side string, action repository.PlanAction) bool {
+	return splitterEnabledForSideWithConfig(side, action, nil)
+}
+
+// splitterEnabledForSideWithConfig is the T7 follow-up that re-opens
+// the futures branch when the fund has opted into the v2 cash flow.
+//
+// Truth table (lowercased + trimmed):
+//
+//	side    position_side   asset_class       v2 flag   result
+//	------  -------------   ---------------   -------   ------
+//	buy     "" / "long"     non-futures       *         true
+//	sell    "" / "long"     non-futures       *         true
+//	buy     "" / "long"     "futures"         true      true   (T7 unlocks)
+//	sell    "" / "long"     "futures"         true      true   (T7 unlocks)
+//	*       *               "futures"         false     false  (legacy notional path)
+//	*       "short"         *                 *         false  (short-lot ledger pending)
+//	(other side)            *                 *         false
+//
+// Why the v2 flag matters: pre-T7 the cash-ledger writer for a
+// futures fill collapsed everything into trade_*_notional, which
+// is fine on a single row but wrong if you amplify it across N
+// children (the amplification doesn't show up as a CHECK violation
+// or a balance error — it silently overstates cash movement). T7
+// teaches recordCashLedgerForFill the futures branch and adds
+// pro-rata PnL splitting; the splitter gate can now safely fan
+// out a futures parent into children iff the fund's writer is on
+// the v2 path. Funds on the legacy path stay single-row even
+// when the splitter flag is on.
+func splitterEnabledForSideWithConfig(side string, action repository.PlanAction, fundConfig json.RawMessage) bool {
 	normalizedSide := strings.ToLower(strings.TrimSpace(side))
 	positionSide := strings.ToLower(strings.TrimSpace(action.PositionSide.String))
 	assetClass := strings.ToLower(strings.TrimSpace(action.AssetClass.String))
@@ -65,7 +95,13 @@ func splitterEnabledForSide(side string, action repository.PlanAction) bool {
 		return false
 	}
 	if assetClass == "futures" {
-		return false
+		// T7-T8a unlock: only when the writer can correctly
+		// shape the per-child cash flow into margin + PnL. The
+		// pmPathChildSplittingEnabled check is the parent gate
+		// in the dispatcher; this function only decides shape.
+		if !futuresCashLedgerV2Enabled(fundConfig) {
+			return false
+		}
 	}
 	switch normalizedSide {
 	case "buy", "sell":

@@ -19200,7 +19200,7 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	//                                  blocker to the above.)
 	//
 	// See docs/TRADER_AGENT_INTEGRATION.md "step 2 status".
-	if splitterEnabledForSide(side, action) &&
+	if splitterEnabledForSideWithConfig(side, action, fund.Config) &&
 		pmPathChildSplittingEnabled(fund.Config) &&
 		shouldSplitParent(quantity, normalizedStrategy) {
 		return e.tradeRepoCreateAndFillSplit(

@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire + futures cash ledger v2 (margin + realized PnL) landed; short-side + futures splitter gate pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire + futures cash ledger v2 (margin + realized PnL) + futures long splitter gate unlock (when v2 on) landed; short-side pending**
 
 ## Why this doc exists
 
@@ -287,15 +287,27 @@ runtimeTradingEngine.executePlanAction (PER action)
       open-writes-margin_post, close-writes-margin_release-
       plus-pnl, and flag-off-keeps-legacy.
 
-      What's STILL pending here: the **splitter gate** for
-      futures (`splitterEnabledForSide` still returns false
-      for `asset_class=futures`). The cash ledger now handles
-      the per-child case correctly thanks to pro-rata PnL
-      split in `tradeRepoCreateAndFillSplit`, but the gate
-      hasn't been flipped yet because the lot-ledger side
-      still needs futures-aware accounting before the splitter
-      can fan a futures open across N children without lot
-      writes silently dropping (see futures recordLotFill).
+      Follow-up T8a: the **splitter gate** for futures long
+      positions has also been unlocked when the v2 cash flow
+      is on. The legacy `splitterEnabledForSide` (no config)
+      still returns false for futures, but the new
+      `splitterEnabledForSideWithConfig` returns true for
+      futures long when `futures_cash_ledger_v2=true`. The
+      dispatcher (`tradeRepoCreateAndFill`) was switched to
+      call the with-config variant, so opted-in funds get
+      futures-long splitting end-to-end: the splitter fans
+      out per-child trade_executions rows, the per-child cash
+      ledger writes margin_post / margin_release / realized_pnl
+      with PnL pro-rated by `childQty/totalQty`, and the lot
+      ledger keeps its long-only behaviour (futures longs are
+      classified as buy/sell by `ClassifyFuturesSide` so the
+      existing FIFO long-lot path handles them already). The
+      short axis stays blocked regardless of the v2 flag — the
+      short-lot ledger is the remaining prerequisite there, not
+      cash flow. 10-case matrix test pins the futures unlock
+      cells; a 1-case defense-in-depth test asserts the legacy
+      `splitterEnabledForSide` (no config) is byte-identical to
+      its pre-T8a behaviour.
 - [ ] Wire **futures short / equity short** (the symmetric
       blocker on the position_side axis) — needs the parallel
       short-lot ledger to land before the splitter can fan out
