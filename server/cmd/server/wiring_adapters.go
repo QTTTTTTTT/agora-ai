@@ -19938,16 +19938,32 @@ func (e *runtimeTradingEngine) recordLotFill(
 	if fund == nil {
 		return
 	}
-	// Phase 3A-1 models long lots only. Short positions
-	// (position_side == "short", typically futures) flip the
-	// trade-direction semantics — a "sell" opens the position and
-	// a "buy" closes it — which the FIFO buy→sell ledger here
-	// can't represent. Skip them outright; a later phase will
-	// add a parallel short-lot ledger.
-	if strings.EqualFold(strings.TrimSpace(action.PositionSide.String), "short") {
-		return
-	}
+	// T8 short-side routing. Pre-T8 this branch early-returned
+	// because the lot ledger was long-only; the data layer now
+	// supports short lots so we let the FillEvent flow through
+	// with PositionSide="short". The lotledger.Service.Record
+	// switches on PositionSide BEFORE side, so:
+	//   sell + short → recordShortOpen
+	//   buy  + short → recordShortClose
+	// Long positions (PositionSide empty or "long") continue to
+	// use the original buy/sell long path unchanged.
+	positionSide := strings.ToLower(strings.TrimSpace(action.PositionSide.String))
 	canonicalSide := lotledger.ClassifyFuturesSide(side)
+	if positionSide == "short" {
+		// On the short axis ClassifyFuturesSide flips meanings —
+		// e.g. "open_short" → "" (long-side reject) but we want
+		// the raw "sell". Normalize manually for the short path
+		// so a sell opens and a buy covers.
+		canonicalSide = strings.ToLower(strings.TrimSpace(side))
+		switch canonicalSide {
+		case "buy", "open_long", "close_short":
+			canonicalSide = "buy" // cover
+		case "sell", "open_short", "close_long":
+			canonicalSide = "sell" // open
+		default:
+			canonicalSide = ""
+		}
+	}
 	if canonicalSide == "" {
 		return
 	}
@@ -19989,6 +20005,7 @@ func (e *runtimeTradingEngine) recordLotFill(
 		Market:            action.Market,
 		AssetClass:        action.AssetClass,
 		Side:              canonicalSide,
+		PositionSide:      positionSide,
 		Quantity:          float64(quantity),
 		FilledPrice:       price,
 		TotalFees:         totalFees,

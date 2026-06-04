@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire + futures cash ledger v2 (margin + realized PnL) + futures long splitter gate unlock (when v2 on) + short-side lot ledger data layer landed; short-side wiring + splitter gate flip pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire + futures cash ledger v2 (margin + realized PnL) + futures long splitter gate unlock (when v2 on) + short-side lot ledger data layer + recordLotFill short wiring + splitter gate short unlock landed; futures short waits on v2 flag, per-child fill prices wait on live broker**
 
 ## Why this doc exists
 
@@ -344,12 +344,51 @@ runtimeTradingEngine.executePlanAction (PER action)
       lots only. 4 existing repo / lotledger sqlmock tests
       updated to the new column shape.
 
-      What's STILL pending: the **engine wiring** (recordLotFill
-      in wiring_adapters.go currently early-returns when
-      position_side="short"; it needs to route to the short
-      helpers instead) and the **splitter gate flip** for short
-      positions. With the data layer in place these are now
-      straightforward follow-ups rather than blocked work.
+      What's STILL pending: nothing on the short-side critical
+      path — see the T8b entry below for the wiring + gate
+      flip that closes the loop.
+- [x] **Engine wiring + splitter gate flip for shorts (T8b commit).**
+      Pre-T8b `recordLotFill` had an unconditional
+      `if action.PositionSide == "short" { return }` early-return
+      guard from the long-only era, so even with T8's data layer
+      in place every short fill silently skipped the lot ledger.
+      T8b deletes the guard and re-shapes the branch around the
+      `positionSide` axis:
+
+      - `canonicalSide` is normalized differently on the short
+        axis: a raw `side="sell"` now maps to "sell" (open
+        short) and `side="buy"` to "buy" (cover short), bypassing
+        `ClassifyFuturesSide` which would otherwise reject the
+        non-equity verbs.
+      - `FillEvent.PositionSide` is populated so
+        `lotledger.Service.Record` dispatches to
+        `recordShortOpen` / `recordShortClose` rather than the
+        long path.
+      - Long fills (PositionSide empty or "long") flow
+        through the exact same code path as pre-T8b — the long
+        branch only sees a normalized empty `positionSide`
+        string.
+
+      The splitter gate flip removes the unconditional
+      `position_side == "short"` short-circuit from
+      `splitterEnabledForSideWithConfig`, so short equity now
+      splits whenever the master `pm_path_child_splitting` flag
+      is on. Short futures stays gated by the v2 cash flow
+      flag (because the futures branch still needs T7's per-
+      child margin / PnL writer), matching the long futures
+      gate from T8a — same lock, both sides.
+
+      3 new wiring tests (record_lot_fill_short_test.go):
+      sell+short writes side='short' to position_lots,
+      buy+short walks the side='short' SELECT and emits a
+      side='short' closed_lots row, long path unchanged.
+      One existing splitter test
+      (`TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow`)
+      was pivoted into two new tests: short EQUITY now SPLITS
+      after T8 (parent + 5 children, rolledStatus="filled"),
+      short FUTURES without v2 STILL stays single row
+      (rolledStatus="") — the asymmetry pins both halves of
+      the gate explicitly.
 - [ ] Per-child fill PRICE (not just qty). The current splitter
       shares the parent's `executionPrice` across every child
       because `broker.Simulator` returns a single fill; once the

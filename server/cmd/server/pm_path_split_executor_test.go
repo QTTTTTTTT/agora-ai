@@ -303,22 +303,41 @@ func TestTradeRepoCreateAndFillSplit_SellTWAPHappyPath(t *testing.T) {
 	assertMockExpectations(t, mock)
 }
 
-// TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow guards
-// the "non-short only" gate: with the flag on AND qty=4000 AND
-// strategy=twap, a SELL on a SHORT position must still be the
-// legacy single-row path because the lot-ledger short-side branch
-// is a no-op pending the parallel short-lot model. A regression
-// that fanned out short-side operations would write 5 children
-// whose lot writes are all no-ops, leaving holding_positions out
-// of sync with trade_executions.
-func TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow(t *testing.T) {
+// TestTradeRepoCreateAndFill_ShortEquitySplitsAfterT8 documents
+// the T8 behaviour flip on the short axis. Pre-T8 the splitter
+// hard-rejected anything with position_side="short" because the
+// lot ledger was long-only and per-child fills would silently
+// FIFO-consume zero rows. T8 added a parallel short-lot model
+// (position_lots.side='short') and T8b wired recordLotFill to
+// route through recordShortOpen / recordShortClose, so the
+// splitter is now free to fan out short-side trades on the
+// non-futures asset class.
+//
+// This test asserts a sell-to-open 4000-share short SPLITS into
+// 1 parent + 5 children (qty 800 each) with the splitter flag on.
+// A regression that re-added the "short stays single row" guard
+// would shrink the trade_executions write count from 6 to 1 and
+// this test would fail with an unsatisfied parent INSERT.
+//
+// The futures + short combination remains gated by the v2 cash
+// flow flag (see TestTradeRepoCreateAndFill_FlagOnShortFuturesNoV2StaysSingleRow
+// below); only the short EQUITY path unlocks unconditionally.
+func TestTradeRepoCreateAndFill_ShortEquitySplitsAfterT8(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
 
-	mock.ExpectQuery("INSERT INTO trade_executions").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("trade-only"))
+	insertSQL := regexp.MustCompile(`INSERT INTO trade_executions`)
+	mock.ExpectQuery(insertSQL.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("trade-short-parent"))
 	mock.ExpectExec("UPDATE trade_executions").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	for i := 0; i < 5; i++ {
+		childID := "trade-short-child-" + string(rune('0'+i))
+		mock.ExpectQuery(insertSQL.String()).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(childID))
+		mock.ExpectExec("UPDATE trade_executions").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
 
 	engine := &runtimeTradingEngine{tradeRepo: repository.NewTradeRepo(db)}
 
@@ -330,21 +349,79 @@ func TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow(t *testing.T) {
 	plan := &repository.InvestmentPlan{ID: "plan-1"}
 	action := repository.PlanAction{
 		ID:           "action-1",
-		Symbol:       "ESU2026",
+		Symbol:       "AAPL",
+		AssetClass:   sql.NullString{String: "equity", Valid: true},
 		Price:        sql.NullFloat64{Float64: 100, Valid: true},
 		PositionSide: sql.NullString{String: "short", Valid: true},
 	}
 
-	_, err := engine.tradeRepoCreateAndFill(
+	rolledStatus, err := engine.tradeRepoCreateAndFill(
 		context.Background(),
 		fund, plan, action,
-		"sell", 4000, 100, 400000, "filled", // sell + short → gate forces single row
+		"sell", 4000, 100, 400000, "filled",
 		sql.NullFloat64{Float64: 100, Valid: true},
 		10.0, 0.0, 0.0,
 		"twap", sql.NullFloat64{},
 	)
 	if err != nil {
-		t.Fatalf("flag-on-but-short path: %v", err)
+		t.Fatalf("short equity split path: %v", err)
+	}
+	if rolledStatus != "filled" {
+		t.Fatalf("rolledStatus: want \"filled\" got %q (regression: short equity is back on single-row path)", rolledStatus)
+	}
+	assertMockExpectations(t, mock)
+}
+
+// TestTradeRepoCreateAndFill_FlagOnShortFuturesNoV2StaysSingleRow
+// pins the OTHER half of T8: short futures stays on the legacy
+// single-row path until BOTH prerequisites are met — T7's v2
+// cash flow flag AND T8's short-lot model. With v2 flag off, the
+// cash flow gate trips and the splitter falls back to single row.
+//
+// Why this matters: a regression that wired short futures to
+// split when the fund is on the v1 (notional-only) cash flow
+// would amplify margin movement across N children incorrectly,
+// leaving the cash_ledger silently overstated. The combination of
+// "short" + "futures" + "no v2" must stay safe.
+func TestTradeRepoCreateAndFill_FlagOnShortFuturesNoV2StaysSingleRow(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	mock.ExpectQuery("INSERT INTO trade_executions").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("trade-only-fut"))
+	mock.ExpectExec("UPDATE trade_executions").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	engine := &runtimeTradingEngine{tradeRepo: repository.NewTradeRepo(db)}
+
+	fund := &repository.Fund{
+		ID:          "fund-1",
+		TradingMode: "simulation",
+		// Splitting on, v2 OFF: futures branch fails the cash flow gate.
+		Config: json.RawMessage(`{"pm_path_child_splitting": true}`),
+	}
+	plan := &repository.InvestmentPlan{ID: "plan-1"}
+	action := repository.PlanAction{
+		ID:           "action-1",
+		Symbol:       "ESU2026",
+		AssetClass:   sql.NullString{String: "futures", Valid: true},
+		Price:        sql.NullFloat64{Float64: 100, Valid: true},
+		PositionSide: sql.NullString{String: "short", Valid: true},
+	}
+
+	rolledStatus, err := engine.tradeRepoCreateAndFill(
+		context.Background(),
+		fund, plan, action,
+		"sell", 4000, 100, 400000, "filled",
+		sql.NullFloat64{Float64: 100, Valid: true},
+		10.0, 0.0, 0.0,
+		"twap", sql.NullFloat64{},
+	)
+	if err != nil {
+		t.Fatalf("short futures no v2 path: %v", err)
+	}
+	if rolledStatus != "" {
+		t.Fatalf("rolledStatus: want \"\" got %q (regression: short futures split despite v1 cash flow)", rolledStatus)
 	}
 	assertMockExpectations(t, mock)
 }

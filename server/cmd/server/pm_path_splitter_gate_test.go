@@ -9,20 +9,24 @@ import (
 )
 
 // TestSplitterEnabledForSide_Matrix nails down each (side,
-// position_side) cell in the splitter eligibility table. The two
-// safety-critical cells are:
+// position_side) cell in the splitter eligibility table after the
+// T8 short-side unlock. Pre-T8 short was unconditionally rejected
+// because the lot ledger only modeled long lots — splitting a
+// short would silently FIFO-close zero rows per child. T8 added
+// a parallel short-lot model (position_lots.side='short', etc.)
+// so the splitter can now amplify across N children safely on the
+// short axis as long as the OTHER prerequisites hold (e.g.
+// futures still needs the v2 cash flow flag, which the legacy
+// no-config wrapper can't observe).
 //
-//   * "buy" + position_side="short" → false
-//     (a short close — the lot ledger doesn't model short lots
-//     today, splitting would silently FIFO-close zero rows per
-//     child and leak position drift.)
-//   * "sell" + position_side="short" → false
-//     (a short open — symmetric blocker.)
+// Two safety-critical regressions this matrix catches:
 //
-// A regression flipping either of those to true would fan out a
-// 4000-share short-side operation across 5 children whose lot-ledger
-// writes are all no-ops, leaving the holdings table out of sync
-// with the trade_executions stream.
+//   * futures (any side, any position_side) with the legacy
+//     no-config wrapper → STILL false. The wrapper has no
+//     fundConfig, so it falls into the v2-flag-off branch and
+//     rejects.
+//   * unknown sides → false. Anything outside {buy, sell} after
+//     trim+lower is a safety reject.
 func TestSplitterEnabledForSide_Matrix(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -39,16 +43,21 @@ func TestSplitterEnabledForSide_Matrix(t *testing.T) {
 		// Equity with asset_class unset (legacy rows) — still on.
 		{name: "buy + long + unset asset_class", side: "buy", positionSide: "long", assetClass: "", want: true},
 
-		// short-side — splitter blocked regardless of asset_class.
-		{name: "buy + short equity closes a short", side: "buy", positionSide: "short", assetClass: "equity", want: false},
-		{name: "sell + short equity opens a short", side: "sell", positionSide: "short", assetClass: "equity", want: false},
-		{name: "buy + short futures closes a short", side: "buy", positionSide: "short", assetClass: "futures", want: false},
-		{name: "sell + short futures opens a short", side: "sell", positionSide: "short", assetClass: "futures", want: false},
+		// short-side equity — T8 unlocks. The lot ledger now
+		// has a parallel short-side model so a sell-to-open or
+		// buy-to-cover splits cleanly across N children.
+		{name: "buy + short equity covers a short", side: "buy", positionSide: "short", assetClass: "equity", want: true},
+		{name: "sell + short equity opens a short", side: "sell", positionSide: "short", assetClass: "equity", want: true},
 
-		// futures (any long-side) — splitter blocked pending per-child
-		// margin release wiring. Same fail-closed reasoning as short.
-		{name: "buy + long futures open", side: "buy", positionSide: "long", assetClass: "futures", want: false},
-		{name: "sell + long futures close", side: "sell", positionSide: "long", assetClass: "futures", want: false},
+		// short-side futures stays blocked under the legacy
+		// no-config wrapper because the futures branch needs
+		// the v2 cash flow flag (T7) which the wrapper can't see.
+		{name: "buy + short futures rejected (no v2)", side: "buy", positionSide: "short", assetClass: "futures", want: false},
+		{name: "sell + short futures rejected (no v2)", side: "sell", positionSide: "short", assetClass: "futures", want: false},
+
+		// long-side futures — same v2-flag-off reject.
+		{name: "buy + long futures rejected (no v2)", side: "buy", positionSide: "long", assetClass: "futures", want: false},
+		{name: "sell + long futures rejected (no v2)", side: "sell", positionSide: "long", assetClass: "futures", want: false},
 		{name: "buy + unset position_side + futures", side: "buy", positionSide: "", assetClass: "futures", want: false},
 
 		// Unknown sides — fail safe.
@@ -57,7 +66,7 @@ func TestSplitterEnabledForSide_Matrix(t *testing.T) {
 
 		// Case + whitespace normalisation.
 		{name: "BUY upper-case + LONG + EQUITY", side: "BUY", positionSide: "LONG", assetClass: "EQUITY", want: true},
-		{name: "  sell  + Short  + Equity with spaces", side: "  sell  ", positionSide: "  Short  ", assetClass: "  Equity  ", want: false},
+		{name: "  sell  + Short  + Equity with spaces", side: "  sell  ", positionSide: "  Short  ", assetClass: "  Equity  ", want: true},
 		{name: "  buy  + Long + FUTURES with spaces", side: "  buy  ", positionSide: "Long", assetClass: "  FUTURES  ", want: false},
 	}
 
@@ -143,12 +152,38 @@ func TestSplitterEnabledForSideWithConfig_FuturesUnlock(t *testing.T) {
 			want:   true,
 		},
 
-		// Short futures stays blocked even with v2 — short-lot
-		// ledger is the prerequisite there, NOT the cash flow.
-		{name: "futures short + v2 on still rejected",
+		// Short futures with v2 on is NOW enabled — T8 added the
+		// short-lot model and T7 added the per-child cash flow,
+		// so both prerequisites are met.
+		{name: "futures short sell + v2 on enabled (T7+T8)",
 			side: "sell", positionSide: "short", assetClass: "futures",
 			config: json.RawMessage(`{"futures_cash_ledger_v2":true}`),
+			want:   true,
+		},
+		{name: "futures short buy + v2 on enabled (T7+T8 cover)",
+			side: "buy", positionSide: "short", assetClass: "futures",
+			config: json.RawMessage(`{"futures_cash_ledger_v2":true}`),
+			want:   true,
+		},
+		// Short futures with v2 OFF is still blocked because the
+		// cash flow side fails the gate even though the short-lot
+		// side now passes.
+		{name: "futures short + v2 off rejected (cash flow gate)",
+			side: "sell", positionSide: "short", assetClass: "futures",
+			config: json.RawMessage(`{"futures_cash_ledger_v2":false}`),
 			want:   false,
+		},
+
+		// T8 follow-up: short equity is unconditionally on now.
+		{name: "equity short open + nil config enabled (T8)",
+			side: "sell", positionSide: "short", assetClass: "equity",
+			config: nil,
+			want:   true,
+		},
+		{name: "equity short cover + nil config enabled (T8)",
+			side: "buy", positionSide: "short", assetClass: "equity",
+			config: nil,
+			want:   true,
 		},
 
 		// Coexistence with splitter flag: irrelevant — this
