@@ -1556,6 +1556,13 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		fh.RegisterRoutes(mux)
 	}
 
+	// Read-only LLM provider catalog scoped to a fund's owner. Lets
+	// the A/B test creation UI render <select> options for picking
+	// an LLM without exposing admin credential surface. Nil-safe.
+	if ch := newFundLLMCatalogHandler(svc); ch != nil {
+		ch.RegisterRoutes(mux)
+	}
+
 	// ---- SPA fallback: serve React static files ----
 	spa := spaHandler(cfg.StaticFilesPath)
 	mux.Handle("/", spa)

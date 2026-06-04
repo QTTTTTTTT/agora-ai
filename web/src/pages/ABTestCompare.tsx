@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { apiGet, apiPost, formatApiError } from "../lib/api";
+import { apiGet, apiPost, formatApiError, listFundLLMCatalog, type FundLLMCatalogEntry } from "../lib/api";
 import { ABShadowAgentPanel } from "../components/ABShadowAgentPanel";
 import { ABOperationalAttributionTable } from "../components/ABOperationalAttributionTable";
 import {
@@ -169,6 +169,28 @@ interface CreateTestFormData {
   pmStyle: string;
   maxSinglePosition: number;
   durationDays: number;
+  // The mode toggle at the top of the create modal. We intentionally
+  // store the mode in the form rather than as a separate piece of
+  // state so the controlled inputs keep their last value when the
+  // operator flips the toggle and back ("oh wait, I did want
+  // strategy compare after all"). Both modes round-trip through
+  // /api/abtests with variableType='strategy_compare' — the LLM
+  // fields are read by the B-side decider as additional knobs in
+  // strategyConfig (see ab_shadow_bside.go::abStrategyTradeScale).
+  // We deliberately do NOT submit variableType='model_change' here
+  // because that path requires control_fund != treatment_fund (a
+  // separately provisioned fund) and the in-modal flow is single-
+  // fund; if/when a multi-fund picker ships, this becomes the place
+  // to switch.
+  mode: "strategy" | "model";
+  // LLM hints. Empty = "use the fund's default LLM, don't override".
+  // The provider field is the platform string ('openai', 'claude',
+  // 'qwen', ...) — we constrain it to the catalog response so the
+  // server-side router can resolve it without a free-text guard.
+  variantAProvider: string;
+  variantAModelName: string;
+  variantBProvider: string;
+  variantBModelName: string;
 }
 
 const INITIAL_FORM: CreateTestFormData = {
@@ -179,6 +201,11 @@ const INITIAL_FORM: CreateTestFormData = {
   pmStyle: "aggressive",
   maxSinglePosition: 20,
   durationDays: 30,
+  mode: "strategy",
+  variantAProvider: "",
+  variantAModelName: "",
+  variantBProvider: "",
+  variantBModelName: "",
 };
 
 function addDays(date: Date, days: number): Date {
@@ -257,6 +284,23 @@ const CreateTestModal: React.FC<{
             cancel: "Cancel",
             create: "Create test",
             creating: "Creating...",
+            modeLabel: "Compare what?",
+            modeStrategy: "Strategy",
+            modeStrategyHint: "Compare PM style / position limits / summary text. LLM is optional.",
+            modeModel: "LLM model",
+            modeModelHint: "Compare two LLM provider+model pairs against the same strategy.",
+            llmSection: "LLM (optional)",
+            llmSectionRequired: "LLM (required)",
+            llmHint: "Empty = inherit fund default. Pick from the platform catalog.",
+            providerLabel: "Provider",
+            providerPlaceholder: "openai / claude / qwen / ...",
+            modelLabel: "Model name",
+            modelPlaceholder: "gpt-4o / claude-opus-4 / ...",
+            variantAGroup: "A group LLM",
+            variantBGroup: "B group LLM",
+            llmCatalogLoading: "Loading providers…",
+            llmCatalogEmpty: "No providers configured. Ask an admin to enable at least one.",
+            llmCatalogError: "Failed to load providers; you can still type values manually.",
           }
         : {
             title: "新建 A/B 测试",
@@ -276,6 +320,23 @@ const CreateTestModal: React.FC<{
             cancel: "取消",
             create: "创建测试",
             creating: "创建中...",
+            modeLabel: "对比维度",
+            modeStrategy: "策略",
+            modeStrategyHint: "对比 PM 风格 / 仓位上限 / 策略说明，LLM 字段可选填。",
+            modeModel: "模型",
+            modeModelHint: "在同一策略下，对比两个 LLM provider+model。",
+            llmSection: "LLM 模型（可选）",
+            llmSectionRequired: "LLM 模型（必填）",
+            llmHint: "留空 = 沿用基金默认 LLM。下拉选项来自平台 LLM 目录。",
+            providerLabel: "Provider",
+            providerPlaceholder: "openai / claude / qwen / ...",
+            modelLabel: "模型名称",
+            modelPlaceholder: "gpt-4o / claude-opus-4 / ...",
+            variantAGroup: "A 组使用的 LLM",
+            variantBGroup: "B 组使用的 LLM",
+            llmCatalogLoading: "正在加载 provider 列表…",
+            llmCatalogEmpty: "尚未配置任何 provider，请联系管理员启用。",
+            llmCatalogError: "provider 列表加载失败，可手动输入。",
           },
     [language],
   );
@@ -285,6 +346,67 @@ const CreateTestModal: React.FC<{
       setForm({ ...INITIAL_FORM });
     }
   }, [open]);
+
+  // Load the LLM catalog on first open. Empty fundId = no fetch (the
+  // dialog can't submit anyway). Errors are non-fatal: the operator
+  // can still type provider/model strings by hand and the server-side
+  // router will validate them at create-time. We hold the result in
+  // a ref-shaped state because the dropdown listens to it but the
+  // form values track separate refs.
+  const [catalog, setCatalog] = useState<FundLLMCatalogEntry[] | null>(null);
+  const [catalogStatus, setCatalogStatus] = useState<"idle" | "loading" | "empty" | "error">("idle");
+  useEffect(() => {
+    if (!open || !fundId) {
+      return;
+    }
+    let cancelled = false;
+    setCatalogStatus("loading");
+    listFundLLMCatalog(fundId)
+      .then((res) => {
+        if (cancelled) return;
+        const list = res.providers ?? [];
+        setCatalog(list);
+        setCatalogStatus(list.length === 0 ? "empty" : "idle");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCatalog(null);
+        setCatalogStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, fundId]);
+
+  // Distinct providers, preserving the catalog order so the platform
+  // default sorts to the top (the API surfaces it via
+  // is_platform_default and we keep ListAll's default ORDER BY).
+  const providerOptions = useMemo(() => {
+    if (!catalog) return [] as string[];
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    for (const row of catalog) {
+      if (!row.provider || seen.has(row.provider)) continue;
+      seen.add(row.provider);
+      ordered.push(row.provider);
+    }
+    return ordered;
+  }, [catalog]);
+
+  // Models scoped to the selected provider. When provider is empty we
+  // surface the full union so the operator can pick a model first
+  // and we'll auto-fill the provider on selection (handled by the
+  // controlled <select> via a "{provider}|{model}" composite value
+  // — see the model <select> below).
+  const modelsForProvider = useCallback(
+    (provider: string): FundLLMCatalogEntry[] => {
+      if (!catalog) return [];
+      const trimmed = provider.trim();
+      if (!trimmed) return catalog.filter((row) => !!row.model_name);
+      return catalog.filter((row) => row.provider === trimmed && !!row.model_name);
+    },
+    [catalog],
+  );
 
   if (!open) {
     return null;
@@ -317,6 +439,35 @@ const CreateTestModal: React.FC<{
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
             <p>{copy.controlFund}</p>
             <p className="mt-1 break-all font-mono text-xs text-gray-800">{fundId}</p>
+          </div>
+
+          {/* Mode toggle: strategy vs model. We render it as two
+              radio-style buttons rather than a real <input
+              type="radio"> so the active state can flip on click
+              without the form re-emitting an onChange storm. The
+              hint text below changes per mode so the operator
+              understands what each mode submits. */}
+          <div>
+            <label className="mb-2 block text-sm font-medium text-gray-700">{copy.modeLabel}</label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => update("mode", "strategy")}
+                className={`rounded-xl border px-4 py-2.5 text-sm font-medium transition ${form.mode === "strategy" ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"}`}
+              >
+                {copy.modeStrategy}
+              </button>
+              <button
+                type="button"
+                onClick={() => update("mode", "model")}
+                className={`rounded-xl border px-4 py-2.5 text-sm font-medium transition ${form.mode === "model" ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"}`}
+              >
+                {copy.modeModel}
+              </button>
+            </div>
+            <p className="mt-1.5 text-xs text-gray-500">
+              {form.mode === "strategy" ? copy.modeStrategyHint : copy.modeModelHint}
+            </p>
           </div>
 
           <div>
@@ -364,34 +515,150 @@ const CreateTestModal: React.FC<{
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div>
-              <label className="mb-2 block text-sm font-medium text-gray-700">{copy.pmStyle}</label>
-              <select
-                value={form.pmStyle}
-                onChange={(event) => update("pmStyle", event.target.value)}
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
-              >
-                <option value="conservative">conservative</option>
-                <option value="balanced">balanced</option>
-                <option value="aggressive">aggressive</option>
-                <option value="value">value</option>
-                <option value="growth">growth</option>
-              </select>
+          {/* LLM picker block. In "strategy" mode it's optional and
+              renders as a collapsible-feeling section; in "model"
+              mode it's the headline of the experiment so we mark
+              both A/B providers as required. The catalog query is
+              auth-scoped to the fund so an empty list = "platform
+              hasn't enabled any provider for you", which we surface
+              explicitly rather than just hiding the dropdown. */}
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+            <div className="flex items-baseline justify-between">
+              <h3 className="text-sm font-semibold text-gray-800">
+                {form.mode === "model" ? copy.llmSectionRequired : copy.llmSection}
+              </h3>
+              <span className="text-xs text-gray-500">
+                {catalogStatus === "loading"
+                  ? copy.llmCatalogLoading
+                  : catalogStatus === "empty"
+                    ? copy.llmCatalogEmpty
+                    : catalogStatus === "error"
+                      ? copy.llmCatalogError
+                      : copy.llmHint}
+              </span>
             </div>
-            <div>
-              <label className="mb-2 block text-sm font-medium text-gray-700">{copy.maxSinglePosition}</label>
-              <input
-                required
-                min={1}
-                max={100}
-                type="number"
-                value={form.maxSinglePosition}
-                onChange={(event) => update("maxSinglePosition", Number(event.target.value))}
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
-              />
+            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+              {(["A", "B"] as const).map((side) => {
+                const providerKey = side === "A" ? "variantAProvider" : "variantBProvider";
+                const modelKey = side === "A" ? "variantAModelName" : "variantBModelName";
+                const providerVal = form[providerKey];
+                const modelVal = form[modelKey];
+                const isModelRequired = form.mode === "model";
+                const sideLabel = side === "A" ? copy.variantAGroup : copy.variantBGroup;
+                const modelOptions = modelsForProvider(providerVal);
+                return (
+                  <div key={side}>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">{sideLabel}</p>
+                    <label className="mb-1 block text-xs text-gray-600">{copy.providerLabel}</label>
+                    {providerOptions.length > 0 ? (
+                      <select
+                        required={isModelRequired}
+                        value={providerVal}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          update(providerKey, next);
+                          // When the operator switches provider,
+                          // wipe the model so we don't end up
+                          // submitting a (claude, gpt-4o) pair.
+                          if (form[modelKey]) {
+                            const stillValid = modelsForProvider(next).some((row) => row.model_name === form[modelKey]);
+                            if (!stillValid) update(modelKey, "");
+                          }
+                        }}
+                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                      >
+                        <option value="">{form.mode === "model" ? "—" : `(${copy.llmHint.split("。")[0]})`}</option>
+                        {providerOptions.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        required={isModelRequired}
+                        value={providerVal}
+                        onChange={(event) => update(providerKey, event.target.value)}
+                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                        placeholder={copy.providerPlaceholder}
+                      />
+                    )}
+                    <label className="mb-1 mt-2 block text-xs text-gray-600">{copy.modelLabel}</label>
+                    {modelOptions.length > 0 ? (
+                      <select
+                        required={isModelRequired}
+                        value={modelVal}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          update(modelKey, next);
+                          // If the operator picked a model without
+                          // first selecting a provider, infer the
+                          // provider from the catalog row so the
+                          // server-side router gets a valid pair.
+                          if (next && !providerVal) {
+                            const inferred = modelOptions.find((row) => row.model_name === next);
+                            if (inferred) update(providerKey, inferred.provider);
+                          }
+                        }}
+                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                      >
+                        <option value="">—</option>
+                        {modelOptions.map((row, idx) => (
+                          <option
+                            key={`${row.provider}-${row.label ?? ""}-${row.model_name}-${idx}`}
+                            value={row.model_name ?? ""}
+                          >
+                            {row.model_name}
+                            {row.label ? ` · ${row.label}` : ""}
+                            {row.is_platform_default ? " ★" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        required={isModelRequired}
+                        value={modelVal}
+                        onChange={(event) => update(modelKey, event.target.value)}
+                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                        placeholder={copy.modelPlaceholder}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
+
+          {form.mode === "strategy" ? (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">{copy.pmStyle}</label>
+                <select
+                  value={form.pmStyle}
+                  onChange={(event) => update("pmStyle", event.target.value)}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+                >
+                  <option value="conservative">conservative</option>
+                  <option value="balanced">balanced</option>
+                  <option value="aggressive">aggressive</option>
+                  <option value="value">value</option>
+                  <option value="growth">growth</option>
+                </select>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">{copy.maxSinglePosition}</label>
+                <input
+                  required
+                  min={1}
+                  max={100}
+                  type="number"
+                  value={form.maxSinglePosition}
+                  onChange={(event) => update("maxSinglePosition", Number(event.target.value))}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+                />
+              </div>
+            </div>
+          ) : null}
 
           <div>
             <label className="mb-2 block text-sm font-medium text-gray-700">{copy.duration}</label>
@@ -877,6 +1144,42 @@ const ABTestCompare: React.FC = () => {
       try {
         const startDate = new Date();
         const endDate = addDays(startDate, Math.max(data.durationDays - 1, 0));
+        // Trim once and reuse — the server treats whitespace-only
+        // strings as "set" but the router's lookup will then 404
+        // on the (provider, model) pair. Normalising here also
+        // makes the conditional spread below readable.
+        const variantAProvider = data.variantAProvider.trim();
+        const variantAModelName = data.variantAModelName.trim();
+        const variantBProvider = data.variantBProvider.trim();
+        const variantBModelName = data.variantBModelName.trim();
+        // Strategy-compare is the only variableType the in-modal
+        // flow submits today (model_change wants two distinct
+        // funds). The LLM hints ride along in strategyConfig so a
+        // future B-side decider — or operator-facing post-mortem —
+        // can read what model the operator believed B should run.
+        const variantAStrategyConfig: Record<string, unknown> = {
+          source: "current_fund",
+        };
+        if (variantAProvider) variantAStrategyConfig.provider = variantAProvider;
+        if (variantAModelName) variantAStrategyConfig.modelName = variantAModelName;
+
+        const variantBStrategyConfig: Record<string, unknown> = {};
+        if (data.mode === "strategy") {
+          variantBStrategyConfig.pmStyle = data.pmStyle;
+          variantBStrategyConfig.maxSinglePosition = data.maxSinglePosition / 100;
+          variantBStrategyConfig.summary = data.strategySummary.trim();
+        } else {
+          // Model-compare: strategy knobs are inherited from the
+          // fund's current config so the only deliberate variable
+          // is the LLM. We still record the operator's free-text
+          // summary so the post-analysis page can render "B was
+          // run on Claude Opus 4 instead of GPT-4o".
+          variantBStrategyConfig.source = "current_fund";
+          variantBStrategyConfig.summary = data.strategySummary.trim();
+        }
+        if (variantBProvider) variantBStrategyConfig.provider = variantBProvider;
+        if (variantBModelName) variantBStrategyConfig.modelName = variantBModelName;
+
         const created = await apiPost<ApiABTest>("/api/abtests", {
           name: data.name.trim(),
           controlFundId: fundId,
@@ -885,20 +1188,17 @@ const ABTestCompare: React.FC = () => {
           variableConfig: {
             variantA: {
               name: data.variantAName.trim(),
-              strategyConfig: {
-                source: "current_fund",
-              },
+              strategyConfig: variantAStrategyConfig,
             },
             variantB: {
               name: data.variantBName.trim(),
-              strategyConfig: {
-                pmStyle: data.pmStyle,
-                maxSinglePosition: data.maxSinglePosition / 100,
-                summary: data.strategySummary.trim(),
-              },
+              strategyConfig: variantBStrategyConfig,
             },
             strategySummary: data.strategySummary.trim(),
             durationDays: data.durationDays,
+            // Mode is repeated at the top level so analytics can
+            // bucket experiments without parsing variantB.strategyConfig.
+            mode: data.mode,
           },
           startDate: toDateString(startDate),
           endDate: toDateString(endDate),

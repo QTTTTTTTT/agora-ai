@@ -5051,3 +5051,27 @@ export async function deleteFundLLMOverride(
     `/api/funds/${encodeURIComponent(fundId)}/llm-overrides/${encodeURIComponent(overrideId)}`,
   );
 }
+
+export interface FundLLMCatalogEntry {
+  provider: string;
+  label?: string;
+  model_tier?: string;
+  model_name?: string;
+  is_platform_default?: boolean;
+}
+
+export interface ListFundLLMCatalogResponse {
+  providers: FundLLMCatalogEntry[];
+}
+
+// Read-only catalog of LLM providers/models a fund's owner is
+// allowed to pick from. Backed by GET /api/funds/{fundId}/llm-catalog
+// which projects platform_llm_providers (status='enabled') without
+// exposing API key / fingerprint / pricing surface. Used by the A/B
+// test creation modal so operators don't have to memorise provider
+// strings.
+export async function listFundLLMCatalog(fundId: string): Promise<ListFundLLMCatalogResponse> {
+  return apiGet<ListFundLLMCatalogResponse>(
+    `/api/funds/${encodeURIComponent(fundId)}/llm-catalog`,
+  );
+}
