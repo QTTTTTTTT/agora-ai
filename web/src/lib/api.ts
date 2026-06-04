@@ -4381,6 +4381,12 @@ export interface AttributionLesson {
   body: string;
   tags: string[];
   createdAt: string;
+  // i18n contract (server migration 085, S15): same template_key +
+  // payload that MemoryEntry / AgentLearningRecord carry. Optional;
+  // legacy rows leave both unset and the panel falls back to the
+  // English title/body. See web/src/lib/lessonRenderer.ts.
+  templateKey?: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface AttributionResponse {

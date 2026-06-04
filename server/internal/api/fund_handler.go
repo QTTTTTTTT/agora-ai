@@ -1500,6 +1500,21 @@ type AttributionLessonDTO struct {
 	Body      string    `json:"body"`
 	Tags      []string  `json:"tags"`
 	CreatedAt time.Time `json:"createdAt"`
+
+	// i18n contract (server migration 085, S15): when set, the
+	// frontend renders the localised title/body via lessonRenderer.ts
+	// against the user's locale and only falls back to Title/Body when
+	// missing. Both fields are emitted via omitempty so legacy clients
+	// see the same shape they always saw.
+	//
+	// The data is the *same* memories.template_key + memories.payload
+	// row that MemoryEntry / AgentLearningRecord surface — we
+	// deliberately surface it through this DTO too so the
+	// StrategyAttributionPanel and the Memory Center render the same
+	// lesson in the same language for the same user. See
+	// attribution_wiring.go::memoryRowsToLessonDTO for the mapping.
+	TemplateKey string          `json:"templateKey,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
 // AgentSkillService is the read+approval surface for an agent's skill

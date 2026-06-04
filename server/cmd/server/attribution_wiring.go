@@ -24,6 +24,7 @@ import (
 	"context"
 	"database/sql"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/fundai/server/internal/api"
@@ -210,14 +211,31 @@ func sleeveRegimeStatsToDTO(stats []repository.SleeveRegimeStat) []api.SleeveReg
 func memoryRowsToLessonDTO(rows []repository.Memory) []api.AttributionLessonDTO {
 	out := make([]api.AttributionLessonDTO, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, api.AttributionLessonDTO{
+		dto := api.AttributionLessonDTO{
 			Kind:      lessonKindFromTags(row.Tags),
 			Severity:  severityFromTags(row.Tags),
 			Title:     row.Title.String,
 			Body:      row.Content,
 			Tags:      row.Tags,
 			CreatedAt: row.CreatedAt,
-		})
+		}
+		// S15 i18n contract: surface template_key + payload exactly
+		// as they were persisted so the StrategyAttributionPanel
+		// renders in the user's locale via lessonRenderer.ts. Legacy
+		// rows (template_key NULL, written before migration 085)
+		// leave both fields zero — omitempty drops them off the wire
+		// and the frontend keeps using Title/Body unchanged.
+		if row.TemplateKey.Valid && strings.TrimSpace(row.TemplateKey.String) != "" {
+			dto.TemplateKey = row.TemplateKey.String
+			if len(row.Payload) > 0 {
+				// Pass the raw jsonb bytes through verbatim. We avoid
+				// re-marshalling so the JSON encoder emits the exact
+				// bytes Postgres stored, which keeps the field-set
+				// stable for the frontend snapshot tests.
+				dto.Payload = row.Payload
+			}
+		}
+		out = append(out, dto)
 	}
 	// Newest-first for the UI rail.
 	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })

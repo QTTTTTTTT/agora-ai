@@ -8,6 +8,7 @@ import {
   refreshStrategyAttribution,
 } from "../lib/api";
 import { formatDateTimeForLanguage, formatNumberForLanguage, type AppLanguage } from "../lib/preferences";
+import { renderLesson } from "../lib/lessonRenderer";
 
 interface PanelProps {
   fundId?: string;
@@ -314,7 +315,18 @@ const StrategyAttributionPanel: React.FC<PanelProps> = ({ fundId, language }) =>
               </div>
             ) : (
               <ol className="mt-3 space-y-3">
-                {data.lessons.map((lesson, idx) => (
+                {data.lessons.map((lesson, idx) => {
+                  // S15 i18n contract: when the lesson came from the
+                  // structured pipeline, render the localised
+                  // title/body via the shared dictionary; fall back to
+                  // the server-supplied title/body for legacy rows
+                  // that predate migration 085. Kept inside the .map
+                  // closure so the renderer call benefits from React's
+                  // diffing without a hook-per-row.
+                  const rendered = renderLesson(language, lesson.templateKey, lesson.payload);
+                  const renderedTitle = rendered?.title.trim();
+                  const renderedBody = rendered?.body.trim();
+                  return (
                   <li
                     key={`${lesson.kind}-${lesson.createdAt}-${idx}`}
                     className={`rounded-lg border px-4 py-3 ${
@@ -337,10 +349,11 @@ const StrategyAttributionPanel: React.FC<PanelProps> = ({ fundId, language }) =>
                       </div>
                       <span className="text-xs">{formatDateTimeForLanguage(lesson.createdAt, language)}</span>
                     </div>
-                    <p className="mt-2 text-sm font-medium">{lesson.title}</p>
-                    {lesson.body ? <p className="mt-1 whitespace-pre-line text-sm opacity-90">{lesson.body}</p> : null}
+                    <p className="mt-2 text-sm font-medium">{renderedTitle || lesson.title}</p>
+                    {(renderedBody || lesson.body) ? <p className="mt-1 whitespace-pre-line text-sm opacity-90">{renderedBody || lesson.body}</p> : null}
                   </li>
-                ))}
+                  );
+                })}
               </ol>
             )}
           </div>
