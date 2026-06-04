@@ -333,6 +333,18 @@ const pausePayload = {
   avg_pnl_pct: -0.06,
   avg_holding_days: 4.0,
 };
+// sleeveOverallPayload exercises the regime-detector-unavailable
+// fallback. Note the disjoint field set: no `regime`, and the
+// holding-period field is `median_hold_days` (because SleeveStat
+// only carries the median).
+const sleeveOverallPayload = {
+  sleeve: "llm_pm",
+  trade_count: 6,
+  win_rate: 1 / 3,
+  total_pnl: -1444.03,
+  avg_pnl_pct: -0.06,
+  median_hold_days: 3.6,
+};
 
 const SNAPSHOT_CASES: SnapshotCase[] = [
   { key: "attribution.lesson.sleeve_regime_loser", payload: loserPayload },
@@ -340,6 +352,7 @@ const SNAPSHOT_CASES: SnapshotCase[] = [
   { key: "attribution.lesson.sleeve_regime_throttle", payload: throttlePayload },
   { key: "attribution.lesson.sleeve_regime_pause", payload: pausePayload },
   { key: "attribution.lesson.sleeve_regime_winner", payload: winnerPayload },
+  { key: "attribution.lesson.sleeve_overall", payload: sleeveOverallPayload },
   {
     key: "attribution.lesson.insufficient_data.watching",
     payload: { open_lot_count: 7, earliest_opened_at: "2026-05-12", window_days: 30 },
@@ -388,6 +401,12 @@ const SNAPSHOTS: Record<string, { title: string; body: string }> = {
       'Sleeve "trend" is profitable in regime "trend_up" (15 trades, win-rate 73%, PnL +1,240.00)',
     body:
       "Across 15 closed lots in regime trend_up, the trend sleeve recorded a 73% win rate and a cumulative realised P&L of +1,240.00 (avg pnl pct: +8.0%, avg holding 7.0 days). This combination is contributing positively; the LLM PM may want to scale exposure or relax confidence thresholds when regime=trend_up.",
+  },
+  "en-US::attribution.lesson.sleeve_overall::fallback": {
+    title:
+      'Sleeve "llm_pm" is underperforming overall — regime detector returned unspecified (6 trades, win-rate 33%, PnL -1,444.03)',
+    body:
+      'Across 6 closed lots, the llm_pm sleeve recorded a 33% win rate and a cumulative realised P&L of -1,444.03 (avg pnl pct: -6.0%, median holding 3.6 days). The regime detector did not classify any of these lots (regime="unspecified"), so a per-regime breakdown is unavailable. First action: calibrate the regime detector (feature inputs, lookback window, threshold config) so future runs can distinguish trending vs choppy days. Until then, treat the sleeve-wide loss as a flag to investigate, not a directive to pause — the regime breakdown may reveal this is a single-regime problem rather than a sleeve-wide one.',
   },
   "en-US::attribution.lesson.insufficient_data.watching::open=7": {
     title:
@@ -441,6 +460,12 @@ const SNAPSHOTS: Record<string, { title: string; body: string }> = {
     body:
       '在 "trend_up" 行情下共 15 个已平仓批次，"trend" 套件录得 73% 胜率，累计已实现盈亏 +1,240.00（平均收益率 +8.0%，平均持仓 7.0 天）。该组合贡献为正；当 regime=trend_up 时，PM 可考虑加大该套件敞口或放宽信心阈值。',
   },
+  "zh-CN::attribution.lesson.sleeve_overall::fallback": {
+    title:
+      '策略套件 "llm_pm" 整体表现偏弱 — 行情检测器未能分类（6 笔，胜率 33%，盈亏 -1,444.03）',
+    body:
+      '该基金中 "llm_pm" 套件已平仓 6 笔，胜率 33%，累计已实现盈亏 -1,444.03（平均收益率 -6.0%，中位持仓 3.6 天）。注意：行情检测器对这些批次均返回 "unspecified"，因此暂时无法按 (套件, 行情) 拆分查看。建议先排查行情检测器配置（特征输入、回看窗口、判定阈值），让后续的归因能够区分趋势 / 震荡 / 反转。在拿到 regime 拆分之前，不建议直接据此暂停该套件 —— 这个亏损可能集中在某一特定 regime 下，regime 检测器恢复工作后或许会发现只需要在那一种行情下规避，而不是全面停用。',
+  },
   "zh-CN::attribution.lesson.insufficient_data.watching::open=7": {
     title:
       "正在观察 7 个未平仓批次（自 2026-05-12 起）— 最近 30 天还没有完整的回合",
@@ -488,6 +513,9 @@ function snapshotKey(loc: LocaleId, kase: SnapshotCase): string {
   }
   if (kase.key.endsWith(".sleeve_regime_winner")) {
     return `${loc}::${kase.key}::winner`;
+  }
+  if (kase.key.endsWith(".sleeve_overall")) {
+    return `${loc}::${kase.key}::fallback`;
   }
   return `${loc}::${kase.key}`;
 }

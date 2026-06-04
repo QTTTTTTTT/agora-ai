@@ -3622,6 +3622,23 @@ export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = 
         + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
         + '该组合贡献为正；当 regime={regime} 时，PM 可考虑加大该套件敞口或放宽信心阈值。',
     },
+    // Sleeve-overall fallback. Fires when the regime detector
+    // returned "unspecified" for every closed lot of a sleeve, so
+    // the per-regime view above is empty. Body tells the operator
+    // to fix the detector first and treats the sleeve-wide loss
+    // as a flag, not a directive.
+    'attribution.lesson.sleeve_overall': {
+      title:
+        '策略套件 "{sleeve}" 整体表现偏弱 — 行情检测器未能分类（{trade_count|number} 笔，胜率 {win_rate|percent}，盈亏 {total_pnl|signed:2}）',
+      body:
+        '该基金中 "{sleeve}" 套件已平仓 {trade_count|number} 笔，胜率 {win_rate|percent}，'
+        + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，'
+        + '中位持仓 {median_hold_days|number:1} 天）。'
+        + '注意：行情检测器对这些批次均返回 "unspecified"，因此暂时无法按 (套件, 行情) 拆分查看。'
+        + '建议先排查行情检测器配置（特征输入、回看窗口、判定阈值），让后续的归因能够区分趋势 / 震荡 / 反转。'
+        + '在拿到 regime 拆分之前，不建议直接据此暂停该套件 —— 这个亏损可能集中在某一特定 regime 下，'
+        + 'regime 检测器恢复工作后或许会发现只需要在那一种行情下规避，而不是全面停用。',
+    },
     'attribution.lesson.insufficient_data.watching': {
       title:
         '正在观察 {open_lot_count|number} 个未平仓批次（自 {earliest_opened_at|date} 起）— 最近 {window_days|number} 天还没有完整的回合',
@@ -3704,6 +3721,25 @@ export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = 
         + '(avg pnl pct: {avg_pnl_pct|signed_pct}, avg holding {avg_holding_days|number:1} days). '
         + 'This combination is contributing positively; the LLM PM may want to scale exposure '
         + 'or relax confidence thresholds when regime={regime}.',
+    },
+    // Sleeve-overall fallback. Fires only when the regime
+    // detector returned "unspecified" for every closed lot of a
+    // sleeve, so the per-regime view above is empty. Body tells
+    // the operator to fix the detector first and treats the
+    // sleeve-wide loss as a flag, not a directive.
+    'attribution.lesson.sleeve_overall': {
+      title:
+        'Sleeve "{sleeve}" is underperforming overall — regime detector returned unspecified ({trade_count|number} trades, win-rate {win_rate|percent}, PnL {total_pnl|signed:2})',
+      body:
+        'Across {trade_count|number} closed lots, the {sleeve} sleeve recorded a '
+        + '{win_rate|percent} win rate and a cumulative realised P&L of {total_pnl|signed:2} '
+        + '(avg pnl pct: {avg_pnl_pct|signed_pct}, median holding {median_hold_days|number:1} days). '
+        + 'The regime detector did not classify any of these lots (regime="unspecified"), so a '
+        + 'per-regime breakdown is unavailable. First action: calibrate the regime detector '
+        + '(feature inputs, lookback window, threshold config) so future runs can distinguish '
+        + 'trending vs choppy days. Until then, treat the sleeve-wide loss as a flag to investigate, '
+        + 'not a directive to pause — the regime breakdown may reveal this is a single-regime '
+        + 'problem rather than a sleeve-wide one.',
     },
     'attribution.lesson.insufficient_data.watching': {
       title:

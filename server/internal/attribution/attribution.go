@@ -180,6 +180,22 @@ const (
 	// scale into.
 	LessonSleeveRegimeWinner LessonKind = "sleeve_regime_winner"
 
+	// LessonSleeveOverall is the fallback we emit when the
+	// regime detector failed to classify any of a sleeve's
+	// closed lots (every BySleeveRegime row for that sleeve
+	// has regime="" / "unspecified"). Per-regime lessons are
+	// skipped in that case because a per-regime claim against
+	// a placeholder label would be misleading — but staying
+	// silent is worse: the fund's sleeve IS losing money, the
+	// operator just doesn't know it because the regime detector
+	// hasn't been wired up yet. This lesson surfaces the
+	// sleeve-wide rollup with body text that explicitly says
+	// "regime detector unavailable, here's the overall picture
+	// — calibrate the detector before drawing per-regime
+	// conclusions". Severity=warning; we don't recommend
+	// pausing without a regime breakdown.
+	LessonSleeveOverall LessonKind = "sleeve_overall"
+
 	// LessonInsufficientData fires once per Service run if the
 	// fund has zero closed lots in the window. Lets the
 	// dashboard distinguish "no data yet" from "data exists,

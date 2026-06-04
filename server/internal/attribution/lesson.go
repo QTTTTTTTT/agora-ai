@@ -53,6 +53,17 @@ type LessonOptions struct {
 	WinnerMinSampleSize int
 	WinnerWinRateMin    float64
 
+	// Sleeve-overall fallback. Fires only when the regime
+	// detector returned "" / "unspecified" for every row of a
+	// given sleeve (i.e. the per-regime view is useless). At
+	// that point we surface the sleeve-wide rollup so the
+	// operator at least sees the overall picture instead of
+	// total silence. Body text directs them to fix the regime
+	// detector before drawing further conclusions.
+	SleeveOverallMinSampleSize int
+	SleeveOverallWinRateMax    float64
+	SleeveOverallPnLMax        float64 // total_pnl strictly less than this fires the fallback
+
 	// Back-compat knobs. Old call sites passed MinSampleSize /
 	// LossWinRateMax and expected the single-tier behaviour. We
 	// still honour these as a floor for the observing tier so a
@@ -106,6 +117,18 @@ func (o LessonOptions) effective() LessonOptions {
 	// check uses strict-less-than so a PausePnLMax of zero means
 	// "cumulative P&L < 0".
 
+	if out.SleeveOverallMinSampleSize <= 0 {
+		out.SleeveOverallMinSampleSize = 5
+	}
+	if out.SleeveOverallWinRateMax <= 0 {
+		out.SleeveOverallWinRateMax = 0.40
+	}
+	// SleeveOverallPnLMax default = 0 (strictly negative cumulative
+	// P&L). The fallback only fires when the sleeve is actually
+	// hurting; a sleeve with a 35% win rate but positive P&L means
+	// the lottery payoff structure is working and we shouldn't
+	// confuse the user with an "underperforming" lesson.
+
 	// Honour legacy MinSampleSize / LossWinRateMax as a floor on
 	// the OBSERVING tier (the smallest sample bucket). Callers
 	// that explicitly raised these never saw small-sample lessons;
@@ -151,6 +174,19 @@ func GenerateLessons(report AttributionReport, opts LessonOptions) []Lesson {
 		}
 		return sortedLosers[i].TotalPnL < sortedLosers[j].TotalPnL
 	})
+	// Track which sleeves had at least one row with a real
+	// (non-unspecified) regime label. If a sleeve was classified
+	// AT ALL, the per-regime tiered lessons above are the right
+	// view; we don't fall back to the sleeve-overall lesson for
+	// those. A sleeve whose every BySleeveRegime row has
+	// regime="" / "unspecified" is the one that needs the
+	// fallback — the regime detector simply didn't run for it.
+	sleeveHasClassifiedRegime := map[string]bool{}
+	for _, s := range report.BySleeveRegime {
+		if !isUnspecifiedRegime(s.Regime) {
+			sleeveHasClassifiedRegime[s.Sleeve] = true
+		}
+	}
 	for _, s := range sortedLosers {
 		if isUnspecifiedRegime(s.Regime) {
 			continue
@@ -166,6 +202,33 @@ func GenerateLessons(report AttributionReport, opts LessonOptions) []Lesson {
 		case meetsObservingThreshold(s, o):
 			lessons = append(lessons, buildObservingLesson(s))
 		}
+	}
+
+	// ---- Sleeve-overall fallback ----
+	// Only fires for sleeves whose every BySleeveRegime row was
+	// "unspecified" (so the per-regime pass above produced
+	// nothing). The user's reported case: OCS-fund, llm_pm sleeve,
+	// 6 losing lots, all stamped regime=unspecified. Without this
+	// pass the dashboard goes silent; with it, the operator sees
+	// "calibrate your regime detector — meanwhile, here's the
+	// sleeve-wide picture". We DO NOT emit overall lessons for
+	// sleeves that did get classified — those are already covered
+	// by the tiered per-regime lessons.
+	sortedOverall := append([]repository.SleeveStat(nil), report.BySleeve...)
+	sort.SliceStable(sortedOverall, func(i, j int) bool {
+		if sortedOverall[i].WinRate != sortedOverall[j].WinRate {
+			return sortedOverall[i].WinRate < sortedOverall[j].WinRate
+		}
+		return sortedOverall[i].TotalPnL < sortedOverall[j].TotalPnL
+	})
+	for _, s := range sortedOverall {
+		if sleeveHasClassifiedRegime[s.Sleeve] {
+			continue
+		}
+		if !meetsSleeveOverallThreshold(s, o) {
+			continue
+		}
+		lessons = append(lessons, buildSleeveOverallLesson(s))
 	}
 
 	sortedWinners := append([]repository.SleeveRegimeStat(nil), report.BySleeveRegime...)
@@ -243,6 +306,19 @@ func meetsWinThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
 		s.TotalPnL > 0
 }
 
+// meetsSleeveOverallThreshold fires the regime-detector fallback
+// lesson on a single sleeve when the per-regime view above
+// produced nothing for that sleeve (because every row was
+// unspecified). Win-rate ceiling is intentionally tighter than
+// the observing tier (40% vs 50%) — we only emit the fallback
+// when the sleeve is clearly hurting, not just running slightly
+// sub-par; otherwise the operator gets noise instead of signal.
+func meetsSleeveOverallThreshold(s repository.SleeveStat, o LessonOptions) bool {
+	return s.TradeCount >= o.SleeveOverallMinSampleSize &&
+		s.WinRate < o.SleeveOverallWinRateMax &&
+		s.TotalPnL < o.SleeveOverallPnLMax
+}
+
 // Template-key constants. All keys live in one block so a future
 // "rename + bump version" patch is one diff. The shape is enforced
 // by the migration 085 CHECK constraint:
@@ -286,6 +362,22 @@ const (
 	// payload: { sleeve, regime, trade_count, win_rate, total_pnl,
 	//            avg_pnl_pct, avg_holding_days }
 	templateWinner = "attribution.lesson.sleeve_regime_winner"
+	// templateSleeveOverall: attribution.lesson.sleeve_overall
+	// payload: { sleeve, trade_count, win_rate, total_pnl,
+	//            avg_pnl_pct, median_hold_days }
+	//
+	// Differs from the regime tiers in TWO ways:
+	//   1) NO `regime` field (this lesson exists precisely because
+	//      regime classification failed).
+	//   2) `median_hold_days` instead of `avg_holding_days` —
+	//      SleeveStat only carries the median (the cross-tab carries
+	//      the average). The semantic difference is small for a body
+	//      that already says "calibrate your detector first".
+	//
+	// Severity=warning. Body explicitly tells the operator the
+	// regime detector didn't classify any of this sleeve's lots and
+	// that the rollup is therefore the only available view.
+	templateSleeveOverall = "attribution.lesson.sleeve_overall"
 	// templateInsufficientWatching:
 	//   attribution.lesson.insufficient_data.watching
 	// payload: { open_lot_count, earliest_opened_at, window_days }
@@ -506,6 +598,63 @@ func pluralLot(n int) string {
 		return "lot"
 	}
 	return "lots"
+}
+
+// sleeveOverallPayload is the i18n contract for templateSleeveOverall.
+// Keep it disjoint from sleeveRegimePayload — the regime detector
+// failed, so there's no regime to surface; we use MedianHoldDays
+// from SleeveStat since AvgHoldingDays isn't carried at the sleeve
+// rollup level.
+func sleeveOverallPayload(s repository.SleeveStat) map[string]any {
+	return map[string]any{
+		"sleeve":           s.Sleeve,
+		"trade_count":      s.TradeCount,
+		"win_rate":         s.WinRate,
+		"total_pnl":        s.TotalPnL,
+		"avg_pnl_pct":      s.AvgPnLPct,
+		"median_hold_days": s.MedianHoldDays,
+	}
+}
+
+// buildSleeveOverallLesson — fund-wide rollup for a single sleeve.
+// Fires ONLY when GenerateLessons determined no per-regime row for
+// this sleeve was actionable (every regime was unspecified, or
+// every classified row sat below sample threshold). The body
+// explicitly names "regime detector returned unspecified" as the
+// reason so the operator's first action is to fix the detector,
+// not the strategy. Severity=warning — not critical, because
+// without a regime breakdown we can't confidently recommend a
+// portfolio change, just a "look here" flag.
+func buildSleeveOverallLesson(s repository.SleeveStat) Lesson {
+	return Lesson{
+		Kind:     LessonSleeveOverall,
+		Severity: SeverityWarning,
+		Title: fmt.Sprintf(
+			"Sleeve %q is underperforming overall — regime detector returned unspecified (%d trades, win-rate %.0f%%, PnL %.2f)",
+			s.Sleeve, s.TradeCount, s.WinRate*100, s.TotalPnL,
+		),
+		Body: fmt.Sprintf(
+			"Across %d closed lots, the %s sleeve recorded a %.0f%% win rate and a cumulative "+
+				"realised P&L of %.2f (avg pnl pct: %.3f, median holding %.1f days). The regime "+
+				"detector did not classify any of these lots (regime=\"unspecified\"), so a per-"+
+				"regime view is unavailable. First action: calibrate the regime detector (check "+
+				"feature inputs, lookback window, and threshold config) so future runs can "+
+				"distinguish trending vs choppy days. Until then, treat the sleeve-wide loss as "+
+				"a flag to investigate, not a directive to pause — the regime breakdown may "+
+				"reveal this is a single-regime problem rather than a sleeve-wide one.",
+			s.TradeCount, s.Sleeve, s.WinRate*100, s.TotalPnL, s.AvgPnLPct, s.MedianHoldDays,
+		),
+		Tags: []string{"overall", "regime_detector_unavailable", "sleeve:" + s.Sleeve},
+
+		Sleeve:         s.Sleeve,
+		TradeCount:     s.TradeCount,
+		WinRate:        s.WinRate,
+		TotalPnL:       s.TotalPnL,
+		AvgPnLPct:      s.AvgPnLPct,
+		AvgHoldingDays: s.MedianHoldDays,
+		TemplateKey:    templateSleeveOverall,
+		Payload:        sleeveOverallPayload(s),
+	}
 }
 
 func buildWinnerLesson(s repository.SleeveRegimeStat) Lesson {

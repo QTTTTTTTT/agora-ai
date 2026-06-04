@@ -115,13 +115,18 @@ func TestGenerateLessonsEmitsPauseOnLargeSample(t *testing.T) {
 // means the regime detector didn't classify the day. Surfacing a
 // per-regime lesson against a placeholder label implies the
 // detector ran when it didn't, which is worse than silence. The
-// fund-wide BySleeve rollup still captures the same trades.
+// fund-wide BySleeve rollup is checked by the sleeve-overall
+// fallback test below; here we just confirm the per-regime pass
+// is silent when there's nothing classified to compare against.
 func TestGenerateLessonsSkipsUnspecifiedRegime(t *testing.T) {
 	cases := []string{"", "unspecified", "UNSPECIFIED", "  Unspecified  "}
 	for _, regime := range cases {
 		t.Run("regime="+regime, func(t *testing.T) {
 			report := AttributionReport{
 				Window: Window{Days: 30},
+				// Deliberately NO BySleeve rollup, so the sleeve-overall
+				// fallback can't fire either; this isolates the
+				// "per-regime is silent" claim.
 				BySleeveRegime: []repository.SleeveRegimeStat{
 					{Sleeve: "llm_pm", Regime: regime, TradeCount: 35, WinCount: 10, LossCount: 25, TotalPnL: -1800, WinRate: 10.0 / 35.0},
 				},
@@ -130,6 +135,109 @@ func TestGenerateLessonsSkipsUnspecifiedRegime(t *testing.T) {
 				t.Fatalf("expected no lesson when regime is unspecified (%q), got %+v", regime, got)
 			}
 		})
+	}
+}
+
+// TestGenerateLessonsEmitsSleeveOverallWhenAllRegimesUnspecified
+// is the positive companion: when the regime detector returned
+// "unspecified" for every closed lot of a sleeve, the per-regime
+// pass goes silent BUT we still surface the sleeve-wide rollup as
+// a fallback lesson. This is the OCS-fund case the user reported:
+// 6 losing lots all stamped regime=unspecified — without the
+// fallback the dashboard says nothing, with it the operator at
+// least sees "calibrate your regime detector".
+func TestGenerateLessonsEmitsSleeveOverallWhenAllRegimesUnspecified(t *testing.T) {
+	report := AttributionReport{
+		Window: Window{Days: 30},
+		BySleeve: []repository.SleeveStat{
+			{Sleeve: "llm_pm", TradeCount: 6, WinCount: 2, LossCount: 4, TotalPnL: -1444, AvgPnLPct: -0.06, WinRate: 1.0 / 3.0, MedianHoldDays: 3.6},
+		},
+		BySleeveRegime: []repository.SleeveRegimeStat{
+			{Sleeve: "llm_pm", Regime: "unspecified", TradeCount: 6, WinCount: 2, LossCount: 4, TotalPnL: -1444, AvgPnLPct: -0.06, AvgHoldingDays: 3.6, WinRate: 1.0 / 3.0},
+		},
+	}
+	lessons := GenerateLessons(report, LessonOptions{})
+	if len(lessons) != 1 {
+		t.Fatalf("expected 1 sleeve-overall lesson, got %d: %+v", len(lessons), lessons)
+	}
+	l := lessons[0]
+	if l.Kind != LessonSleeveOverall {
+		t.Fatalf("kind: got %q, want %q", l.Kind, LessonSleeveOverall)
+	}
+	if l.Severity != SeverityWarning {
+		t.Fatalf("severity: got %q, want warning (no regime view → flag, not directive)", l.Severity)
+	}
+	if l.Sleeve != "llm_pm" {
+		t.Fatalf("sleeve: got %q want llm_pm", l.Sleeve)
+	}
+	if l.Regime != "" {
+		t.Fatalf("sleeve-overall lesson must NOT carry a regime label, got %q", l.Regime)
+	}
+	if !containsTag(l.Tags, "overall") {
+		t.Fatalf("expected 'overall' tag in %v", l.Tags)
+	}
+	if !containsTag(l.Tags, "regime_detector_unavailable") {
+		t.Fatalf("expected 'regime_detector_unavailable' tag in %v — body needs the hint", l.Tags)
+	}
+}
+
+// TestGenerateLessonsSkipsSleeveOverallWhenAnyRegimeClassified is
+// the dedupe guard: if a sleeve has at least ONE BySleeveRegime
+// row with a real (non-unspecified) regime, the per-regime tiered
+// lessons above already cover that sleeve. We must NOT also emit
+// a sleeve-overall fallback for it — that would double up.
+func TestGenerateLessonsSkipsSleeveOverallWhenAnyRegimeClassified(t *testing.T) {
+	report := AttributionReport{
+		Window: Window{Days: 30},
+		BySleeve: []repository.SleeveStat{
+			{Sleeve: "trend", TradeCount: 8, WinCount: 3, LossCount: 5, TotalPnL: -200, AvgPnLPct: -0.02, WinRate: 0.375, MedianHoldDays: 3},
+		},
+		BySleeveRegime: []repository.SleeveRegimeStat{
+			// One regime IS classified ("chop") and triggers an
+			// observing tier lesson; one is unspecified and is
+			// dropped. The sleeve-overall fallback must NOT fire
+			// because the detector did work for at least one row.
+			{Sleeve: "trend", Regime: "chop", TradeCount: 6, WinCount: 2, LossCount: 4, TotalPnL: -150, AvgPnLPct: -0.02, AvgHoldingDays: 3, WinRate: 1.0 / 3.0},
+			{Sleeve: "trend", Regime: "unspecified", TradeCount: 2, WinCount: 1, LossCount: 1, TotalPnL: -50, AvgPnLPct: -0.01, AvgHoldingDays: 3, WinRate: 0.5},
+		},
+	}
+	lessons := GenerateLessons(report, LessonOptions{})
+	for _, l := range lessons {
+		if l.Kind == LessonSleeveOverall {
+			t.Fatalf("sleeve_overall must not fire when at least one regime is classified; got %+v", l)
+		}
+	}
+	// Sanity: the classified row should still produce its observing lesson.
+	gotObserving := false
+	for _, l := range lessons {
+		if l.Kind == LessonSleeveRegimeObserving {
+			gotObserving = true
+			break
+		}
+	}
+	if !gotObserving {
+		t.Fatalf("expected observing lesson on the classified chop row; got %+v", lessons)
+	}
+}
+
+// TestGenerateLessonsSleeveOverallRequiresLossingProfile ensures
+// the fallback doesn't fire on a sleeve whose total P&L is
+// positive — even if the regime detector failed, a profitable
+// sleeve doesn't need an "underperforming" lesson.
+func TestGenerateLessonsSleeveOverallRequiresLossingProfile(t *testing.T) {
+	report := AttributionReport{
+		Window: Window{Days: 30},
+		BySleeve: []repository.SleeveStat{
+			// Win rate is 30% (below 40% gate) BUT P&L positive →
+			// lottery payoff profile, don't flag.
+			{Sleeve: "lottery", TradeCount: 10, WinCount: 3, LossCount: 7, TotalPnL: 800, AvgPnLPct: 0.08, WinRate: 0.30, MedianHoldDays: 2},
+		},
+		BySleeveRegime: []repository.SleeveRegimeStat{
+			{Sleeve: "lottery", Regime: "unspecified", TradeCount: 10, WinCount: 3, LossCount: 7, TotalPnL: 800, AvgPnLPct: 0.08, AvgHoldingDays: 2, WinRate: 0.30},
+		},
+	}
+	if got := GenerateLessons(report, LessonOptions{}); len(got) != 0 {
+		t.Fatalf("expected no sleeve-overall lesson on profitable sleeve, got %+v", got)
 	}
 }
 

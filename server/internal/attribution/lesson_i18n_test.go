@@ -100,6 +100,32 @@ func TestGenerateLessons_EmitsTemplateAndPayload(t *testing.T) {
 			wantPayloadKeys: []string{"sleeve", "regime", "trade_count", "win_rate", "total_pnl", "avg_pnl_pct", "avg_holding_days"},
 		},
 		{
+			// Sleeve-overall fallback: BySleeve has the rollup, but
+			// every BySleeveRegime row carries an "unspecified"
+			// regime label. The lesson surfaces the sleeve-wide
+			// picture with explicit "regime detector unavailable"
+			// guidance. Payload keys differ on purpose: no `regime`
+			// field, and `median_hold_days` instead of
+			// `avg_holding_days` (because SleeveStat only carries
+			// the median).
+			name: "sleeve overall fallback (regime detector returned unspecified)",
+			report: AttributionReport{
+				Window: Window{Days: 30},
+				BySleeve: []repository.SleeveStat{
+					{Sleeve: "llm_pm", TradeCount: 6, WinCount: 2, LossCount: 4, TotalPnL: -1444, AvgPnLPct: -0.06, WinRate: 1.0 / 3.0, MedianHoldDays: 3.6},
+				},
+				BySleeveRegime: []repository.SleeveRegimeStat{
+					{Sleeve: "llm_pm", Regime: "unspecified", TradeCount: 6, WinCount: 2, LossCount: 4, TotalPnL: -1444, AvgPnLPct: -0.06, AvgHoldingDays: 3.6, WinRate: 1.0 / 3.0},
+				},
+			},
+			wantTemplate:    "attribution.lesson.sleeve_overall",
+			wantPayloadKeys: []string{"sleeve", "trade_count", "win_rate", "total_pnl", "avg_pnl_pct", "median_hold_days"},
+			wantSampleValues: map[string]any{
+				"sleeve":      "llm_pm",
+				"trade_count": 6,
+			},
+		},
+		{
 			name: "insufficient data — watching with earliest",
 			report: AttributionReport{
 				Window:           Window{Days: 30},
