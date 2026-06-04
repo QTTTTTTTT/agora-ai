@@ -42,9 +42,15 @@ import (
 var ErrNotFound = errors.New("alphalesson: not found")
 
 // LessonRow is the projection of an alpha-tagged memory row.
+//
+// AP3 added Visibility, AgentID, and InheritedFromOtherFund.
+// The first two are persisted columns from memories; the third
+// is derived in the read path so the caller (and the UI) can
+// surface a "learned at another fund" badge without re-doing
+// the team-membership join.
 type LessonRow struct {
 	ID              string
-	FundID          string
+	FundID          string // origin fund (always the writer)
 	AgentTag        string
 	Content         string
 	Title           sql.NullString
@@ -52,6 +58,22 @@ type LessonRow struct {
 	SourceOutcomeID sql.NullString
 	TradingDate     sql.NullTime
 	CreatedAt       time.Time
+	// Visibility is the memories.visibility column. New
+	// alpha-tagged rows (post-AP2) are either 'fund' or
+	// 'agent_portable'. Older rows can be 'private' too.
+	Visibility string
+	// AgentID is the UUID FK to agents(id). NULL for legacy
+	// rows whose agent identity was only ever stored in
+	// agent_tag (tag-style strings — see AP2 nullableUUID).
+	AgentID sql.NullString
+	// InheritedFromOtherFund is true iff this row was
+	// retrieved through the cross-fund agent_portable branch
+	// AND the row's own fund_id does NOT match the querying
+	// fund. Equivalently: the lesson originated at a different
+	// fund and is visible here only because the agent that
+	// emitted it is on this fund's team. The UI uses this to
+	// label the lesson with "learned at fund X".
+	InheritedFromOtherFund bool
 }
 
 // Repo persists and reads alpha-tagged memories.
@@ -320,14 +342,72 @@ func (r *Repo) WriteAlphaLessons(ctx context.Context, outcomes []agentreputation
 // --- Reads ----------------------------------------------------------------
 
 // ListLessonsParams filters the alpha-tagged memory listing.
+//
+// AP3 added TeamAgentIDs and AllowAgentPortableImports to
+// support the cross-fund retrieval branch. Callers that haven't
+// migrated yet leave both at their zero values, which collapses
+// the query back to the pre-AP3 fund-scoped behaviour — no
+// silent regressions.
 type ListLessonsParams struct {
-	FundID   string
+	// FundID is the QUERYING fund (the one whose PM prompt is
+	// being built). Lessons whose own fund_id matches are
+	// always returned regardless of visibility.
+	FundID string
+	// AgentTag optionally narrows results to a single
+	// denormalized agent_tag value. Predates AP3.
 	AgentTag string
-	Limit    int
+	// Limit caps the row count. Defaults to 50, capped at 200.
+	Limit int
+	// TeamAgentIDs lists the UUIDs of agents currently on the
+	// querying fund's team (typically the active rows in
+	// fund_team_members for FundID). When non-empty AND
+	// AllowAgentPortableImports is true (or unset), the read
+	// path adds a second branch:
+	//
+	//   visibility = 'agent_portable'
+	//   AND agent_id = ANY($TeamAgentIDs)
+	//   AND sensitivity != 'secret'
+	//
+	// so lessons written at OTHER funds by agents who are now
+	// on THIS fund's team become visible. When empty, the
+	// cross-fund branch is skipped entirely (query collapses
+	// to the legacy fund_id-only filter).
+	TeamAgentIDs []string
+	// AllowAgentPortableImports mirrors the per-fund opt-out
+	// flag (fund.config.allow_agent_portable_imports). The
+	// caller resolves the flag from fund.config and passes the
+	// value here so the repo doesn't need to know about
+	// fund.config layout. Treat ANY default value as opt-IN
+	// because the caller MUST distinguish "flag absent" from
+	// "flag = false"; passing a *bool would be cleaner but
+	// every existing caller would have to be updated. We use
+	// the simpler bool + companion ExplicitlyOptedOut field.
+	AllowAgentPortableImports bool
+	// ExplicitlyOptedOut, when true, hard-disables the
+	// cross-fund branch even if TeamAgentIDs is populated.
+	// This is how a regulated / multi-LP fund refuses to
+	// receive lessons learned at any other fund — without
+	// this flag the caller couldn't distinguish "team empty"
+	// from "import disabled".
+	ExplicitlyOptedOut bool
 }
 
 // ListLessons returns the most-recent alpha-tagged memory rows
-// for a fund, optionally filtered by agent_tag.
+// visible to the querying fund. The result is the UNION of:
+//
+//  1. Lessons whose memories.fund_id matches FundID (legacy
+//     fund-scoped path; unchanged from pre-AP3).
+//  2. Lessons with visibility='agent_portable' whose agent_id
+//     is in TeamAgentIDs and sensitivity != 'secret' (AP3
+//     cross-fund branch; opt-out via ExplicitlyOptedOut).
+//
+// Rows that match BOTH branches (e.g. an agent_portable lesson
+// emitted at this same fund — common: the writer stamps both
+// fields) appear ONCE because OR is set semantics in SQL.
+//
+// Each returned row carries Visibility, AgentID, and a derived
+// InheritedFromOtherFund flag the UI can use to label the
+// lesson with its origin fund (AP8 surfaces it as a badge).
 func (r *Repo) ListLessons(ctx context.Context, p ListLessonsParams) ([]LessonRow, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("alphalesson: repo not initialised")
@@ -339,14 +419,41 @@ func (r *Repo) ListLessons(ctx context.Context, p ListLessonsParams) ([]LessonRo
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	conds := []string{"fund_id = $1", "agent_tag IS NOT NULL"}
+
+	// Filter team agent IDs through nullableUUID so a single
+	// bad string in the caller-supplied slice doesn't blow up
+	// the whole query at Postgres cast time. Same defensive
+	// posture as the write path.
+	cleanTeam := make([]string, 0, len(p.TeamAgentIDs))
+	for _, id := range p.TeamAgentIDs {
+		if v := nullableUUID(id); v.Valid {
+			cleanTeam = append(cleanTeam, v.String)
+		}
+	}
+	crossFundBranchEnabled := !p.ExplicitlyOptedOut && len(cleanTeam) > 0
+
 	args := []interface{}{p.FundID}
+	// Build the WHERE clause incrementally so the query shape
+	// is identical for unit-test sqlmock pinning whether the
+	// cross-fund branch is on or off.
+	conds := []string{"agent_tag IS NOT NULL"}
+	if crossFundBranchEnabled {
+		args = append(args, pq.Array(cleanTeam))
+		// Branch 1 OR branch 2, parenthesised so the
+		// agent_tag-IS-NOT-NULL filter applies to both.
+		conds = append(conds, fmt.Sprintf(
+			"(fund_id = $1 OR (visibility = 'agent_portable' AND agent_id = ANY($%d::uuid[]) AND sensitivity <> 'secret'))",
+			len(args),
+		))
+	} else {
+		conds = append(conds, "fund_id = $1")
+	}
 	if strings.TrimSpace(p.AgentTag) != "" {
 		args = append(args, p.AgentTag)
 		conds = append(conds, fmt.Sprintf("agent_tag = $%d", len(args)))
 	}
 	args = append(args, limit)
-	q := fmt.Sprintf(`SELECT id, fund_id, agent_tag, content, title,
+	q := fmt.Sprintf(`SELECT id, fund_id, agent_id, visibility, agent_tag, content, title,
 	                         alpha_vs_benchmark, source_outcome_id, trading_date, created_at
 	                    FROM memories
 	                   WHERE %s
@@ -361,14 +468,27 @@ func (r *Repo) ListLessons(ctx context.Context, p ListLessonsParams) ([]LessonRo
 	for rows.Next() {
 		var l LessonRow
 		var agentTag sql.NullString
+		var visibility sql.NullString
 		if err := rows.Scan(
-			&l.ID, &l.FundID, &agentTag, &l.Content, &l.Title,
+			&l.ID, &l.FundID, &l.AgentID, &visibility, &agentTag, &l.Content, &l.Title,
 			&l.AlphaVsBench, &l.SourceOutcomeID, &l.TradingDate, &l.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("alphalesson: scan lesson: %w", err)
 		}
 		if agentTag.Valid {
 			l.AgentTag = agentTag.String
+		}
+		if visibility.Valid {
+			l.Visibility = visibility.String
+		}
+		// Derived flag: a row is "inherited from another fund"
+		// when its own fund_id is different from the querying
+		// fund AND its visibility is agent_portable. The
+		// fund_id-only branch can never produce inherited
+		// rows; the cross-fund branch produces them whenever
+		// the writer fund differs from the reader fund.
+		if l.Visibility == "agent_portable" && l.FundID != p.FundID {
+			l.InheritedFromOtherFund = true
 		}
 		out = append(out, l)
 	}

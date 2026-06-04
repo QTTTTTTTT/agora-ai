@@ -103,9 +103,9 @@ func TestBuildContext_RendersLeaderboardAndLessons(t *testing.T) {
 	lessonRepo := NewRepo(lessonDB)
 	lessonMock.ExpectQuery("FROM memories").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "fund_id", "agent_tag", "content", "title",
+			"id", "fund_id", "agent_id", "visibility", "agent_tag", "content", "title",
 			"alpha_vs_benchmark", "source_outcome_id", "trading_date", "created_at",
-		}).AddRow("l1", "f1", "fund_analyst", "lesson body",
+		}).AddRow("l1", "f1", nil, "fund", "fund_analyst", "lesson body",
 			sql.NullString{String: "lesson title", Valid: true},
 			0.015, "o1", now, now))
 
