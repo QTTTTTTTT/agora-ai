@@ -334,6 +334,19 @@ type Memory struct {
 	Tags            []string       `json:"tags"`
 	CreatedAt       time.Time      `json:"createdAt"`
 	UpdatedAt       time.Time      `json:"updatedAt"`
+
+	// TemplateKey + Payload power the i18n render path (migration 085).
+	// Both are NULL/empty for legacy or non-AI-generated rows — callers
+	// fall back to Content in that case. When set, the UI looks up
+	// messages[locale][TemplateKey] and interpolates Payload with
+	// locale-aware number formatting. See docs/I18N_TEMPLATE_VERSIONING.md.
+	TemplateKey sql.NullString `json:"templateKey"`
+	// Payload is the raw jsonb bytes. We deliberately keep it as
+	// json.RawMessage rather than decoding here so the API layer can
+	// pass it through to the client without re-marshalling — fewer
+	// allocations on the hot list path, and the client decides the
+	// shape based on TemplateKey.
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 type ABTest struct {
@@ -2257,15 +2270,27 @@ func (r *MemoryRepo) Create(ctx context.Context, m *Memory) (string, error) {
 	applyMemoryDefaults(m)
 	var id string
 	err := r.db.QueryRowContext(ctx,
-		`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, template_key, payload)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING id`,
 		m.FundID, m.AgentID, m.OwnerUserID, m.Visibility, m.Sensitivity, m.OriginKind, m.SourceListingID, m.Layer, m.Title, m.Content, m.TradingDate, pq.Array(m.Tags),
+		m.TemplateKey, memoryPayloadArg(m.Payload),
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("memory_repo: create: %w", err)
 	}
 	return id, nil
+}
+
+// memoryPayloadArg normalises a Payload field for INSERT. An empty or
+// "null" RawMessage becomes a nil interface{} so pq sends a proper SQL
+// NULL — passing a zero-length []byte would trip the jsonb parser with
+// "invalid input syntax for type json".
+func memoryPayloadArg(p json.RawMessage) any {
+	if len(p) == 0 || string(p) == "null" {
+		return nil
+	}
+	return []byte(p)
 }
 
 // applyMemoryDefaults backfills constraint-required string fields when
@@ -2297,7 +2322,7 @@ func applyMemoryDefaults(m *Memory) {
 
 func (r *MemoryRepo) ListByFund(ctx context.Context, fundID, layer string, limit int) ([]Memory, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at
+		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at, template_key, payload
 		 FROM memories
 		 WHERE fund_id = $1 AND layer = $2
 		 ORDER BY created_at DESC LIMIT $3`, fundID, layer, limit,
@@ -2359,7 +2384,7 @@ func (r *MemoryRepo) ExistsByFundAgentLayerDate(ctx context.Context, fundID stri
 
 func (r *MemoryRepo) ListByFundAndDate(ctx context.Context, fundID string, tradingDate time.Time, limit int) ([]Memory, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at
+		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at, template_key, payload
 		 FROM memories
 		 WHERE fund_id = $1 AND trading_date = $2
 		 ORDER BY created_at DESC LIMIT $3`,
@@ -2375,7 +2400,7 @@ func (r *MemoryRepo) ListByFundAndDate(ctx context.Context, fundID string, tradi
 func (r *MemoryRepo) Search(ctx context.Context, fundID, layer, keyword string) ([]Memory, error) {
 	pattern := "%" + keyword + "%"
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at
+		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at, template_key, payload
 		 FROM memories
 		 WHERE fund_id = $1 AND layer = $2 AND (content ILIKE $3 OR title ILIKE $3)
 		 ORDER BY created_at DESC`, fundID, layer, pattern,
@@ -2389,7 +2414,7 @@ func (r *MemoryRepo) Search(ctx context.Context, fundID, layer, keyword string) 
 
 func (r *MemoryRepo) GetByAgent(ctx context.Context, fundID, agentID string) ([]Memory, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at
+		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at, template_key, payload
 		 FROM memories
 		 WHERE fund_id = $1 AND agent_id = $2
 		 ORDER BY created_at DESC`, fundID, agentID,
@@ -2407,7 +2432,7 @@ func (r *MemoryRepo) GetByAgent(ctx context.Context, fundID, agentID string) ([]
 // to a single fund (mirrors the F3 reflection isolation invariant).
 func (r *MemoryRepo) GetByAgentAndLayer(ctx context.Context, fundID, agentID, layer string) ([]Memory, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at
+		`SELECT id, fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, created_at, updated_at, template_key, payload
 		 FROM memories
 		 WHERE fund_id = $1 AND agent_id = $2 AND layer = $3
 		 ORDER BY created_at DESC`, fundID, agentID, layer,
@@ -2429,10 +2454,11 @@ func (r *MemoryRepo) CreateWithTx(ctx context.Context, tx *sql.Tx, m *Memory) (s
 	applyMemoryDefaults(m)
 	var id string
 	err := tx.QueryRowContext(ctx,
-		`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, template_key, payload)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING id`,
 		m.FundID, m.AgentID, m.OwnerUserID, m.Visibility, m.Sensitivity, m.OriginKind, m.SourceListingID, m.Layer, m.Title, m.Content, m.TradingDate, pq.Array(m.Tags),
+		m.TemplateKey, memoryPayloadArg(m.Payload),
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("memory_repo: create (tx): %w", err)
@@ -2479,9 +2505,18 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var memories []Memory
 	for rows.Next() {
 		var m Memory
+		// payloadBytes is the raw jsonb octet stream Postgres returns;
+		// we re-wrap it as json.RawMessage so the API can pass it
+		// through without re-marshalling. A NULL payload column lands
+		// as nil and the field stays empty — the response DTO omits
+		// it via the `omitempty` tag.
+		var payloadBytes []byte
 		if err := rows.Scan(&m.ID, &m.FundID, &m.AgentID, &m.OwnerUserID, &m.Visibility, &m.Sensitivity, &m.OriginKind, &m.SourceListingID, &m.Layer, &m.Title,
-			&m.Content, &m.TradingDate, pq.Array(&m.Tags), &m.CreatedAt, &m.UpdatedAt); err != nil {
+			&m.Content, &m.TradingDate, pq.Array(&m.Tags), &m.CreatedAt, &m.UpdatedAt, &m.TemplateKey, &payloadBytes); err != nil {
 			return nil, fmt.Errorf("memory_repo: scan row: %w", err)
+		}
+		if len(payloadBytes) > 0 {
+			m.Payload = json.RawMessage(payloadBytes)
 		}
 		memories = append(memories, m)
 	}

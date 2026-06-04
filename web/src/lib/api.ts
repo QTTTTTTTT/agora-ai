@@ -3517,6 +3517,9 @@ export interface DecisionTraceReviewEntry {
   tags?: string[];
   createdAt: string;
   updatedAt: string;
+  // i18n contract (server migration 085). See lessonRenderer.ts.
+  templateKey?: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface DecisionTraceReview {
@@ -3630,6 +3633,13 @@ export interface AgentLearningRecord {
   revoked?: boolean;
   revokedReason?: string;
   revokedAt?: string;
+  // i18n contract (server migration 085): present iff this record was
+  // emitted by the structured lesson pipeline. Renderers should prefer
+  // these over `title` / `summary` and fall back to them when missing.
+  // `payload` is the raw value Object the template interpolates against —
+  // see lessonMessages in @fundai/api-client for the per-template schema.
+  templateKey?: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface AgentLearningStatus {

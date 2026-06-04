@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { apiGet, formatApiError } from "../lib/api";
 import { formatDateForLanguage, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
+import { renderLesson } from "../lib/lessonRenderer";
 
 import type { MemoryLayer as SharedMemoryLayer } from "@fundai/api-client";
 
@@ -31,6 +32,10 @@ interface MemoryEntry {
   tags?: string[];
   createdAt: string;
   updatedAt: string;
+  // i18n contract (server migration 085): see lessonMessages in
+  // @fundai/api-client. Optional; legacy rows leave both unset.
+  templateKey?: string;
+  payload?: Record<string, unknown>;
 }
 
 interface MemoryContextResponse {
@@ -387,8 +392,30 @@ const MemoryCenter: React.FC = () => {
   );
 
   const displayTitle = useCallback(
-    (entry: MemoryEntry) => entry.title?.trim() || `${layerMeta[entry.layer].label}${language === "en-US" ? " entry" : "条目"}`,
+    (entry: MemoryEntry) => {
+      // Prefer the localised template render when the row was emitted
+      // by the structured-i18n pipeline (server migration 085); fall
+      // back to the legacy DB title and finally to a layer-named
+      // placeholder so old rows keep working.
+      const rendered = renderLesson(language, entry.templateKey, entry.payload);
+      return (
+        rendered?.title.trim() ||
+        entry.title?.trim() ||
+        `${layerMeta[entry.layer].label}${language === "en-US" ? " entry" : "条目"}`
+      );
+    },
     [language, layerMeta],
+  );
+
+  // displayBody resolves the description shown in the right-hand
+  // detail pane. Same precedence as displayTitle: rendered template
+  // first, raw English content second.
+  const displayBody = useCallback(
+    (entry: MemoryEntry) => {
+      const rendered = renderLesson(language, entry.templateKey, entry.payload);
+      return rendered?.body.trim() || entry.content;
+    },
+    [language],
   );
 
   const agentLabels = useMemo(() => {
@@ -846,7 +873,7 @@ const MemoryCenter: React.FC = () => {
                   </div>
                 ) : null}
                 <div className="mt-4 border-t border-gray-100 pt-4">
-                  <MarkdownBlock text={selectedEntry.content} />
+                  <MarkdownBlock text={displayBody(selectedEntry)} />
                 </div>
               </div>
             ) : (

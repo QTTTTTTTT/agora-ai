@@ -110,6 +110,62 @@ func meetsWinThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
 		s.TotalPnL > 0
 }
 
+// Template-key constants. All keys live in one block so a future
+// "rename + bump version" patch is one diff. The shape is enforced
+// by the migration 085 CHECK constraint:
+//
+//	^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+(\.v[0-9]+)?$
+//
+// Add a `.v2` suffix the first time the payload's field set changes
+// in a non-additive way (rename, retype, remove). Keep the unversioned
+// key for the original schema; the frontend dictionary keeps both
+// until the older memories age out of the 30-day replay window.
+//
+// Each constant is paired with a payload-shape comment so the
+// frontend (lessonRenderer.tsx) can be written against this contract
+// without round-tripping through me.
+const (
+	// templateLoser:  attribution.lesson.sleeve_regime_loser
+	// payload: { sleeve, regime, trade_count, win_rate, total_pnl,
+	//            avg_pnl_pct, avg_holding_days }
+	templateLoser = "attribution.lesson.sleeve_regime_loser"
+	// templateWinner: attribution.lesson.sleeve_regime_winner
+	// payload: { sleeve, regime, trade_count, win_rate, total_pnl,
+	//            avg_pnl_pct, avg_holding_days }
+	templateWinner = "attribution.lesson.sleeve_regime_winner"
+	// templateInsufficientWatching:
+	//   attribution.lesson.insufficient_data.watching
+	// payload: { open_lot_count, earliest_opened_at, window_days }
+	// Fires when there are open lots AND we know the earliest open
+	// date — gives the user a concrete "we are watching X since Y".
+	templateInsufficientWatching = "attribution.lesson.insufficient_data.watching"
+	// templateInsufficientWatchingNoDate:
+	//   attribution.lesson.insufficient_data.watching_no_date
+	// payload: { open_lot_count, window_days }
+	// Same situation but the earliest date is unknown (legacy data).
+	templateInsufficientWatchingNoDate = "attribution.lesson.insufficient_data.watching_no_date"
+	// templateInsufficientEmpty:
+	//   attribution.lesson.insufficient_data.empty
+	// payload: { window_days }
+	// No closed AND no open lots — brand-new fund, no observation yet.
+	templateInsufficientEmpty = "attribution.lesson.insufficient_data.empty"
+)
+
+// loserPayload + winnerPayload share the same field set; we keep
+// two helpers so a future divergence (e.g. only winners get a
+// "scale_suggestion" hint) doesn't have to thread a flag through.
+func sleeveRegimePayload(s repository.SleeveRegimeStat) map[string]any {
+	return map[string]any{
+		"sleeve":           s.Sleeve,
+		"regime":           s.Regime,
+		"trade_count":      s.TradeCount,
+		"win_rate":         s.WinRate, // raw 0..1 ratio; UI multiplies by 100
+		"total_pnl":        s.TotalPnL,
+		"avg_pnl_pct":      s.AvgPnLPct,
+		"avg_holding_days": s.AvgHoldingDays,
+	}
+}
+
 func buildLoserLesson(s repository.SleeveRegimeStat) Lesson {
 	return Lesson{
 		Kind:     LessonSleeveRegimeLoser,
@@ -134,6 +190,8 @@ func buildLoserLesson(s repository.SleeveRegimeStat) Lesson {
 		TotalPnL:       s.TotalPnL,
 		AvgPnLPct:      s.AvgPnLPct,
 		AvgHoldingDays: s.AvgHoldingDays,
+		TemplateKey:    templateLoser,
+		Payload:        sleeveRegimePayload(s),
 	}
 }
 
@@ -169,7 +227,14 @@ func buildInsufficientDataLesson(report AttributionReport) Lesson {
 					"Until then, no win-rate or P&L lessons can be issued.",
 				report.OpenLotCount, pluralLot(report.OpenLotCount), earliest,
 			),
-			Tags: []string{"insufficient_data", "observing"},
+			Tags:        []string{"insufficient_data", "observing"},
+			TemplateKey: templateInsufficientWatching,
+			Payload: map[string]any{
+				"open_lot_count": report.OpenLotCount,
+				// ISO-8601 UTC midnight; UI re-formats to its locale.
+				"earliest_opened_at": earliest,
+				"window_days":        report.Window.Days,
+			},
 		}
 	case report.OpenLotCount > 0:
 		return Lesson{
@@ -184,15 +249,24 @@ func buildInsufficientDataLesson(report AttributionReport) Lesson {
 					"per-regime scorecard once the first sell closes one of them.",
 				report.OpenLotCount, pluralLot(report.OpenLotCount),
 			),
-			Tags: []string{"insufficient_data", "observing"},
+			Tags:        []string{"insufficient_data", "observing"},
+			TemplateKey: templateInsufficientWatchingNoDate,
+			Payload: map[string]any{
+				"open_lot_count": report.OpenLotCount,
+				"window_days":    report.Window.Days,
+			},
 		}
 	default:
 		return Lesson{
-			Kind:     LessonInsufficientData,
-			Severity: SeverityInfo,
-			Title:    fmt.Sprintf("No closed trades in the last %d days", report.Window.Days),
-			Body:     "Attribution will populate once the fund has produced its first realized P&L.",
-			Tags:     []string{"insufficient_data"},
+			Kind:        LessonInsufficientData,
+			Severity:    SeverityInfo,
+			Title:       fmt.Sprintf("No closed trades in the last %d days", report.Window.Days),
+			Body:        "Attribution will populate once the fund has produced its first realized P&L.",
+			Tags:        []string{"insufficient_data"},
+			TemplateKey: templateInsufficientEmpty,
+			Payload: map[string]any{
+				"window_days": report.Window.Days,
+			},
 		}
 	}
 }
@@ -227,5 +301,7 @@ func buildWinnerLesson(s repository.SleeveRegimeStat) Lesson {
 		TotalPnL:       s.TotalPnL,
 		AvgPnLPct:      s.AvgPnLPct,
 		AvgHoldingDays: s.AvgHoldingDays,
+		TemplateKey:    templateWinner,
+		Payload:        sleeveRegimePayload(s),
 	}
 }

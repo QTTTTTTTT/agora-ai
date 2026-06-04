@@ -10868,6 +10868,16 @@ func convertMemoryEntry(memory *repository.Memory) api.MemoryEntry {
 	if memory.TradingDate.Valid {
 		result.TradingDate = memory.TradingDate.Time.Format("2006-01-02")
 	}
+	if memory.TemplateKey.Valid && strings.TrimSpace(memory.TemplateKey.String) != "" {
+		result.TemplateKey = memory.TemplateKey.String
+		// The repo already returns Payload as a json.RawMessage; we
+		// pass it through unchanged so the wire format is the
+		// caller's bytes verbatim. No copy because RawMessage is
+		// just a []byte alias and the response gets Marshalled once.
+		if len(memory.Payload) > 0 {
+			result.Payload = memory.Payload
+		}
+	}
 	return result
 }
 
@@ -10879,6 +10889,11 @@ func convertAgentLearningRecord(memory *repository.Memory) api.AgentLearningReco
 		Title:       entry.Title,
 		Tags:        entry.Tags,
 		CreatedAt:   entry.CreatedAt,
+		// Carry the i18n contract through to the agent-learning UI.
+		// MemoryEntry already trimmed/validated TemplateKey, so we
+		// just propagate the same field set verbatim.
+		TemplateKey: entry.TemplateKey,
+		Payload:     entry.Payload,
 	}
 	if memory == nil {
 		return record

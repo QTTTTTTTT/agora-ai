@@ -6,6 +6,7 @@ import {
   type AppLanguage,
   type DisplayCurrency,
 } from "../../lib/preferences";
+import { renderLesson } from "../../lib/lessonRenderer";
 import { MetaBadge } from "./MetaBadge";
 import { humanizeValue } from "./helpers";
 import type { ExecutionTraceView } from "./types";
@@ -241,14 +242,22 @@ function TraceboardCardInner({
         <h4 className="text-sm font-semibold text-gray-900">{labels.reviewMemory}</h4>
         {reviewEntries.length > 0 ? (
           <div className="mt-4 grid gap-3 lg:grid-cols-2">
-            {reviewEntries.map((entry) => (
+            {reviewEntries.map((entry) => {
+              // Server migration 085: structured-i18n render path.
+              // Falls back to legacy title/content when templateKey is
+              // missing or unknown (LocaleId fallback handled inside
+              // renderLesson — we never see "{field}"-shaped output).
+              const rendered = renderLesson(language, entry.templateKey, entry.payload);
+              const renderedTitle = rendered?.title.trim();
+              const renderedBody = rendered?.body.trim();
+              return (
               <div key={entry.id} className="rounded-lg bg-white p-4">
                 <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-medium text-gray-900">{entry.title?.trim() || humanizeValue(entry.layer, labels.reviewMemory)}</p>
+                  <p className="font-medium text-gray-900">{renderedTitle || entry.title?.trim() || humanizeValue(entry.layer, labels.reviewMemory)}</p>
                   <MetaBadge>{labels.reviewLayer}: {humanizeValue(entry.layer, labels.notRecorded)}</MetaBadge>
                   {entry.agentId ? <MetaBadge>{entry.agentId}</MetaBadge> : null}
                 </div>
-                <p className="mt-3 whitespace-pre-line text-sm leading-7 text-gray-700">{entry.content}</p>
+                <p className="mt-3 whitespace-pre-line text-sm leading-7 text-gray-700">{renderedBody || entry.content}</p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {(entry.tags ?? []).map((tag) => (
                     <span key={`${entry.id}-${tag}`} className="rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-700">{tag}</span>
@@ -256,7 +265,8 @@ function TraceboardCardInner({
                 </div>
                 <p className="mt-3 text-xs text-gray-500">{labels.reviewUpdatedAt}: {formatDateTimeForLanguage(entry.updatedAt, language)}</p>
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="mt-4 rounded-lg border border-dashed border-gray-200 bg-white p-4 text-sm text-gray-500">{labels.reviewNoEntries}</div>

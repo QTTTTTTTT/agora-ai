@@ -3,6 +3,7 @@ package attribution
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -245,6 +246,22 @@ func buildMemoryRow(fundID, agentID string, tradingDate time.Time, l Lesson) *re
 	}
 	if trimmed := strings.TrimSpace(agentID); trimmed != "" {
 		m.AgentID = sql.NullString{String: trimmed, Valid: true}
+	}
+	// i18n contract (migration 085): when the lesson builder set a
+	// TemplateKey, persist it together with the json-encoded Payload
+	// so the read path can render in the user's locale. We swallow
+	// json.Marshal errors silently and degrade to "no payload" — the
+	// English Body is already in `content` and the UI will show it
+	// when the dictionary lookup misses. This keeps a malformed map
+	// from blocking the whole nightly memory write.
+	if strings.TrimSpace(l.TemplateKey) != "" {
+		m.TemplateKey = sql.NullString{String: l.TemplateKey, Valid: true}
+		if len(l.Payload) > 0 {
+			if buf, err := json.Marshal(l.Payload); err == nil {
+				m.Payload = json.RawMessage(buf)
+			}
+			// else: leave Payload empty; UI falls back to Content.
+		}
 	}
 	return m
 }

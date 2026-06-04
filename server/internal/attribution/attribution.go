@@ -189,6 +189,29 @@ type Lesson struct {
 	TotalPnL       float64
 	AvgPnLPct      float64
 	AvgHoldingDays float64
+
+	// TemplateKey + Payload are the i18n render contract (migration
+	// 085). buildXxxLesson sets both alongside the legacy English
+	// Title / Body so:
+	//   * Old replays / API consumers that only read Title+Body keep
+	//     working unchanged.
+	//   * New UIs render TemplateKey via shared/api-client/src/i18n.ts
+	//     against the user's locale, interpolating Payload with
+	//     Intl.NumberFormat. Title+Body become a fallback for the
+	//     "template not in dictionary yet" case.
+	//
+	// TemplateKey is "" for any Lesson that the i18n pipeline does
+	// not (yet) cover — those rows are persisted with NULL columns
+	// and the UI falls back to Content. We keep this opt-in instead
+	// of an enum-of-required-keys so adding a future Lesson type
+	// doesn't ripple through five files just to deploy.
+	TemplateKey string
+	// Payload is template-specific. Each LessonKind has its own
+	// schema documented next to its build* helper. The map values
+	// are deliberately stored as their native Go types (int, float,
+	// string) — buildMemoryRow marshals them to JSON once at write
+	// time. Nil = no payload.
+	Payload map[string]any
 }
 
 // ---------------------------------------------------------------------------

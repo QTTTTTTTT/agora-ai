@@ -11,7 +11,7 @@
   "scripts": {
     "build:web": "npm run build -w ai-fund-platform",
     "build:shared": "npm run build -w @fundai/api-client",
-    "test:web": "npm run lint -w ai-fund-platform"
+    "test:web": "npm run lint -w ai-fund-platform && npm run test:i18n -w ai-fund-platform"
   },
   "engines": {
     "node": ">=18.18"

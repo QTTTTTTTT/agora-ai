@@ -306,7 +306,7 @@ func TestMemoryRepoCreateFillsDefaultsBeforeInsert(t *testing.T) {
 		TradingDate: sql.NullTime{Time: time.Date(2026, 5, 22, 0, 0, 0, 0, time.UTC), Valid: true},
 	}
 
-	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags)`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO memories (fund_id, agent_id, owner_user_id, visibility, sensitivity, origin_kind, source_listing_id, layer, title, content, trading_date, tags, template_key, payload)`)).
 		WithArgs(
 			"fund-1",                        // fund_id
 			sql.NullString{},                // agent_id
@@ -320,6 +320,8 @@ func TestMemoryRepoCreateFillsDefaultsBeforeInsert(t *testing.T) {
 			`{"summary":"ok"}`,              // content
 			in.TradingDate,                  // trading_date
 			sqlmock.AnyArg(),                // tags (pq.Array wrapped, opaque)
+			sql.NullString{},                // template_key (NULL for legacy lessons)
+			nil,                             // payload (NULL for legacy lessons)
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("memory-1"))
 

@@ -2868,8 +2868,8 @@ export function formatPercent(value: number, digits = 2): string {
   return `${(value * 100).toFixed(digits)}%`;
 }
 
-export { messages, resolveMessage } from "./i18n";
-export type { LocaleId, Messages } from "./i18n";
+export { messages, resolveMessage, lessonMessages } from "./i18n.js";
+export type { LocaleId, Messages, LessonTemplate } from "./i18n.js";
 
 export function formatMoney(value: number, currency = "CNY"): string {
   if (!Number.isFinite(value)) return "—";

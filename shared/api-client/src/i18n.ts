@@ -3501,3 +3501,144 @@ export function resolveMessage(locale: LocaleId, path: string): string {
   }
   return typeof cursor === 'string' ? cursor : path;
 }
+
+// ---------------------------------------------------------------------------
+// Attribution lesson templates (server-side i18n contract — migration 085)
+// ---------------------------------------------------------------------------
+//
+// The server stores AI-generated attribution rows as
+//   { template_key: "attribution.lesson.<kind>[.vN]", payload: {...} }
+// and the frontend renders the localised text by:
+//   1. looking up `lessonMessages[locale][template_key]` here,
+//   2. interpolating the payload via renderLessonTemplate (lessonRenderer.ts),
+//   3. falling back to memories.content if the key is unknown (legacy row
+//      or future template not yet shipped).
+//
+// We keep this in a *separate* exported record from the strict-typed
+// `messages` block above on purpose:
+//
+//   * The set of templates grows over time. Threading every new template
+//     through the Messages interface would force every PR that adds a
+//     lesson to also touch the i18n type — friction with no payoff.
+//   * Each template has a placeholder set (not a constant string), so
+//     the type is `LessonTemplate`, not `string`.
+//   * The CI completeness/placeholder tests walk this record directly;
+//     keeping it flat (and at the file level) makes that walk trivial.
+//
+// Versioning: when the *payload schema* changes in a non-additive way
+// (renamed/removed/retyped field), bump the key with a `.v2` suffix and
+// add the new entry alongside the old one. Keep the old key until the
+// 30-day replay window has aged out the older rows. The frontend will
+// always pick the exact key the server emitted.
+
+export interface LessonTemplate {
+  /** Bold one-liner shown above the body. */
+  title: string;
+  /** Multi-line description. May span 2-3 short sentences. */
+  body: string;
+}
+
+/**
+ * Placeholder grammar inside title/body strings:
+ *
+ *   {field}            → raw value (string / int)
+ *   {field|number}     → Intl.NumberFormat(locale, {})
+ *   {field|number:0}   → fixed digits, e.g. "5"
+ *   {field|number:2}   → fractionDigits=2, e.g. "1,240.50"
+ *   {field|percent}    → ratio 0..1 → "20%"
+ *   {field|percent:1}  → ratio 0..1 → "20.0%"
+ *   {field|signed:2}   → "+1240.50" / "-1240.50"
+ *   {field|signed_pct} → "+8.0%" / "-4.0%" from a ratio
+ *   {field|date}       → already-ISO-8601-yyyy-mm-dd, no transformation
+ *   {field|plural:lot:lots} → "lot" if value === 1 else "lots"
+ *
+ * The renderer is in web/src/lib/lessonRenderer.ts and is the single
+ * source of truth for these tokens — the same string format works in
+ * any locale because Intl handles the heavy lifting.
+ */
+
+export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = {
+  'zh-CN': {
+    'attribution.lesson.sleeve_regime_loser': {
+      title:
+        '策略套件 "{sleeve}" 在 "{regime}" 行情下亏损（{trade_count|number} 笔，胜率 {win_rate|percent}，盈亏 {total_pnl|signed:2}）',
+      body:
+        '在 "{regime}" 行情下共 {trade_count|number} 个已平仓批次，"{sleeve}" 套件录得 {win_rate|percent} 胜率，'
+        + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
+        + '建议在 fund.config.strategySleeves 中暂停该 (套件, 行情) 组合直到行情切换，'
+        + '或加强进场过滤以理解此行情下信号失效的原因。',
+    },
+    'attribution.lesson.sleeve_regime_winner': {
+      title:
+        '策略套件 "{sleeve}" 在 "{regime}" 行情下盈利（{trade_count|number} 笔，胜率 {win_rate|percent}，盈亏 {total_pnl|signed:2}）',
+      body:
+        '在 "{regime}" 行情下共 {trade_count|number} 个已平仓批次，"{sleeve}" 套件录得 {win_rate|percent} 胜率，'
+        + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
+        + '该组合贡献为正；当 regime={regime} 时，PM 可考虑加大该套件敞口或放宽信心阈值。',
+    },
+    'attribution.lesson.insufficient_data.watching': {
+      title:
+        '正在观察 {open_lot_count|number} 个未平仓批次（自 {earliest_opened_at|date} 起）— 最近 {window_days|number} 天还没有完整的回合',
+      body:
+        '归因代理目前在跟踪 {open_lot_count|number} 个尚未平仓的批次（最早开仓于 {earliest_opened_at|date}）。'
+        + '一旦有卖出动作完成首个回合，将开始按 (策略套件, 行情) 输出评分。'
+        + '在此之前，无法生成胜率或盈亏类的反思。',
+    },
+    'attribution.lesson.insufficient_data.watching_no_date': {
+      title:
+        '正在观察 {open_lot_count|number} 个未平仓批次 — 最近 {window_days|number} 天还没有完整的回合',
+      body:
+        '归因代理目前在跟踪 {open_lot_count|number} 个尚未平仓的批次。一旦有卖出动作完成首个回合，'
+        + '将开始按 (策略套件, 行情) 输出评分。',
+    },
+    'attribution.lesson.insufficient_data.empty': {
+      title: '最近 {window_days|number} 天没有已平仓的交易',
+      body: '基金完成首笔已实现盈亏后，归因结果就会自动填充。',
+    },
+  },
+  'en-US': {
+    'attribution.lesson.sleeve_regime_loser': {
+      title:
+        'Sleeve "{sleeve}" is losing money in regime "{regime}" ({trade_count|number} trades, win-rate {win_rate|percent}, PnL {total_pnl|signed:2})',
+      body:
+        'Across {trade_count|number} closed lots in regime {regime}, the {sleeve} sleeve recorded a '
+        + '{win_rate|percent} win rate and a cumulative realised P&L of {total_pnl|signed:2} '
+        + '(avg pnl pct: {avg_pnl_pct|signed_pct}, avg holding {avg_holding_days|number:1} days). '
+        + 'Consider pausing this (sleeve, regime) combination in fund.config.strategySleeves '
+        + 'until conditions change, or instrumenting the entry filter further to understand '
+        + 'why the signal misfires in this regime.',
+    },
+    'attribution.lesson.sleeve_regime_winner': {
+      title:
+        'Sleeve "{sleeve}" is profitable in regime "{regime}" ({trade_count|number} trades, win-rate {win_rate|percent}, PnL {total_pnl|signed:2})',
+      body:
+        'Across {trade_count|number} closed lots in regime {regime}, the {sleeve} sleeve recorded a '
+        + '{win_rate|percent} win rate and a cumulative realised P&L of {total_pnl|signed:2} '
+        + '(avg pnl pct: {avg_pnl_pct|signed_pct}, avg holding {avg_holding_days|number:1} days). '
+        + 'This combination is contributing positively; the LLM PM may want to scale exposure '
+        + 'or relax confidence thresholds when regime={regime}.',
+    },
+    'attribution.lesson.insufficient_data.watching': {
+      title:
+        'Watching {open_lot_count|number} open {open_lot_count|plural:lot:lots} since {earliest_opened_at|date} — no closed roundtrip in the last {window_days|number} days yet',
+      body:
+        'The attribution agent has {open_lot_count|number} still-open {open_lot_count|plural:lot:lots} '
+        + 'under observation (earliest opened on {earliest_opened_at|date}). It will produce a '
+        + 'per-sleeve / per-regime scorecard once the first sell closes one of them. '
+        + 'Until then, no win-rate or P&L lessons can be issued.',
+    },
+    'attribution.lesson.insufficient_data.watching_no_date': {
+      title:
+        'Watching {open_lot_count|number} open {open_lot_count|plural:lot:lots} — no closed roundtrip in the last {window_days|number} days yet',
+      body:
+        'The attribution agent has {open_lot_count|number} still-open {open_lot_count|plural:lot:lots} '
+        + 'under observation. It will produce a per-sleeve / per-regime scorecard once the first '
+        + 'sell closes one of them.',
+    },
+    'attribution.lesson.insufficient_data.empty': {
+      title: 'No closed trades in the last {window_days|number} days',
+      body: 'Attribution will populate once the fund has produced its first realized P&L.',
+    },
+  },
+};
+

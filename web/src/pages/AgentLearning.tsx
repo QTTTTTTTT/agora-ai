@@ -12,6 +12,7 @@ import {
   updateAgentLearningScope,
 } from "../lib/api";
 import { formatDateForLanguage, formatDateTimeForLanguage, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
+import { renderLesson } from "../lib/lessonRenderer";
 import ReflectionsPanel from "../components/ReflectionsPanel";
 import AgentSkillsPanel from "../components/AgentSkillsPanel";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
@@ -449,11 +450,19 @@ const AgentLearning: React.FC = () => {
             <h2 className="text-base font-semibold text-gray-900">{copy.records}</h2>
             <div className="mt-4 space-y-3">
               {(learning?.records ?? []).length === 0 ? <p className="text-sm text-gray-500">{copy.noRecords}</p> : null}
-              {(learning?.records ?? []).map((record) => (
+              {(learning?.records ?? []).map((record) => {
+                // Server migration 085: prefer the localised template
+                // render when present. The structured payload always
+                // wins; fall back to the legacy English title/summary
+                // for rows written by the pre-i18n pipeline.
+                const rendered = renderLesson(language, record.templateKey, record.payload);
+                const renderedTitle = rendered?.title.trim();
+                const renderedBody = rendered?.body.trim();
+                return (
                 <article key={record.id} className="rounded-lg border border-gray-200 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <h3 className="text-sm font-semibold text-gray-900">{record.title || record.summary || record.id}</h3>
+                      <h3 className="text-sm font-semibold text-gray-900">{renderedTitle || record.title || record.summary || record.id}</h3>
                       <p className="mt-1 text-xs text-gray-500">
                         {record.tradingDate ? formatDateForLanguage(record.tradingDate, language) : formatDateTimeForLanguage(record.createdAt, language)}
                         {record.dailyReturn !== undefined ? ` · ${copy.dailyReturn}: ${formatNumberForLanguage(record.dailyReturn * 100, language, { maximumFractionDigits: 2 })}%` : ""}
@@ -461,14 +470,15 @@ const AgentLearning: React.FC = () => {
                     </div>
                     {record.revoked ? <span className="rounded-full bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">{copy.revoked}</span> : null}
                   </div>
-                  {record.summary ? <p className="mt-3 text-sm text-gray-700">{record.summary}</p> : null}
+                  {(renderedBody || record.summary) ? <p className="mt-3 text-sm text-gray-700 whitespace-pre-line">{renderedBody || record.summary}</p> : null}
                   <div className="mt-3 grid gap-3 md:grid-cols-3">
                     <ListBlock title={copy.hits} items={record.hits ?? []} compact />
                     <ListBlock title={copy.misses} items={record.misses ?? []} compact />
                     <ListBlock title={copy.lessons} items={record.lessons ?? []} compact />
                   </div>
                 </article>
-              ))}
+                );
+              })}
             </div>
           </section>
         </main>

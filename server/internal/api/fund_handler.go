@@ -717,6 +717,14 @@ type MemoryEntry struct {
 	Tags        []string  `json:"tags,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
+
+	// TemplateKey + Payload power the i18n render path (migration
+	// 085). When set, the UI renders the localised message via
+	// shared/api-client/src/i18n.ts and falls back to Content
+	// otherwise. Both are omitted from the wire format when unset
+	// so legacy clients see the same shape they always saw.
+	TemplateKey string          `json:"templateKey,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
 type MemoryContext struct {
@@ -752,6 +760,12 @@ type AgentLearningRecord struct {
 	Revoked       bool      `json:"revoked,omitempty"`
 	RevokedReason string    `json:"revokedReason,omitempty"`
 	RevokedAt     string    `json:"revokedAt,omitempty"`
+
+	// i18n contract (migration 085): only present when the lesson
+	// was emitted by the structured pipeline. Frontend prefers this
+	// over Title/Summary when rendering and falls back when missing.
+	TemplateKey string          `json:"templateKey,omitempty"`
+	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
 type AgentLearningStatus struct {
