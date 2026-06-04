@@ -41,6 +41,16 @@ import (
 // ErrNotFound mirrors the rest of the package conventions.
 var ErrNotFound = errors.New("alphalesson: not found")
 
+// regimeTagPrefix namespaces regime tags inside the memories.tags
+// TEXT[] column so the AP5 retrieval filter can pick them out
+// unambiguously. Format: "regime:<value>", e.g. "regime:trend_up".
+// The prefix is also load-bearing for the regime-agnostic
+// fallback: a row whose tags contain ANY string starting with
+// this prefix is considered regime-aware, and one whose tags do
+// not contain such a string is considered regime-agnostic
+// (passes any filter).
+const regimeTagPrefix = "regime:"
+
 // LessonRow is the projection of an alpha-tagged memory row.
 //
 // AP3 added Visibility, AgentID, and InheritedFromOtherFund.
@@ -111,6 +121,23 @@ type WriteOptions struct {
 	Sensitivity string
 	// OriginKind defaults to "alpha_lesson".
 	OriginKind string
+	// RegimeStamp, when non-empty, is added to each lesson's
+	// tags as "regime:<stamp>" (e.g. "regime:trend_up"). This
+	// is the AP5 correctness signal: a cross-fund lesson with
+	// a regime stamp will only be retrieved when the querying
+	// fund passes a matching CurrentRegime in ListLessonsParams
+	// (or no regime filter at all). Lessons without a regime
+	// stamp are treated as regime-agnostic and pass every
+	// regime filter — that's the conservative default for the
+	// pre-AP5 backlog where the stamp was never written.
+	//
+	// The stamp is a per-BATCH annotation because alpha
+	// outcomes computed at end-of-day all share the same
+	// close-of-day regime (the writer computes it once and
+	// passes it in). Per-outcome regime would require
+	// extending agentreputation.Outcome, which is out of scope
+	// for AP5.
+	RegimeStamp string
 }
 
 func (o WriteOptions) normalize() WriteOptions {
@@ -290,6 +317,15 @@ func (r *Repo) WriteAlphaLessons(ctx context.Context, outcomes []agentreputation
 		title := formatLessonTitle(o)
 		content := formatLessonBody(o)
 		tags := lessonTags(o)
+		// AP5: stamp the writer-provided regime onto every
+		// lesson in this batch. We use a "regime:" prefix so
+		// the read path's filter can distinguish a regime tag
+		// from arbitrary user-supplied tags (Outcome.Category,
+		// for instance, could collide with a regime name in
+		// principle — the prefix kills the ambiguity).
+		if stamp := strings.TrimSpace(opts.RegimeStamp); stamp != "" {
+			tags = append(tags, regimeTagPrefix+stamp)
+		}
 		var tradingDate sql.NullTime
 		if !o.AsOf.IsZero() {
 			tradingDate = sql.NullTime{Time: o.AsOf, Valid: true}
@@ -390,6 +426,26 @@ type ListLessonsParams struct {
 	// this flag the caller couldn't distinguish "team empty"
 	// from "import disabled".
 	ExplicitlyOptedOut bool
+	// CurrentRegime, when non-empty, restricts the cross-fund
+	// branch to lessons whose tags include "regime:<value>"
+	// matching this regime — OR lessons that have no regime
+	// tag at all (treated as regime-agnostic and always pass).
+	// The fund-scoped branch (fund_id = $1) is NEVER filtered
+	// by regime because that's an existing-behaviour
+	// invariant: if the lesson lives in YOUR fund's namespace,
+	// you've already chosen to apply it regardless of regime.
+	//
+	// Empty value (the default) disables the regime gate
+	// entirely so callers that haven't migrated yet see no
+	// behavioural change.
+	//
+	// AP5 correctness rationale: a researcher learns "NVDA
+	// gaps up on earnings in tech_rally" and a sister fund
+	// running the same researcher tries to apply it in
+	// bear_2026 — the regime mismatch makes the lesson
+	// actively misleading, not just inapplicable. The gate
+	// prevents that propagation.
+	CurrentRegime string
 }
 
 // ListLessons returns the most-recent alpha-tagged memory rows
@@ -437,13 +493,32 @@ func (r *Repo) ListLessons(ctx context.Context, p ListLessonsParams) ([]LessonRo
 	// is identical for unit-test sqlmock pinning whether the
 	// cross-fund branch is on or off.
 	conds := []string{"agent_tag IS NOT NULL"}
+	currentRegime := strings.TrimSpace(p.CurrentRegime)
 	if crossFundBranchEnabled {
 		args = append(args, pq.Array(cleanTeam))
+		teamArgIdx := len(args)
+
+		// AP5: regime gate on the cross-fund branch. When the
+		// caller passes a CurrentRegime we add a tag-array
+		// check: the lesson must either carry the matching
+		// regime stamp ($regime_tag = ANY(tags)) or carry no
+		// regime stamp at all (the NOT EXISTS unnest). The
+		// fund-scoped branch is NEVER filtered by regime —
+		// see ListLessonsParams.CurrentRegime doc.
+		regimeClause := ""
+		if currentRegime != "" {
+			args = append(args, regimeTagPrefix+currentRegime)
+			regimeClause = fmt.Sprintf(
+				" AND ($%d = ANY(tags) OR NOT EXISTS (SELECT 1 FROM unnest(tags) t WHERE t LIKE 'regime:%%'))",
+				len(args),
+			)
+		}
+
 		// Branch 1 OR branch 2, parenthesised so the
 		// agent_tag-IS-NOT-NULL filter applies to both.
 		conds = append(conds, fmt.Sprintf(
-			"(fund_id = $1 OR (visibility = 'agent_portable' AND agent_id = ANY($%d::uuid[]) AND sensitivity <> 'secret'))",
-			len(args),
+			"(fund_id = $1 OR (visibility = 'agent_portable' AND agent_id = ANY($%d::uuid[]) AND sensitivity <> 'secret'%s))",
+			teamArgIdx, regimeClause,
 		))
 	} else {
 		conds = append(conds, "fund_id = $1")
