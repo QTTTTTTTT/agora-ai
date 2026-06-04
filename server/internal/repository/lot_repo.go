@@ -74,6 +74,13 @@ type PositionLotRow struct {
 	ClosedAt             sql.NullTime
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
+	// Side is "long" (default, pre-T8 baseline) or "short". A short
+	// lot represents a sell-to-open position whose realized PnL on
+	// close has the opposite sign from a long lot. Persisted on
+	// position_lots.side (migration 090). Empty string is treated
+	// as "long" by every reader so historical rows without a side
+	// continue to flow through the long-lot helpers unchanged.
+	Side string
 }
 
 // ClosedLotRow mirrors a row in closed_lots — one realised
@@ -110,6 +117,13 @@ type ClosedLotRow struct {
 	ConfidenceAtEntry      sql.NullFloat64
 	ExitReason             sql.NullString
 	CreatedAt              time.Time
+	// Side mirrors position_lots.side at the moment of close.
+	// "long" (default) means the close walked long lots and the
+	// realized_pnl is signed long-direction: positive when
+	// exit > entry. "short" means the close walked short lots
+	// and realized_pnl is signed short-direction: positive when
+	// entry > exit (cover below the open). Migration 090.
+	Side string
 }
 
 // SleeveStat aggregates closed_lots for a single sleeve within
@@ -227,6 +241,15 @@ func (r *LotRepo) openLot(ctx context.Context, q DBTX, lot *PositionLotRow) (str
 		openedAt = time.Now().UTC()
 	}
 
+	// Side defaults to "long" for back-compat with pre-T8 callers.
+	// The CHECK constraint on position_lots.side rejects anything
+	// other than "long" / "short", so callers passing garbage here
+	// would surface as a write error rather than a silent default.
+	side := strings.ToLower(strings.TrimSpace(lot.Side))
+	if side == "" {
+		side = "long"
+	}
+
 	var id string
 	err := q.QueryRowContext(ctx, `
 INSERT INTO position_lots
@@ -236,14 +259,14 @@ INSERT INTO position_lots
      quantity_opened, quantity_remaining,
      sleeve, regime_at_entry, signal_source, confidence_at_entry,
      highest_price_seen, lowest_price_seen, last_price, last_price_at,
-     status)
+     status, side)
 VALUES ($1, $2, $3, $4, $5,
         $6, $7,
         $8, $9, $10,
         $11, $12,
         $13, $14, $15, $16,
         $17, $18, $19, $20,
-        'open')
+        'open', $21)
 RETURNING id`,
 		lot.FundID, lot.InstrumentKey, lot.Symbol, lot.Market, lot.AssetClass,
 		lot.OpeningTradeID, lot.OpeningPlanActionID,
@@ -251,6 +274,7 @@ RETURNING id`,
 		lot.QuantityOpened, remaining,
 		lot.Sleeve, lot.RegimeAtEntry, lot.SignalSource, lot.ConfidenceAtEntry,
 		lot.HighestPriceSeen, lot.LowestPriceSeen, lot.LastPrice, lot.LastPriceAt,
+		side,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("lot_repo: open lot: %w", err)
@@ -291,6 +315,16 @@ func (r *LotRepo) PartialCloseTx(ctx context.Context, tx DBTX, closeRow *ClosedL
 		return errors.New("lot_repo: close: quantity_closed must be > 0")
 	}
 
+	// Side defaults to "long" for back-compat. Callers using the
+	// pre-T8 buildClosedLot path will leave it empty; the DB's
+	// CHECK constraint on closed_lots.side rejects anything other
+	// than "long" / "short" so a malformed value surfaces as a
+	// write error rather than a silent default.
+	side := strings.ToLower(strings.TrimSpace(closeRow.Side))
+	if side == "" {
+		side = "long"
+	}
+
 	// 1. Insert the closed_lots row. The DB allocates id; we
 	//    read it back so the caller can plumb it into logs / audit.
 	err := tx.QueryRowContext(ctx, `
@@ -302,7 +336,7 @@ INSERT INTO closed_lots
      realized_pnl, realized_pnl_pct,
      max_favorable_excursion, max_adverse_excursion,
      sleeve, regime_at_entry, regime_at_exit, signal_source,
-     confidence_at_entry, exit_reason)
+     confidence_at_entry, exit_reason, side)
 VALUES ($1, $2, $3, $4, $5, $6,
         $7, $8,
         $9, $10, $11,
@@ -310,7 +344,7 @@ VALUES ($1, $2, $3, $4, $5, $6,
         $17, $18,
         $19, $20,
         $21, $22, $23, $24,
-        $25, $26)
+        $25, $26, $27)
 RETURNING id`,
 		closeRow.FundID, closeRow.PositionLotID, closeRow.InstrumentKey, closeRow.Symbol, closeRow.Market, closeRow.AssetClass,
 		closeRow.ClosingTradeID, closeRow.ClosingPlanActionID,
@@ -319,7 +353,7 @@ RETURNING id`,
 		closeRow.RealizedPnL, closeRow.RealizedPnLPct,
 		closeRow.MaxFavorableExcursion, closeRow.MaxAdverseExcursion,
 		closeRow.Sleeve, closeRow.RegimeAtEntry, closeRow.RegimeAtExit, closeRow.SignalSource,
-		closeRow.ConfidenceAtEntry, closeRow.ExitReason,
+		closeRow.ConfidenceAtEntry, closeRow.ExitReason, side,
 	).Scan(&closeRow.ID)
 	if err != nil {
 		return fmt.Errorf("lot_repo: insert closed lot: %w", err)
@@ -370,7 +404,7 @@ SELECT id, fund_id, instrument_key, symbol, market, asset_class,
        quantity_opened, quantity_remaining,
        sleeve, regime_at_entry, signal_source, confidence_at_entry,
        highest_price_seen, lowest_price_seen, last_price, last_price_at,
-       status, closed_at, created_at, updated_at
+       status, closed_at, created_at, updated_at, side
   FROM position_lots`
 
 // ListOpenByInstrument returns every still-open lot for a (fund,
@@ -381,23 +415,41 @@ SELECT id, fund_id, instrument_key, symbol, market, asset_class,
 // idx_position_lots_open_fifo so this is a fast index scan even
 // when the historical closed-lot list is large.
 func (r *LotRepo) ListOpenByInstrument(ctx context.Context, fundID, instrumentKey string) ([]*PositionLotRow, error) {
-	return r.listOpen(ctx, r.db, fundID, instrumentKey)
+	return r.listOpenSide(ctx, r.db, fundID, instrumentKey, "long")
 }
 
 // ListOpenByInstrumentTx is the *sql.Tx variant used by the
 // trade-fill flow so the read sees the same snapshot the
 // subsequent close UPDATEs operate on.
+//
+// Filters to side='long' for back-compat with all pre-T8 callers.
+// Use ListOpenByInstrumentSideTx if you need to read the short side.
 func (r *LotRepo) ListOpenByInstrumentTx(ctx context.Context, tx DBTX, fundID, instrumentKey string) ([]*PositionLotRow, error) {
 	if tx == nil {
 		return nil, ErrNoTx
 	}
-	return r.listOpen(ctx, tx, fundID, instrumentKey)
+	return r.listOpenSide(ctx, tx, fundID, instrumentKey, "long")
 }
 
-func (r *LotRepo) listOpen(ctx context.Context, q DBTX, fundID, instrumentKey string) ([]*PositionLotRow, error) {
+// ListOpenByInstrumentSideTx is the T8 short-side-aware variant.
+// `side` MUST be one of "long" or "short". Mirrors the SQL plan
+// of ListOpenByInstrumentTx (same partial index) and orders by
+// opened_at ASC for FIFO close semantics within the chosen side.
+func (r *LotRepo) ListOpenByInstrumentSideTx(ctx context.Context, tx DBTX, fundID, instrumentKey, side string) ([]*PositionLotRow, error) {
+	if tx == nil {
+		return nil, ErrNoTx
+	}
+	normSide := strings.ToLower(strings.TrimSpace(side))
+	if normSide != "long" && normSide != "short" {
+		return nil, fmt.Errorf("lot_repo: list open by side: invalid side %q (want long|short)", side)
+	}
+	return r.listOpenSide(ctx, tx, fundID, instrumentKey, normSide)
+}
+
+func (r *LotRepo) listOpenSide(ctx context.Context, q DBTX, fundID, instrumentKey, side string) ([]*PositionLotRow, error) {
 	rows, err := q.QueryContext(ctx,
-		positionLotSelect+` WHERE fund_id = $1 AND instrument_key = $2 AND status != 'closed' ORDER BY opened_at ASC, id ASC`,
-		fundID, instrumentKey,
+		positionLotSelect+` WHERE fund_id = $1 AND instrument_key = $2 AND status != 'closed' AND side = $3 ORDER BY opened_at ASC, id ASC`,
+		fundID, instrumentKey, side,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("lot_repo: list open: %w", err)
@@ -762,7 +814,7 @@ func scanPositionLot(s scannable) (*PositionLotRow, error) {
 		&lot.QuantityOpened, &lot.QuantityRemaining,
 		&lot.Sleeve, &lot.RegimeAtEntry, &lot.SignalSource, &lot.ConfidenceAtEntry,
 		&lot.HighestPriceSeen, &lot.LowestPriceSeen, &lot.LastPrice, &lot.LastPriceAt,
-		&lot.Status, &lot.ClosedAt, &lot.CreatedAt, &lot.UpdatedAt,
+		&lot.Status, &lot.ClosedAt, &lot.CreatedAt, &lot.UpdatedAt, &lot.Side,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound

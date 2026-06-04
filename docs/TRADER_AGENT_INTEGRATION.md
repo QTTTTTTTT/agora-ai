@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire + futures cash ledger v2 (margin + realized PnL) + futures long splitter gate unlock (when v2 on) landed; short-side pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire + futures cash ledger v2 (margin + realized PnL) + futures long splitter gate unlock (when v2 on) + short-side lot ledger data layer landed; short-side wiring + splitter gate flip pending**
 
 ## Why this doc exists
 
@@ -308,11 +308,48 @@ runtimeTradingEngine.executePlanAction (PER action)
       cells; a 1-case defense-in-depth test asserts the legacy
       `splitterEnabledForSide` (no config) is byte-identical to
       its pre-T8a behaviour.
-- [ ] Wire **futures short / equity short** (the symmetric
-      blocker on the position_side axis) — needs the parallel
-      short-lot ledger to land before the splitter can fan out
-      a short open/close without the lot writes turning into
-      silent no-ops.
+- [x] **Short-side lot ledger data layer (T8 commit).** The
+      symmetric blocker on the position_side axis has its data
+      layer in place: migration 090 adds a `side VARCHAR(8)`
+      column to position_lots + closed_lots (default 'long'
+      backfills historical rows), the FIFO index now keys on
+      `(fund_id, instrument_key, side, opened_at)`, and the
+      LotRepo gains `ListOpenByInstrumentSideTx(...)` so callers
+      can read long OR short lots through the same hot path
+      shape. The lotledger service grows two new helpers:
+
+        * `recordShortOpen` — handles a sell-to-open FillEvent
+          with PositionSide="short", writes a side='short' row.
+        * `recordShortClose` — handles a buy-to-cover FillEvent,
+          FIFO-walks open short lots, emits closed_lots rows
+          with side='short' and the inverse PnL formula
+          (`(entry - exit) * qty` so a short profits when exit
+          drops below entry). MFE / MAE are sign-flipped vs the
+          long side so the column meaning stays "positive =
+          favorable, negative = adverse".
+
+      Routing in `Service.Record` switches on the new
+      `FillEvent.PositionSide` field: short → short helpers,
+      otherwise → legacy long path. Pre-T8 callers that leave
+      PositionSide empty route exactly as before.
+
+      6-case short-side unit test matrix covers: open creates
+      side='short', profitable cover signs PnL positive, squeeze
+      cover signs PnL negative, FIFO across multiple lots, partial
+      cover leaves remainder, orphan cover is a soft error. A
+      7th test (long+short coexistence) pins the isolation
+      invariant: opening BOTH a long and short lot on the same
+      (fund, instrument) keeps them separate — the long sell
+      consumes long lots only, the short cover consumes short
+      lots only. 4 existing repo / lotledger sqlmock tests
+      updated to the new column shape.
+
+      What's STILL pending: the **engine wiring** (recordLotFill
+      in wiring_adapters.go currently early-returns when
+      position_side="short"; it needs to route to the short
+      helpers instead) and the **splitter gate flip** for short
+      positions. With the data layer in place these are now
+      straightforward follow-ups rather than blocked work.
 - [ ] Per-child fill PRICE (not just qty). The current splitter
       shares the parent's `executionPrice` across every child
       because `broker.Simulator` returns a single fill; once the

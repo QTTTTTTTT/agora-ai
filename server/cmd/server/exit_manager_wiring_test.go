@@ -218,16 +218,19 @@ func TestEvaluateExitActionsFiresStopLossEndToEnd(t *testing.T) {
 			sql.NullFloat64{}, sql.NullFloat64{}, sql.NullTime{}, sql.NullFloat64{}, sql.NullFloat64{}, now,
 		))
 
-	// 3. Lot lookup: one open lot at entry 100, 100 shares.
+	// 3. Lot lookup: one open lot at entry 100, 100 shares. T8
+	// added a side='long' filter to the default reader so this
+	// mock now sees 3 args (fund + instrument + side) and the
+	// row includes the side column.
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, fund_id, instrument_key, symbol, market, asset_class,
        opening_trade_id, opening_plan_action_id,
        opened_at, entry_price, entry_fees,
        quantity_opened, quantity_remaining,
        sleeve, regime_at_entry, signal_source, confidence_at_entry,
        highest_price_seen, lowest_price_seen, last_price, last_price_at,
-       status, closed_at, created_at, updated_at
-  FROM position_lots WHERE fund_id = $1 AND instrument_key = $2 AND status != 'closed' ORDER BY opened_at ASC, id ASC`)).
-		WithArgs("fund-ex", "US:NVDA").
+       status, closed_at, created_at, updated_at, side
+  FROM position_lots WHERE fund_id = $1 AND instrument_key = $2 AND status != 'closed' AND side = $3 ORDER BY opened_at ASC, id ASC`)).
+		WithArgs("fund-ex", "US:NVDA", "long").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "fund_id", "instrument_key", "symbol", "market", "asset_class",
 			"opening_trade_id", "opening_plan_action_id",
@@ -235,7 +238,7 @@ func TestEvaluateExitActionsFiresStopLossEndToEnd(t *testing.T) {
 			"quantity_opened", "quantity_remaining",
 			"sleeve", "regime_at_entry", "signal_source", "confidence_at_entry",
 			"highest_price_seen", "lowest_price_seen", "last_price", "last_price_at",
-			"status", "closed_at", "created_at", "updated_at",
+			"status", "closed_at", "created_at", "updated_at", "side",
 		}).AddRow(
 			"lot-1", "fund-ex", "US:NVDA", "NVDA",
 			sql.NullString{String: "us_equity", Valid: true}, sql.NullString{String: "equity", Valid: true},
@@ -246,7 +249,7 @@ func TestEvaluateExitActionsFiresStopLossEndToEnd(t *testing.T) {
 			sql.NullFloat64{Float64: 105, Valid: true}, sql.NullFloat64{Float64: 91.9, Valid: true},
 			sql.NullFloat64{Float64: 91.9, Valid: true}, sql.NullTime{Time: now, Valid: true},
 			"open", sql.NullTime{},
-			now.Add(-72*time.Hour), now,
+			now.Add(-72*time.Hour), now, "long",
 		))
 
 	agent := &runtimePMAgent{

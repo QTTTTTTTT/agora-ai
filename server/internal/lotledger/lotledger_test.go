@@ -52,7 +52,13 @@ func (f *fakeRepo) OpenLotTx(_ context.Context, _ repository.DBTX, lot *reposito
 	return cp.ID, nil
 }
 
-func (f *fakeRepo) ListOpenByInstrumentTx(_ context.Context, _ repository.DBTX, fundID, instrumentKey string) ([]*repository.PositionLotRow, error) {
+func (f *fakeRepo) ListOpenByInstrumentTx(ctx context.Context, tx repository.DBTX, fundID, instrumentKey string) ([]*repository.PositionLotRow, error) {
+	// Match the production repo's default: this entry point is
+	// long-only. Short lots are read via ListOpenByInstrumentSideTx.
+	return f.ListOpenByInstrumentSideTx(ctx, tx, fundID, instrumentKey, "long")
+}
+
+func (f *fakeRepo) ListOpenByInstrumentSideTx(_ context.Context, _ repository.DBTX, fundID, instrumentKey, side string) ([]*repository.PositionLotRow, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -62,6 +68,17 @@ func (f *fakeRepo) ListOpenByInstrumentTx(_ context.Context, _ repository.DBTX, 
 			continue
 		}
 		if l.Status == "closed" {
+			continue
+		}
+		// Side filter mirrors the production WHERE clause; an
+		// empty stored side is treated as "long" (the column
+		// default in migration 090 is 'long', and pre-T8 lots
+		// were all long).
+		storedSide := l.Side
+		if storedSide == "" {
+			storedSide = "long"
+		}
+		if storedSide != side {
 			continue
 		}
 		out = append(out, l)

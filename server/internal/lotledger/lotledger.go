@@ -72,6 +72,21 @@ type FillEvent struct {
 	// doesn't disrupt the trade flow.
 	Side string
 
+	// PositionSide is "long" (default), "short", or empty. The
+	// T8 short-side lot ledger uses this to route a fill into
+	// the short branch:
+	//
+	//   FillEvent.Side  PositionSide   route                    realized PnL
+	//   --------------  -------------  ---------------------    -----------------
+	//   sell            long / unset   recordSell (long FIFO)   (exit - entry)
+	//   buy             long / unset   recordBuy  (open long)   n/a (open)
+	//   sell            short          recordShortOpen          n/a (open)
+	//   buy             short          recordShortClose         (entry - exit)
+	//
+	// Pre-T8 callers leave this empty, so legacy fills route
+	// through the long path exactly as before.
+	PositionSide string
+
 	// Quantity is the *filled* quantity, not the originally
 	// requested quantity. The service uses this to size the lot
 	// (buys) or to determine how much to FIFO-consume (sells).
@@ -123,6 +138,10 @@ type Result struct {
 type Repo interface {
 	OpenLotTx(ctx context.Context, tx repository.DBTX, lot *repository.PositionLotRow) (string, error)
 	ListOpenByInstrumentTx(ctx context.Context, tx repository.DBTX, fundID, instrumentKey string) ([]*repository.PositionLotRow, error)
+	// ListOpenByInstrumentSideTx is the T8 short-side-aware
+	// variant. The service uses it to walk short lots in FIFO
+	// order when a short-side close (buy-to-cover) lands.
+	ListOpenByInstrumentSideTx(ctx context.Context, tx repository.DBTX, fundID, instrumentKey, side string) ([]*repository.PositionLotRow, error)
 	PartialCloseTx(ctx context.Context, tx repository.DBTX, row *repository.ClosedLotRow) error
 }
 
@@ -193,7 +212,28 @@ func (s *Service) Record(ctx context.Context, tx repository.DBTX, ev FillEvent) 
 		return nil, err
 	}
 
-	switch strings.ToLower(strings.TrimSpace(ev.Side)) {
+	// T8 short-side routing. The PositionSide axis is independent
+	// of the Side axis: a sell can mean "close long" OR "open
+	// short" depending on the position the caller is acting on,
+	// and a buy can mean "open long" OR "close short". Default to
+	// the long path when PositionSide is empty so all pre-T8
+	// callers route exactly as they did before.
+	positionSide := strings.ToLower(strings.TrimSpace(ev.PositionSide))
+	side := strings.ToLower(strings.TrimSpace(ev.Side))
+	if positionSide == "short" {
+		switch side {
+		case "sell":
+			return s.recordShortOpen(ctx, tx, ev)
+		case "buy":
+			return s.recordShortClose(ctx, tx, ev)
+		default:
+			s.logger.DebugContext(ctx, "lotledger: ignoring non-buy/sell fill on short",
+				slog.String("side", ev.Side), slog.String("symbol", ev.Symbol))
+			return &Result{}, nil
+		}
+	}
+
+	switch side {
 	case "buy":
 		return s.recordBuy(ctx, tx, ev)
 	case "sell":
@@ -239,6 +279,7 @@ func (s *Service) recordBuy(ctx context.Context, tx repository.DBTX, ev FillEven
 		LowestPriceSeen:     seedPrice,
 		LastPrice:           seedPrice,
 		LastPriceAt:         sql.NullTime{Time: openedAt, Valid: ev.FilledPrice > 0},
+		Side:                "long",
 	}
 	id, err := s.repo.OpenLotTx(ctx, tx, lot)
 	if err != nil {
@@ -385,6 +426,211 @@ func (s *Service) buildClosedLot(lot *repository.PositionLotRow, ev FillEvent, q
 		SignalSource:          lot.SignalSource,
 		ConfidenceAtEntry:     lot.ConfidenceAtEntry,
 		ExitReason:            ev.ExitReason,
+		Side:                  "long",
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Short-side path (T8)
+// ---------------------------------------------------------------------------
+
+// recordShortOpen opens a fresh short lot — the FillEvent represents
+// a sell-to-open. The lot stores entry_price = fill price (the
+// price at which we sold short); quantity_remaining is decremented
+// by subsequent buy-to-cover fills walked through recordShortClose.
+//
+// Sign convention: short lots and long lots both store positive
+// quantities. The "direction" is carried by the side column on
+// position_lots / closed_lots so reads can filter without arithmetic
+// hacks. Realised PnL sign-flipping happens in buildClosedShortLot.
+func (s *Service) recordShortOpen(ctx context.Context, tx repository.DBTX, ev FillEvent) (*Result, error) {
+	openedAt := ev.ExecutedAt
+	if openedAt.IsZero() {
+		openedAt = time.Now().UTC()
+	}
+	seedPrice := sql.NullFloat64{Float64: ev.FilledPrice, Valid: ev.FilledPrice > 0}
+	lot := &repository.PositionLotRow{
+		FundID:              ev.FundID,
+		InstrumentKey:       ev.InstrumentKey,
+		Symbol:              ev.Symbol,
+		Market:              ev.Market,
+		AssetClass:          ev.AssetClass,
+		OpeningTradeID:      ev.TradeExecutionID,
+		OpeningPlanActionID: ev.PlanActionID,
+		OpenedAt:            openedAt,
+		EntryPrice:          ev.FilledPrice,
+		EntryFees:           ev.TotalFees,
+		QuantityOpened:      ev.Quantity,
+		QuantityRemaining:   ev.Quantity,
+		Sleeve:              ev.Sleeve,
+		RegimeAtEntry:       ev.RegimeTag,
+		SignalSource:        ev.SignalSource,
+		ConfidenceAtEntry:   ev.ConfidenceAtEntry,
+		HighestPriceSeen:    seedPrice,
+		LowestPriceSeen:     seedPrice,
+		LastPrice:           seedPrice,
+		LastPriceAt:         sql.NullTime{Time: openedAt, Valid: ev.FilledPrice > 0},
+		Side:                "short",
+	}
+	id, err := s.repo.OpenLotTx(ctx, tx, lot)
+	if err != nil {
+		return nil, fmt.Errorf("lotledger: open short lot for %s: %w", ev.Symbol, err)
+	}
+	s.logger.DebugContext(ctx, "lotledger: opened short lot",
+		slog.String("fund_id", ev.FundID),
+		slog.String("symbol", ev.Symbol),
+		slog.Float64("quantity", ev.Quantity),
+		slog.Float64("entry_price", ev.FilledPrice),
+		slog.String("sleeve", ev.Sleeve.String),
+		slog.String("lot_id", id),
+	)
+	return &Result{OpenedLotID: id}, nil
+}
+
+// recordShortClose closes one or more short lots in FIFO order.
+// The FillEvent represents a buy-to-cover. We walk the open short
+// lots oldest-first and emit closed_lots rows with side='short';
+// the realised PnL is sign-flipped from the long formula because
+// a short profits when exit < entry.
+//
+// Orphan covers (legacy short positions that pre-date T8's lot
+// ledger) are logged + counted but never fail the trade — same
+// soft-error pattern as the long-side recordSell.
+func (s *Service) recordShortClose(ctx context.Context, tx repository.DBTX, ev FillEvent) (*Result, error) {
+	openLots, err := s.repo.ListOpenByInstrumentSideTx(ctx, tx, ev.FundID, ev.InstrumentKey, "short")
+	if err != nil {
+		return nil, fmt.Errorf("lotledger: list open short lots for %s: %w", ev.Symbol, err)
+	}
+	closedAt := ev.ExecutedAt
+	if closedAt.IsZero() {
+		closedAt = time.Now().UTC()
+	}
+
+	result := &Result{}
+	remaining := ev.Quantity
+	for _, lot := range openLots {
+		if remaining <= 0 {
+			break
+		}
+		take := lot.QuantityRemaining
+		if take > remaining {
+			take = remaining
+		}
+		if take <= 0 {
+			continue
+		}
+		closedRow, err := s.buildClosedShortLot(lot, ev, take, closedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.repo.PartialCloseTx(ctx, tx, closedRow); err != nil {
+			return nil, fmt.Errorf("lotledger: partial close short lot %s: %w", lot.ID, err)
+		}
+		result.ClosedLotIDs = append(result.ClosedLotIDs, closedRow.ID)
+		result.QuantityClosed += take
+		result.RealizedPnL += closedRow.RealizedPnL
+		remaining -= take
+	}
+
+	if remaining > 0 {
+		result.QuantityOrphaned = remaining
+		s.logger.WarnContext(ctx, "lotledger: orphan short cover (legacy position?)",
+			slog.String("fund_id", ev.FundID),
+			slog.String("symbol", ev.Symbol),
+			slog.Float64("orphan_qty", remaining),
+			slog.Float64("cover_qty", ev.Quantity),
+		)
+	}
+	return result, nil
+}
+
+// buildClosedShortLot computes the closed_lots row for one short lot
+// consumption. Mirrors buildClosedLot but with the short-side PnL
+// formula and side='short' on the emitted row.
+//
+// PnL sign convention:
+//
+//	long  close: (exit - entry) * qty  (profit when exit > entry)
+//	short close: (entry - exit) * qty  (profit when exit < entry)
+//
+// Fees are subtracted (negative) the same way on both sides.
+//
+// MFE / MAE semantics also flip on the short side: max favorable
+// excursion is the LOWEST price (covering cheap = profit), max
+// adverse excursion is the HIGHEST price. We swap the high/low
+// arguments to nullExcursion so the MFE/MAE columns retain their
+// usual meaning (positive = favorable, negative = adverse).
+func (s *Service) buildClosedShortLot(lot *repository.PositionLotRow, ev FillEvent, qty float64, closedAt time.Time) (*repository.ClosedLotRow, error) {
+	if lot.QuantityOpened <= 0 {
+		return nil, fmt.Errorf("lotledger: short lot %s has zero quantity_opened", lot.ID)
+	}
+	entryFeesAttr := 0.0
+	if lot.EntryFees > 0 {
+		entryFeesAttr = lot.EntryFees * (qty / lot.QuantityOpened)
+	}
+	exitFeesAttr := 0.0
+	if ev.TotalFees > 0 && ev.Quantity > 0 {
+		exitFeesAttr = ev.TotalFees * (qty / ev.Quantity)
+	}
+	// Short PnL: profit when we cover below entry.
+	gross := (lot.EntryPrice - ev.FilledPrice) * qty
+	net := gross - entryFeesAttr - exitFeesAttr
+	pctDenom := lot.EntryPrice * qty
+	pct := 0.0
+	if pctDenom > 0 {
+		pct = net / pctDenom
+	}
+
+	// On the short side: max favorable = LOWEST seen price below
+	// entry (covering cheap is profit); max adverse = HIGHEST
+	// seen price above entry (squeeze). Swap the high/low
+	// arguments to nullExcursion so the returned magnitudes
+	// retain the "positive = favorable, negative = adverse"
+	// convention.
+	mfe := nullExcursion(lot.LowestPriceSeen, lot.EntryPrice, ev.FilledPrice, true)
+	mae := nullExcursion(lot.HighestPriceSeen, lot.EntryPrice, ev.FilledPrice, false)
+	// nullExcursion is long-formula; we feed it the "best" /
+	// "worst" prices for a short and negate the sign of its
+	// output if they're set. The math inside nullExcursion is
+	// (extreme - entry) / entry, so for shorts we need
+	// (entry - extreme) / entry instead. Easiest is to negate.
+	if mfe.Valid {
+		mfe.Float64 = -mfe.Float64
+	}
+	if mae.Valid {
+		mae.Float64 = -mae.Float64
+	}
+
+	holdingDays := holdingDaysBetween(lot.OpenedAt, closedAt)
+
+	return &repository.ClosedLotRow{
+		FundID:                ev.FundID,
+		PositionLotID:         lot.ID,
+		InstrumentKey:         ev.InstrumentKey,
+		Symbol:                ev.Symbol,
+		Market:                lot.Market,
+		AssetClass:            lot.AssetClass,
+		ClosingTradeID:        ev.TradeExecutionID,
+		ClosingPlanActionID:   ev.PlanActionID,
+		OpenedAt:              lot.OpenedAt,
+		ClosedAt:              closedAt,
+		HoldingDays:           holdingDays,
+		QuantityClosed:        qty,
+		EntryPrice:            lot.EntryPrice,
+		ExitPrice:             ev.FilledPrice,
+		EntryFees:             roundCurrency(entryFeesAttr),
+		ExitFees:              roundCurrency(exitFeesAttr),
+		RealizedPnL:           roundCurrency(net),
+		RealizedPnLPct:        pct,
+		MaxFavorableExcursion: mfe,
+		MaxAdverseExcursion:   mae,
+		Sleeve:                lot.Sleeve,
+		RegimeAtEntry:         lot.RegimeAtEntry,
+		RegimeAtExit:          ev.RegimeAtExit,
+		SignalSource:          lot.SignalSource,
+		ConfidenceAtEntry:     lot.ConfidenceAtEntry,
+		ExitReason:            ev.ExitReason,
+		Side:                  "short",
 	}, nil
 }
 

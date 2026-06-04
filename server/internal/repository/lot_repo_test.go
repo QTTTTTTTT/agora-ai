@@ -63,14 +63,14 @@ INSERT INTO position_lots
      quantity_opened, quantity_remaining,
      sleeve, regime_at_entry, signal_source, confidence_at_entry,
      highest_price_seen, lowest_price_seen, last_price, last_price_at,
-     status)
+     status, side)
 VALUES ($1, $2, $3, $4, $5,
         $6, $7,
         $8, $9, $10,
         $11, $12,
         $13, $14, $15, $16,
         $17, $18, $19, $20,
-        'open')
+        'open', $21)
 RETURNING id`)).
 		WithArgs(
 			lot.FundID, lot.InstrumentKey, lot.Symbol, lot.Market, lot.AssetClass,
@@ -79,6 +79,7 @@ RETURNING id`)).
 			lot.QuantityOpened, lot.QuantityOpened, // remaining defaults to opened
 			lot.Sleeve, lot.RegimeAtEntry, lot.SignalSource, lot.ConfidenceAtEntry,
 			lot.HighestPriceSeen, lot.LowestPriceSeen, lot.LastPrice, lot.LastPriceAt,
+			"long", // T8: side defaults to long when caller leaves Side empty
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("lot-uuid-1"))
 
@@ -173,6 +174,7 @@ INSERT INTO closed_lots`)).
 			row.MaxFavorableExcursion, row.MaxAdverseExcursion,
 			row.Sleeve, row.RegimeAtEntry, row.RegimeAtExit, row.SignalSource,
 			row.ConfidenceAtEntry, row.ExitReason,
+			"long", // T8: side defaults to long when caller leaves Side empty
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("closed-1"))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE position_lots`)).
@@ -326,11 +328,16 @@ func TestLotRepoListOpenByInstrumentBuildsFIFOQuery(t *testing.T) {
 		"quantity_opened", "quantity_remaining",
 		"sleeve", "regime_at_entry", "signal_source", "confidence_at_entry",
 		"highest_price_seen", "lowest_price_seen", "last_price", "last_price_at",
-		"status", "closed_at", "created_at", "updated_at",
+		"status", "closed_at", "created_at", "updated_at", "side",
 	}
 	now := time.Date(2026, 5, 14, 9, 30, 0, 0, time.UTC)
-	mock.ExpectQuery(regexp.QuoteMeta(`WHERE fund_id = $1 AND instrument_key = $2 AND status != 'closed' ORDER BY opened_at ASC, id ASC`)).
-		WithArgs("fund-1", "SSE:600000").
+	// T8 added a side='long' filter to ListOpenByInstrument so the
+	// default reader walks ONLY long lots. Short lots are read via
+	// ListOpenByInstrumentSideTx — pinning the new filter shape
+	// here protects against a regression that accidentally widened
+	// the default reader to both sides.
+	mock.ExpectQuery(regexp.QuoteMeta(`WHERE fund_id = $1 AND instrument_key = $2 AND status != 'closed' AND side = $3 ORDER BY opened_at ASC, id ASC`)).
+		WithArgs("fund-1", "SSE:600000", "long").
 		WillReturnRows(sqlmock.NewRows(cols).
 			AddRow(
 				"lot-1", "fund-1", "SSE:600000", "600000",
@@ -340,7 +347,7 @@ func TestLotRepoListOpenByInstrumentBuildsFIFOQuery(t *testing.T) {
 				100.0, 60.0,
 				sql.NullString{String: "llm_pm", Valid: true}, sql.NullString{}, sql.NullString{}, sql.NullFloat64{},
 				sql.NullFloat64{}, sql.NullFloat64{}, sql.NullFloat64{}, sql.NullTime{},
-				"partial", sql.NullTime{}, now, now,
+				"partial", sql.NullTime{}, now, now, "long",
 			))
 
 	lots, err := repo.ListOpenByInstrument(context.Background(), "fund-1", "SSE:600000")
