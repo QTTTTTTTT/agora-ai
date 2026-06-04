@@ -55,7 +55,31 @@ function isChunkLoadError(err: unknown): boolean {
     /Failed to fetch dynamically imported module/i.test(msg) ||
     /Importing a module script failed/i.test(msg) ||
     /error loading dynamically imported module/i.test(msg) ||
+    // The "MIME mismatch" failure mode: when the SPA fallback or a
+    // misconfigured CDN serves text/html for a chunk URL, V8 / Webkit
+    // surface a TypeError whose message is exactly the line below.
+    // It is morally a stale-deploy failure (the chunk URL no longer
+    // resolves to a real .js file), so we want to retry/reload —
+    // but the bare regex above misses it because there's no "fetch"
+    // verb in the message.
+    /Cannot read propert(?:y|ies) of undefined \(reading 'default'\)/i.test(msg) ||
     name === "ChunkLoadError"
+  );
+}
+
+// hasModuleDefault returns true iff `mod` looks like a real ESM module
+// namespace with a `default` export. This is the second line of defence
+// against "server returned HTML/JSON for a chunk URL": the network call
+// succeeds, but the resulting module's namespace is empty (or shaped
+// like `{}` from a misparsed JSON 404 body), so React.lazy then trips
+// on `module.default` later and surfaces a TypeError. We catch the
+// shape problem at import time so retry/reload kicks in immediately
+// instead of after the lazy boundary already committed.
+function hasModuleDefault<T>(mod: unknown): mod is { default: T } {
+  return (
+    typeof mod === "object" &&
+    mod !== null &&
+    typeof (mod as { default?: unknown }).default !== "undefined"
   );
 }
 
@@ -72,7 +96,16 @@ async function importWithRetry<T extends ComponentType<any>>(
   let lastErr: unknown;
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     try {
-      return await importer();
+      const mod = await importer();
+      // Shape guard: a successful await but an empty namespace
+      // means we got a non-JS payload (HTML SPA fallback, JSON
+      // 404 body, …). Treat it as a chunk-load failure so we
+      // burn a retry / reload instead of leaking a TypeError out
+      // to the ErrorBoundary.
+      if (!hasModuleDefault<T>(mod)) {
+        throw new Error("Importing a module script failed: namespace missing default export");
+      }
+      return mod;
     } catch (err) {
       lastErr = err;
       if (!isChunkLoadError(err)) {
