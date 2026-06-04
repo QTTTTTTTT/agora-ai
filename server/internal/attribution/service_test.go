@@ -212,12 +212,17 @@ func TestRunAndPersistIsIdempotent(t *testing.T) {
 	now := time.Date(2026, 5, 21, 9, 0, 0, 0, time.UTC)
 	tradingDate := time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC)
 	// Simulate an existing memory row with the same tag set for today.
+	// Tags must match what GenerateLessons → buildThrottleLesson would
+	// emit for this row (10 trades, win 0.2, PnL -200): the THROTTLE
+	// tier with "throttle" replacing the legacy "loser" tag. tagKey()
+	// in service.go sorts alphabetically before joining, so order in
+	// this fixture doesn't matter.
 	mem := &stubMemory{
 		listed: []repository.Memory{
 			{
 				FundID:      "fund-1",
 				Layer:       MemoryLayer,
-				Tags:        []string{"loser", "sleeve:trend", "regime:chop"},
+				Tags:        []string{"throttle", "sleeve:trend", "regime:chop"},
 				TradingDate: sql.NullTime{Time: tradingDate, Valid: true},
 			},
 		},

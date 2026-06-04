@@ -145,12 +145,34 @@ const (
 type LessonKind string
 
 const (
-	// LessonSleeveRegimeLoser fires when a (sleeve, regime)
-	// cell has at least MinSampleSize trades, win-rate below
-	// 35%, AND total realised P&L below zero. The combination
-	// guards against "small unlucky streak" while making the
-	// signal actionable.
+	// LessonSleeveRegimeLoser is the LEGACY single-tier "you're
+	// losing money" lesson. Retained as a constant so old memory
+	// rows whose template_key is "attribution.lesson.sleeve_regime_loser"
+	// keep rendering against the i18n dictionary; new runs DO NOT
+	// emit it — they pick one of the three tiered kinds below.
 	LessonSleeveRegimeLoser LessonKind = "sleeve_regime_loser"
+
+	// LessonSleeveRegimeObserving (severity=info) fires for small
+	// samples (5–10 closed lots) with a sub-par win rate. The
+	// advice is "track only" — variance is too high to recommend
+	// any portfolio change. This is the lesson a real research
+	// team would write in a journal, not a directive.
+	LessonSleeveRegimeObserving LessonKind = "sleeve_regime_observing"
+
+	// LessonSleeveRegimeThrottle (severity=warning) fires once the
+	// sample reaches 10–30 closed lots and the win rate stays
+	// below ThrottleWinRateMax. The advice is "reduce sizing /
+	// raise confidence threshold / try a shorter-horizon variant"
+	// — real-team-style risk management, not a kill switch.
+	LessonSleeveRegimeThrottle LessonKind = "sleeve_regime_throttle"
+
+	// LessonSleeveRegimePause (severity=critical) fires only when
+	// the sample is large enough (30+ closed lots) AND the win
+	// rate is well below PauseWinRateMax AND cumulative P&L is
+	// negative. This is the only tier that recommends actually
+	// pausing the (sleeve, regime) combination — by that sample
+	// size the signal is statistically meaningful.
+	LessonSleeveRegimePause LessonKind = "sleeve_regime_pause"
 
 	// LessonSleeveRegimeWinner is the mirror: at least
 	// MinSampleSize trades, win-rate above 65%, AND total P&L

@@ -13,7 +13,41 @@ import (
 // Threshold gate
 // ---------------------------------------------------------------------------
 
-func TestGenerateLessonsEmitsLoserOnDecisiveCell(t *testing.T) {
+// TestGenerateLessonsEmitsObservingOnSmallSample verifies the 5–9
+// trade tier produces a journal-style "observing" lesson instead of
+// the old "you're losing money, pause this" critical alert. This is
+// the exact size of the OCS-fund llm_pm × (unspecified) regime
+// example that prompted the tiering refactor — six trades, 33% win,
+// negative P&L — and a professional team would NOT recommend a
+// portfolio change off that sample.
+func TestGenerateLessonsEmitsObservingOnSmallSample(t *testing.T) {
+	report := AttributionReport{
+		Window: Window{Days: 30},
+		BySleeveRegime: []repository.SleeveRegimeStat{
+			{Sleeve: "llm_pm", Regime: "chop", TradeCount: 6, WinCount: 2, LossCount: 4, TotalPnL: -120, AvgPnLPct: -0.01, AvgHoldingDays: 3.6, WinRate: 1.0 / 3.0},
+		},
+	}
+	lessons := GenerateLessons(report, LessonOptions{})
+	if len(lessons) != 1 {
+		t.Fatalf("expected 1 observing lesson, got %d: %+v", len(lessons), lessons)
+	}
+	l := lessons[0]
+	if l.Kind != LessonSleeveRegimeObserving {
+		t.Fatalf("kind: got %q, want %q", l.Kind, LessonSleeveRegimeObserving)
+	}
+	if l.Severity != SeverityInfo {
+		t.Fatalf("severity: got %q, want info (small sample → journal entry, not alert)", l.Severity)
+	}
+	if !containsTag(l.Tags, "observing") {
+		t.Fatalf("expected 'observing' tag in %v", l.Tags)
+	}
+}
+
+// TestGenerateLessonsEmitsThrottleOnMidSample verifies the 10–29
+// trade tier produces a warning lesson recommending size reduction,
+// NOT a pause directive. A real PM at this sample size would cut
+// exposure or raise the confidence floor before pulling the plug.
+func TestGenerateLessonsEmitsThrottleOnMidSample(t *testing.T) {
 	report := AttributionReport{
 		Window: Window{Days: 30},
 		BySleeveRegime: []repository.SleeveRegimeStat{
@@ -22,19 +56,19 @@ func TestGenerateLessonsEmitsLoserOnDecisiveCell(t *testing.T) {
 	}
 	lessons := GenerateLessons(report, LessonOptions{})
 	if len(lessons) != 1 {
-		t.Fatalf("expected 1 loser lesson, got %d: %+v", len(lessons), lessons)
+		t.Fatalf("expected 1 throttle lesson, got %d: %+v", len(lessons), lessons)
 	}
 	l := lessons[0]
-	if l.Kind != LessonSleeveRegimeLoser {
-		t.Fatalf("kind: got %q", l.Kind)
+	if l.Kind != LessonSleeveRegimeThrottle {
+		t.Fatalf("kind: got %q, want %q", l.Kind, LessonSleeveRegimeThrottle)
 	}
-	if l.Severity != SeverityCritical {
-		t.Fatalf("severity: got %q, want critical", l.Severity)
+	if l.Severity != SeverityWarning {
+		t.Fatalf("severity: got %q, want warning", l.Severity)
 	}
 	if !strings.Contains(l.Title, "mean_reversion") || !strings.Contains(l.Title, "chop") {
 		t.Fatalf("title missing context: %q", l.Title)
 	}
-	wantTags := map[string]bool{"loser": false, "sleeve:mean_reversion": false, "regime:chop": false}
+	wantTags := map[string]bool{"throttle": false, "sleeve:mean_reversion": false, "regime:chop": false}
 	for _, tag := range l.Tags {
 		if _, ok := wantTags[tag]; ok {
 			wantTags[tag] = true
@@ -45,6 +79,67 @@ func TestGenerateLessonsEmitsLoserOnDecisiveCell(t *testing.T) {
 			t.Fatalf("missing tag %q in %+v", tag, l.Tags)
 		}
 	}
+}
+
+// TestGenerateLessonsEmitsPauseOnLargeSample verifies that the
+// large-sample (30+ trades) decisive case still produces a
+// critical-severity lesson — this is the only tier that recommends
+// pausing the combination, and statistically it has earned the
+// right to.
+func TestGenerateLessonsEmitsPauseOnLargeSample(t *testing.T) {
+	report := AttributionReport{
+		Window: Window{Days: 30},
+		BySleeveRegime: []repository.SleeveRegimeStat{
+			{Sleeve: "trend", Regime: "chop", TradeCount: 35, WinCount: 10, LossCount: 25, TotalPnL: -1800, AvgPnLPct: -0.06, AvgHoldingDays: 4.0, WinRate: 10.0 / 35.0},
+		},
+	}
+	lessons := GenerateLessons(report, LessonOptions{})
+	if len(lessons) != 1 {
+		t.Fatalf("expected 1 pause lesson, got %d: %+v", len(lessons), lessons)
+	}
+	l := lessons[0]
+	if l.Kind != LessonSleeveRegimePause {
+		t.Fatalf("kind: got %q, want %q", l.Kind, LessonSleeveRegimePause)
+	}
+	if l.Severity != SeverityCritical {
+		t.Fatalf("severity: got %q, want critical (large sample, decisive)", l.Severity)
+	}
+	if !containsTag(l.Tags, "pause") {
+		t.Fatalf("expected 'pause' tag in %v", l.Tags)
+	}
+}
+
+// TestGenerateLessonsSkipsUnspecifiedRegime is the regression test
+// for the user-reported case "Sleeve llm_pm is losing money in
+// regime (unspecified)" — a regime label of "" or "unspecified"
+// means the regime detector didn't classify the day. Surfacing a
+// per-regime lesson against a placeholder label implies the
+// detector ran when it didn't, which is worse than silence. The
+// fund-wide BySleeve rollup still captures the same trades.
+func TestGenerateLessonsSkipsUnspecifiedRegime(t *testing.T) {
+	cases := []string{"", "unspecified", "UNSPECIFIED", "  Unspecified  "}
+	for _, regime := range cases {
+		t.Run("regime="+regime, func(t *testing.T) {
+			report := AttributionReport{
+				Window: Window{Days: 30},
+				BySleeveRegime: []repository.SleeveRegimeStat{
+					{Sleeve: "llm_pm", Regime: regime, TradeCount: 35, WinCount: 10, LossCount: 25, TotalPnL: -1800, WinRate: 10.0 / 35.0},
+				},
+			}
+			if got := GenerateLessons(report, LessonOptions{}); len(got) != 0 {
+				t.Fatalf("expected no lesson when regime is unspecified (%q), got %+v", regime, got)
+			}
+		})
+	}
+}
+
+func containsTag(tags []string, want string) bool {
+	for _, t := range tags {
+		if t == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGenerateLessonsEmitsWinnerOnDecisiveCell(t *testing.T) {

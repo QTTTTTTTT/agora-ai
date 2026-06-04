@@ -32,21 +32,60 @@ func TestGenerateLessons_EmitsTemplateAndPayload(t *testing.T) {
 		wantSampleValues map[string]any // optional: spot-check a few values
 	}{
 		{
-			name: "loser cell",
+			// Observing tier: 5–9 trades, win-rate below 50%.
+			// Small-sample journal entry — no portfolio change advised.
+			name: "observing tier (5-trade small sample)",
+			report: AttributionReport{
+				Window: Window{Days: 30},
+				BySleeveRegime: []repository.SleeveRegimeStat{
+					{Sleeve: "llm_pm", Regime: "chop", TradeCount: 6, WinCount: 2, LossCount: 4, TotalPnL: -120, AvgPnLPct: -0.01, AvgHoldingDays: 3.6, WinRate: 1.0 / 3.0},
+				},
+			},
+			wantTemplate:    "attribution.lesson.sleeve_regime_observing",
+			wantPayloadKeys: []string{"sleeve", "regime", "trade_count", "win_rate", "total_pnl", "avg_pnl_pct", "avg_holding_days"},
+			wantSampleValues: map[string]any{
+				"sleeve":      "llm_pm",
+				"regime":      "chop",
+				"trade_count": 6,
+			},
+		},
+		{
+			// Throttle tier: 10–29 trades, win-rate below 40%,
+			// P&L negative. Suggests reducing sizing / raising
+			// confidence threshold, NOT pausing.
+			name: "throttle tier (medium sample)",
 			report: AttributionReport{
 				Window: Window{Days: 30},
 				BySleeveRegime: []repository.SleeveRegimeStat{
 					{Sleeve: "mean_reversion", Regime: "chop", TradeCount: 12, WinCount: 3, LossCount: 9, TotalPnL: -480, AvgPnLPct: -0.04, AvgHoldingDays: 2.1, WinRate: 0.25},
 				},
 			},
-			wantTemplate:    "attribution.lesson.sleeve_regime_loser",
+			wantTemplate:    "attribution.lesson.sleeve_regime_throttle",
 			wantPayloadKeys: []string{"sleeve", "regime", "trade_count", "win_rate", "total_pnl", "avg_pnl_pct", "avg_holding_days"},
 			wantSampleValues: map[string]any{
 				"sleeve":      "mean_reversion",
 				"regime":      "chop",
 				"trade_count": 12,
-				// raw 0..1 ratio — UI multiplies by 100; see lessonRenderer.tsx
-				"win_rate": 0.25,
+				"win_rate":    0.25,
+			},
+		},
+		{
+			// Pause tier: 30+ trades, win-rate below 35%,
+			// P&L strictly negative. The only tier that
+			// recommends pausing the combination.
+			name: "pause tier (large sample, decisive)",
+			report: AttributionReport{
+				Window: Window{Days: 30},
+				BySleeveRegime: []repository.SleeveRegimeStat{
+					{Sleeve: "trend", Regime: "chop", TradeCount: 35, WinCount: 10, LossCount: 25, TotalPnL: -1800, AvgPnLPct: -0.06, AvgHoldingDays: 4.0, WinRate: 10.0 / 35.0},
+				},
+			},
+			wantTemplate:    "attribution.lesson.sleeve_regime_pause",
+			wantPayloadKeys: []string{"sleeve", "regime", "trade_count", "win_rate", "total_pnl", "avg_pnl_pct", "avg_holding_days"},
+			wantSampleValues: map[string]any{
+				"sleeve":      "trend",
+				"regime":      "chop",
+				"trade_count": 35,
 			},
 		},
 		{
@@ -167,7 +206,7 @@ func TestBuildMemoryRow_PersistsTemplateAndPayload(t *testing.T) {
 		Sleeve: "trend", Regime: "trend_up", TradeCount: 15,
 		TotalPnL: 1240, WinRate: 11.0 / 15.0, AvgPnLPct: 0.08, AvgHoldingDays: 7,
 	}
-	l := buildLoserLesson(stat) // any builder works; we only care about the mapping
+	l := buildThrottleLesson(stat) // any builder works; we only care about the mapping
 	mem := buildMemoryRow("fund-1", "agent-1", time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC), l)
 
 	if !mem.TemplateKey.Valid || mem.TemplateKey.String != l.TemplateKey {

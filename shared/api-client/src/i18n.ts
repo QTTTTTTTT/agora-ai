@@ -3559,6 +3559,13 @@ export interface LessonTemplate {
 
 export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = {
   'zh-CN': {
+    // LEGACY: kept for memory rows persisted before the tiered
+    // refactor (template_key="attribution.lesson.sleeve_regime_loser"
+    // on disk). New runs no longer emit this — the backend now picks
+    // one of observing / throttle / pause below based on sample size.
+    // We deliberately keep the old phrasing intact (including the
+    // `（fund.config.strategySleeves）` parenthetical) so the snapshot
+    // test does not start drifting against historical rendered output.
     'attribution.lesson.sleeve_regime_loser': {
       title:
         '策略套件 "{sleeve}" 在 "{regime}" 行情下亏损（{trade_count|number} 笔，胜率 {win_rate|percent}，盈亏 {total_pnl|signed:2}）',
@@ -3567,6 +3574,45 @@ export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = 
         + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
         + '建议在该基金的「策略套件配置」（fund.config.strategySleeves）中暂停该 (套件, 行情) 组合，直到行情切换；'
         + '或加强进场过滤，以理解此行情下信号失效的原因。',
+    },
+    // Observing tier (5–9 trades, win-rate < 50%): journal-style
+    // note. NO action recommended — sample too small.
+    'attribution.lesson.sleeve_regime_observing': {
+      title:
+        '正在观察策略套件 "{sleeve}" 在 "{regime}" 行情下的表现（{trade_count|number} 笔，胜率 {win_rate|percent}，样本较小）',
+      body:
+        '在 "{regime}" 行情下，"{sleeve}" 套件目前已平仓 {trade_count|number} 笔，胜率 {win_rate|percent}，'
+        + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
+        + '样本太小，无法判断是策略问题还是短期运气，暂不建议调整组合权重 — '
+        + '继续按当前规则跟踪进出场，等样本累积到 10 笔以上或行情切换后再复盘。'
+        + '可同步记录当前的入场理由 / 离场触发，为下一阶段的复盘留素材。',
+    },
+    // Throttle tier (10–29 trades, win-rate < 40%, P&L < 0):
+    // medium-sample risk-management response. Reduce size or
+    // raise confidence — do NOT pause.
+    'attribution.lesson.sleeve_regime_throttle': {
+      title:
+        '策略套件 "{sleeve}" 在 "{regime}" 行情下表现偏弱，建议减仓观察（{trade_count|number} 笔，胜率 {win_rate|percent}，盈亏 {total_pnl|signed:2}）',
+      body:
+        '在 "{regime}" 行情下共 {trade_count|number} 个已平仓批次，"{sleeve}" 套件录得 {win_rate|percent} 胜率，'
+        + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
+        + '样本已能支撑风控调整，可从以下三个方向择一收紧：'
+        + '（a）该 (套件, 行情) 组合的单笔仓位下调 ~30%；'
+        + '（b）将入场置信度阈值上调，只让高确信度信号触发；'
+        + '（c）改用更短持仓周期的变体（如日内做 T）观察 1–2 周。'
+        + '到样本累积至 30 笔后再决定是否真的暂停该组合。',
+    },
+    // Pause tier (30+ trades, win-rate < 35%, P&L < 0):
+    // decisive shutoff — the only tier that recommends pausing.
+    'attribution.lesson.sleeve_regime_pause': {
+      title:
+        '策略套件 "{sleeve}" 在 "{regime}" 行情下持续亏损，建议暂停该组合（{trade_count|number} 笔，胜率 {win_rate|percent}，盈亏 {total_pnl|signed:2}）',
+      body:
+        '在 "{regime}" 行情下共 {trade_count|number} 个已平仓批次，"{sleeve}" 套件录得 {win_rate|percent} 胜率，'
+        + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
+        + '样本量已足以判定该 (套件, 行情) 组合在统计上显著弱于预期，且已对组合造成可见亏损。'
+        + '建议在基金的策略套件配置中暂停该组合，直到行情切换；同时复盘入场过滤器为何在此 regime 下失效，'
+        + '把结论沉淀到下一版套件设计中，避免在新一轮该 regime 出现时重复同样的错误。',
     },
     'attribution.lesson.sleeve_regime_winner': {
       title:
@@ -3597,6 +3643,10 @@ export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = 
     },
   },
   'en-US': {
+    // LEGACY (see zh-CN comment): retained for memory rows persisted
+    // before the tiered refactor. Not emitted by new runs. The
+    // parenthetical `(fund.config.strategySleeves)` is intentional —
+    // it's part of the frozen snapshot baseline and must not drift.
     'attribution.lesson.sleeve_regime_loser': {
       title:
         'Sleeve "{sleeve}" is losing money in regime "{regime}" ({trade_count|number} trades, win-rate {win_rate|percent}, PnL {total_pnl|signed:2})',
@@ -3607,6 +3657,43 @@ export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = 
         + 'Consider pausing this (sleeve, regime) combination in the fund\'s strategy sleeves config '
         + '(fund.config.strategySleeves) until conditions change, or instrumenting the entry filter '
         + 'further to understand why the signal misfires in this regime.',
+    },
+    'attribution.lesson.sleeve_regime_observing': {
+      title:
+        'Watching sleeve "{sleeve}" under regime "{regime}" ({trade_count|number} trades, win-rate {win_rate|percent}, small sample)',
+      body:
+        'Across {trade_count|number} closed lots in regime {regime}, the {sleeve} sleeve is currently '
+        + 'at a {win_rate|percent} win rate (realised P&L {total_pnl|signed:2}, avg pnl pct '
+        + '{avg_pnl_pct|signed_pct}, avg holding {avg_holding_days|number:1} days). The sample is too '
+        + 'small to distinguish a real edge problem from a short unlucky streak, so no portfolio '
+        + 'change is recommended yet — keep running the sleeve under the current rules, log entry / '
+        + 'exit reasoning for each trade, and revisit once the sample grows past 10 trades or the '
+        + 'regime shifts.',
+    },
+    'attribution.lesson.sleeve_regime_throttle': {
+      title:
+        'Sleeve "{sleeve}" is underperforming in regime "{regime}" — reduce sizing ({trade_count|number} trades, win-rate {win_rate|percent}, PnL {total_pnl|signed:2})',
+      body:
+        'Across {trade_count|number} closed lots in regime {regime}, the {sleeve} sleeve recorded a '
+        + '{win_rate|percent} win rate and a cumulative realised P&L of {total_pnl|signed:2} '
+        + '(avg pnl pct: {avg_pnl_pct|signed_pct}, avg holding {avg_holding_days|number:1} days). '
+        + 'The sample is large enough to take a risk-management response: consider (a) cutting '
+        + 'position size on this (sleeve, regime) pair by ~30%, (b) raising the entry confidence '
+        + 'threshold so only higher-conviction signals fire, or (c) trying a shorter-horizon variant '
+        + '(e.g. intraday) for 1–2 weeks. Wait until the sample reaches 30 trades before deciding '
+        + 'whether to pause the combination outright.',
+    },
+    'attribution.lesson.sleeve_regime_pause': {
+      title:
+        'Sleeve "{sleeve}" is decisively losing in regime "{regime}" — pause this pair ({trade_count|number} trades, win-rate {win_rate|percent}, PnL {total_pnl|signed:2})',
+      body:
+        'Across {trade_count|number} closed lots in regime {regime}, the {sleeve} sleeve recorded a '
+        + '{win_rate|percent} win rate and a cumulative realised P&L of {total_pnl|signed:2} '
+        + '(avg pnl pct: {avg_pnl_pct|signed_pct}, avg holding {avg_holding_days|number:1} days). '
+        + 'At this sample size the underperformance is statistically meaningful AND has cost the fund '
+        + 'real money. Pause the (sleeve, regime) combination in the fund\'s strategy sleeves config '
+        + 'until the regime changes, and capture a post-mortem of why the entry filter misfired so '
+        + 'the next iteration of the sleeve avoids the same setup.',
     },
     'attribution.lesson.sleeve_regime_winner': {
       title:

@@ -3,6 +3,7 @@ package attribution
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/fundai/server/internal/repository"
 )
@@ -11,33 +12,109 @@ import (
 // Lesson generation (pure)
 // ---------------------------------------------------------------------------
 
-// LessonOptions control thresholds. Zero values fall back to
-// the Default* constants from attribution.go so callers can
-// pass `LessonOptions{}` for "production defaults".
+// LessonOptions control thresholds. Zero values fall back to the
+// Default* constants below so callers can pass `LessonOptions{}`
+// for "production defaults".
+//
+// The (sleeve, regime) loser axis is split into THREE tiers so
+// the lesson reads the way a real research team writes a journal,
+// not a kill-switch:
+//
+//   * observing  (5–10 lots, sub-par win rate)        → severity=info
+//   * throttle   (10–30 lots, win rate below 40%)     → severity=warning
+//   * pause      (30+ lots, win rate below 35%,
+//                 cumulative P&L < 0)                 → severity=critical
+//
+// The single "loser" cutoff (35% on n≥5) we used to ship was
+// statistically too aggressive for the sample sizes we actually
+// see per fund per month — 6 trades is well below the 1.5σ
+// "decisive" bound the textbook 35%/65% rule assumes. The tiered
+// shape lets us *say something useful* about small samples
+// without recommending a strategy change off six trades.
 type LessonOptions struct {
-	MinSampleSize    int
-	MaxLessons       int
-	LossWinRateMax   float64 // win rate strictly below this fires a loser lesson
-	WinnerWinRateMin float64 // win rate strictly above this fires a winner lesson
+	MaxLessons int
+
+	// Observing tier: small-sample journal entry.
+	ObservingMinSampleSize int
+	ObservingMaxSampleSize int     // strictly less than this for observing tier
+	ObservingWinRateMax    float64 // win-rate strictly below this fires observing
+
+	// Throttle tier: medium-sample size reduction.
+	ThrottleMinSampleSize int
+	ThrottleMaxSampleSize int     // strictly less than this for throttle tier
+	ThrottleWinRateMax    float64
+
+	// Pause tier: large-sample combination shutoff.
+	PauseMinSampleSize int
+	PauseWinRateMax    float64
+	PausePnLMax        float64 // total_pnl strictly less than this for pause
+
+	// Winners use the original symmetric rule.
+	WinnerMinSampleSize int
+	WinnerWinRateMin    float64
+
+	// Back-compat knobs. Old call sites passed MinSampleSize /
+	// LossWinRateMax and expected the single-tier behaviour. We
+	// still honour these as a floor for the observing tier so a
+	// caller that pins MinSampleSize=10 doesn't suddenly start
+	// seeing the 5–9 observing lessons. The lesson generator
+	// treats them as "raise the observing floor to this".
+	MinSampleSize  int
+	LossWinRateMax float64
 }
 
 func (o LessonOptions) effective() LessonOptions {
 	out := o
-	if out.MinSampleSize <= 0 {
-		out.MinSampleSize = DefaultMinSampleSize
-	}
 	if out.MaxLessons <= 0 {
 		out.MaxLessons = DefaultMaxLessonsPerRun
 	}
-	// Threshold defaults follow the textbook "decisive" cutoffs:
-	// 35% / 65% is roughly 1.5σ on a 50% null hypothesis for
-	// n ≈ 10–30 trades, which matches the sample sizes we get
-	// per fund per month.
-	if out.LossWinRateMax <= 0 {
-		out.LossWinRateMax = 0.35
+	if out.WinnerMinSampleSize <= 0 {
+		out.WinnerMinSampleSize = DefaultMinSampleSize
 	}
 	if out.WinnerWinRateMin <= 0 {
 		out.WinnerWinRateMin = 0.65
+	}
+
+	if out.ObservingMinSampleSize <= 0 {
+		out.ObservingMinSampleSize = 5
+	}
+	if out.ObservingMaxSampleSize <= 0 {
+		out.ObservingMaxSampleSize = 10
+	}
+	if out.ObservingWinRateMax <= 0 {
+		out.ObservingWinRateMax = 0.50 // below break-even, but no statistical claim
+	}
+
+	if out.ThrottleMinSampleSize <= 0 {
+		out.ThrottleMinSampleSize = 10
+	}
+	if out.ThrottleMaxSampleSize <= 0 {
+		out.ThrottleMaxSampleSize = 30
+	}
+	if out.ThrottleWinRateMax <= 0 {
+		out.ThrottleWinRateMax = 0.40
+	}
+
+	if out.PauseMinSampleSize <= 0 {
+		out.PauseMinSampleSize = 30
+	}
+	if out.PauseWinRateMax <= 0 {
+		out.PauseWinRateMax = 0.35
+	}
+	// PausePnLMax default = 0 (strictly negative cumulative P&L)
+	// is intentionally a zero-valued comparison; the meetsPause
+	// check uses strict-less-than so a PausePnLMax of zero means
+	// "cumulative P&L < 0".
+
+	// Honour legacy MinSampleSize / LossWinRateMax as a floor on
+	// the OBSERVING tier (the smallest sample bucket). Callers
+	// that explicitly raised these never saw small-sample lessons;
+	// we keep that contract.
+	if out.MinSampleSize > out.ObservingMinSampleSize {
+		out.ObservingMinSampleSize = out.MinSampleSize
+	}
+	if out.LossWinRateMax > 0 && out.LossWinRateMax < out.ObservingWinRateMax {
+		out.ObservingWinRateMax = out.LossWinRateMax
 	}
 	return out
 }
@@ -47,6 +124,14 @@ func (o LessonOptions) effective() LessonOptions {
 // same lessons (in the same order). The Service deduplicates
 // against the memory store before persisting, but order matters
 // for the dashboard's "top N most-actionable" ranking.
+//
+// Cross-tab rows whose regime is missing / "unspecified" are
+// SKIPPED: a regime label is a categorical claim, and surfacing a
+// lesson against a placeholder ("(unspecified)" shows up in the
+// title) is worse than silence — it implies the regime detector
+// ran when in fact it didn't. The fund-wide BySleeve rollup still
+// captures the same trades so nothing is lost; the user just sees
+// "sleeve X overall" instead of "sleeve X in (unspecified)".
 func GenerateLessons(report AttributionReport, opts LessonOptions) []Lesson {
 	o := opts.effective()
 	if !report.HasData() {
@@ -67,10 +152,20 @@ func GenerateLessons(report AttributionReport, opts LessonOptions) []Lesson {
 		return sortedLosers[i].TotalPnL < sortedLosers[j].TotalPnL
 	})
 	for _, s := range sortedLosers {
-		if !meetsLossThreshold(s, o) {
+		if isUnspecifiedRegime(s.Regime) {
 			continue
 		}
-		lessons = append(lessons, buildLoserLesson(s))
+		// Pick the HIGHEST-severity tier the row satisfies. Order
+		// matters: a 32-trade row that fits BOTH throttle and
+		// pause windows should produce one pause lesson, not two.
+		switch {
+		case meetsPauseThreshold(s, o):
+			lessons = append(lessons, buildPauseLesson(s))
+		case meetsThrottleThreshold(s, o):
+			lessons = append(lessons, buildThrottleLesson(s))
+		case meetsObservingThreshold(s, o):
+			lessons = append(lessons, buildObservingLesson(s))
+		}
 	}
 
 	sortedWinners := append([]repository.SleeveRegimeStat(nil), report.BySleeveRegime...)
@@ -81,6 +176,9 @@ func GenerateLessons(report AttributionReport, opts LessonOptions) []Lesson {
 		return sortedWinners[i].TotalPnL > sortedWinners[j].TotalPnL
 	})
 	for _, s := range sortedWinners {
+		if isUnspecifiedRegime(s.Regime) {
+			continue
+		}
 		if !meetsWinThreshold(s, o) {
 			continue
 		}
@@ -93,19 +191,54 @@ func GenerateLessons(report AttributionReport, opts LessonOptions) []Lesson {
 	return lessons
 }
 
-// meetsLossThreshold is the gate for LessonSleeveRegimeLoser.
-// Triple-condition guard: enough sample, decisive win-rate
-// shortfall, AND negative dollar P&L. We require ALL three so a
-// strategy that wins rarely but big (lottery payoff) doesn't
-// get flagged as a loser by win-rate alone.
-func meetsLossThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
-	return s.TradeCount >= o.MinSampleSize &&
-		s.WinRate < o.LossWinRateMax &&
+// isUnspecifiedRegime is the canonical placeholder check. We treat
+// empty string AND the literal "unspecified" (any case) as missing
+// — the regime detector writes one of those two when it can't
+// classify the day, and either way it's not a real categorical
+// label we should reason about per-regime.
+func isUnspecifiedRegime(regime string) bool {
+	trimmed := strings.TrimSpace(regime)
+	if trimmed == "" {
+		return true
+	}
+	return strings.EqualFold(trimmed, "unspecified")
+}
+
+// meetsObservingThreshold fires on the SMALLEST sample bucket:
+// 5–9 trades (default), win rate below ObservingWinRateMax (50%
+// = below break-even). Severity is info; the lesson reads
+// "tracking this combination, sample too small for a directive".
+func meetsObservingThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
+	return s.TradeCount >= o.ObservingMinSampleSize &&
+		s.TradeCount < o.ObservingMaxSampleSize &&
+		s.WinRate < o.ObservingWinRateMax
+}
+
+// meetsThrottleThreshold fires on the MEDIUM sample bucket:
+// 10–29 trades (default), win rate below ThrottleWinRateMax
+// (40%). A real PM at this sample size would reduce position
+// size or raise the confidence floor — not pause outright.
+func meetsThrottleThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
+	return s.TradeCount >= o.ThrottleMinSampleSize &&
+		s.TradeCount < o.ThrottleMaxSampleSize &&
+		s.WinRate < o.ThrottleWinRateMax &&
 		s.TotalPnL < 0
 }
 
+// meetsPauseThreshold fires on the LARGE sample bucket: 30+
+// trades, win rate below PauseWinRateMax (35%), AND cumulative
+// P&L strictly negative. Only at this sample is the win-rate
+// shortfall statistically meaningful enough to recommend
+// pausing — and only when the dollar damage is real, not a
+// "wins rarely but big" lottery distribution.
+func meetsPauseThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
+	return s.TradeCount >= o.PauseMinSampleSize &&
+		s.WinRate < o.PauseWinRateMax &&
+		s.TotalPnL < o.PausePnLMax
+}
+
 func meetsWinThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
-	return s.TradeCount >= o.MinSampleSize &&
+	return s.TradeCount >= o.WinnerMinSampleSize &&
 		s.WinRate > o.WinnerWinRateMin &&
 		s.TotalPnL > 0
 }
@@ -125,10 +258,30 @@ func meetsWinThreshold(s repository.SleeveRegimeStat, o LessonOptions) bool {
 // frontend (lessonRenderer.tsx) can be written against this contract
 // without round-tripping through me.
 const (
-	// templateLoser:  attribution.lesson.sleeve_regime_loser
+	// templateLoser: LEGACY single-tier loser. New runs no longer
+	// emit this — the frontend dictionary keeps the key alive so
+	// memory rows persisted before the tiering refactor still
+	// render. See attribution.go::LessonSleeveRegimeLoser.
+	templateLoser = "attribution.lesson.sleeve_regime_loser"
+	// templateObserving: attribution.lesson.sleeve_regime_observing
 	// payload: { sleeve, regime, trade_count, win_rate, total_pnl,
 	//            avg_pnl_pct, avg_holding_days }
-	templateLoser = "attribution.lesson.sleeve_regime_loser"
+	// Small-sample journal entry; advisory body suggests
+	// continuing to watch and capturing context, NOT changing
+	// portfolio weights.
+	templateObserving = "attribution.lesson.sleeve_regime_observing"
+	// templateThrottle: attribution.lesson.sleeve_regime_throttle
+	// payload: same shape as observing.
+	// Medium-sample risk-management lesson; body suggests
+	// reducing sizing / raising the confidence floor / trying a
+	// shorter-horizon variant of the sleeve.
+	templateThrottle = "attribution.lesson.sleeve_regime_throttle"
+	// templatePause: attribution.lesson.sleeve_regime_pause
+	// payload: same shape as observing.
+	// Large-sample decisive lesson; body recommends pausing the
+	// (sleeve, regime) pair until the regime changes — this is
+	// the only tier that recommends a portfolio change.
+	templatePause = "attribution.lesson.sleeve_regime_pause"
 	// templateWinner: attribution.lesson.sleeve_regime_winner
 	// payload: { sleeve, regime, trade_count, win_rate, total_pnl,
 	//            avg_pnl_pct, avg_holding_days }
@@ -166,23 +319,30 @@ func sleeveRegimePayload(s repository.SleeveRegimeStat) map[string]any {
 	}
 }
 
-func buildLoserLesson(s repository.SleeveRegimeStat) Lesson {
+// buildObservingLesson — 5-to-(observingMax-1) closed lots, win
+// rate below 50% (i.e. below break-even). Severity=info so the UI
+// renders it as a journal entry, not an alert. Title and body
+// stay deliberately understated ("watching", not "losing money")
+// because the sample is too small for any directive.
+//
+// The English Title/Body are fallback text — the UI prefers the
+// i18n template (zh-CN / en-US) keyed off TemplateKey.
+func buildObservingLesson(s repository.SleeveRegimeStat) Lesson {
 	return Lesson{
-		Kind:     LessonSleeveRegimeLoser,
-		Severity: SeverityCritical,
+		Kind:     LessonSleeveRegimeObserving,
+		Severity: SeverityInfo,
 		Title: fmt.Sprintf(
-			"Sleeve %q is losing money in regime %q (%d trades, win-rate %.0f%%, PnL %.2f)",
-			s.Sleeve, s.Regime, s.TradeCount, s.WinRate*100, s.TotalPnL,
+			"Watching sleeve %q under regime %q — %d trades, win-rate %.0f%% (small sample)",
+			s.Sleeve, s.Regime, s.TradeCount, s.WinRate*100,
 		),
 		Body: fmt.Sprintf(
-			"Across %d closed lots in regime %s, the %s sleeve recorded a %.0f%% win rate and a "+
-				"cumulative realised P&L of %.2f (avg pnl pct: %.3f, avg holding %.1f days). "+
-				"Consider pausing this (sleeve, regime) combination in fund.config.strategySleeves "+
-				"until the conditions change, or instrumenting the entry filter further to understand "+
-				"why the signal misfires in this regime.",
-			s.TradeCount, s.Regime, s.Sleeve, s.WinRate*100, s.TotalPnL, s.AvgPnLPct, s.AvgHoldingDays,
+			"Across %d closed lots in regime %s, the %s sleeve is currently at a %.0f%% win rate "+
+				"(realised P&L %.2f, avg pnl pct %.3f, avg holding %.1f days). The sample is too "+
+				"small to recommend a portfolio change — keep tracking entries / exits, and revisit "+
+				"once the sample grows past %d trades or the regime shifts.",
+			s.TradeCount, s.Regime, s.Sleeve, s.WinRate*100, s.TotalPnL, s.AvgPnLPct, s.AvgHoldingDays, 10,
 		),
-		Tags:           []string{"loser", "sleeve:" + s.Sleeve, "regime:" + s.Regime},
+		Tags:           []string{"observing", "sleeve:" + s.Sleeve, "regime:" + s.Regime},
 		Sleeve:         s.Sleeve,
 		Regime:         s.Regime,
 		TradeCount:     s.TradeCount,
@@ -190,7 +350,77 @@ func buildLoserLesson(s repository.SleeveRegimeStat) Lesson {
 		TotalPnL:       s.TotalPnL,
 		AvgPnLPct:      s.AvgPnLPct,
 		AvgHoldingDays: s.AvgHoldingDays,
-		TemplateKey:    templateLoser,
+		TemplateKey:    templateObserving,
+		Payload:        sleeveRegimePayload(s),
+	}
+}
+
+// buildThrottleLesson — 10-to-29 closed lots, win-rate below 40%,
+// P&L negative. Severity=warning so the UI shows it amber. Body
+// suggests concrete actions a real PM would take (reduce size,
+// raise confidence threshold, try a shorter horizon) instead of
+// the binary "pause" wording the legacy loser lesson used.
+func buildThrottleLesson(s repository.SleeveRegimeStat) Lesson {
+	return Lesson{
+		Kind:     LessonSleeveRegimeThrottle,
+		Severity: SeverityWarning,
+		Title: fmt.Sprintf(
+			"Sleeve %q is underperforming in regime %q (%d trades, win-rate %.0f%%, PnL %.2f) — reduce sizing",
+			s.Sleeve, s.Regime, s.TradeCount, s.WinRate*100, s.TotalPnL,
+		),
+		Body: fmt.Sprintf(
+			"Across %d closed lots in regime %s, the %s sleeve recorded a %.0f%% win rate and a "+
+				"cumulative realised P&L of %.2f (avg pnl pct: %.3f, avg holding %.1f days). The "+
+				"sample now supports a risk-management response: consider (a) cutting position size "+
+				"on this (sleeve, regime) pair by ~30%%, (b) raising the entry confidence threshold "+
+				"so only higher-conviction signals fire, or (c) trying a shorter-horizon variant "+
+				"(e.g. intraday) before deciding whether to pause the combination at the 30-trade mark.",
+			s.TradeCount, s.Regime, s.Sleeve, s.WinRate*100, s.TotalPnL, s.AvgPnLPct, s.AvgHoldingDays,
+		),
+		Tags:           []string{"throttle", "sleeve:" + s.Sleeve, "regime:" + s.Regime},
+		Sleeve:         s.Sleeve,
+		Regime:         s.Regime,
+		TradeCount:     s.TradeCount,
+		WinRate:        s.WinRate,
+		TotalPnL:       s.TotalPnL,
+		AvgPnLPct:      s.AvgPnLPct,
+		AvgHoldingDays: s.AvgHoldingDays,
+		TemplateKey:    templateThrottle,
+		Payload:        sleeveRegimePayload(s),
+	}
+}
+
+// buildPauseLesson — 30+ closed lots, win-rate below 35%, P&L
+// strictly negative. Severity=critical. This is the only tier
+// that recommends actually pausing the combination — by that
+// sample size the win-rate shortfall is statistically
+// meaningful AND the dollar damage is real.
+func buildPauseLesson(s repository.SleeveRegimeStat) Lesson {
+	return Lesson{
+		Kind:     LessonSleeveRegimePause,
+		Severity: SeverityCritical,
+		Title: fmt.Sprintf(
+			"Sleeve %q is decisively losing in regime %q (%d trades, win-rate %.0f%%, PnL %.2f) — pause this pair",
+			s.Sleeve, s.Regime, s.TradeCount, s.WinRate*100, s.TotalPnL,
+		),
+		Body: fmt.Sprintf(
+			"Across %d closed lots in regime %s, the %s sleeve recorded a %.0f%% win rate and a "+
+				"cumulative realised P&L of %.2f (avg pnl pct: %.3f, avg holding %.1f days). At "+
+				"this sample the underperformance is statistically meaningful AND has cost the fund "+
+				"real money: pause the (sleeve, regime) combination in the fund's strategy sleeves "+
+				"config until the regime changes, and capture a post-mortem of why the entry filter "+
+				"misfired so the next iteration of the sleeve avoids the same setup.",
+			s.TradeCount, s.Regime, s.Sleeve, s.WinRate*100, s.TotalPnL, s.AvgPnLPct, s.AvgHoldingDays,
+		),
+		Tags:           []string{"pause", "sleeve:" + s.Sleeve, "regime:" + s.Regime},
+		Sleeve:         s.Sleeve,
+		Regime:         s.Regime,
+		TradeCount:     s.TradeCount,
+		WinRate:        s.WinRate,
+		TotalPnL:       s.TotalPnL,
+		AvgPnLPct:      s.AvgPnLPct,
+		AvgHoldingDays: s.AvgHoldingDays,
+		TemplateKey:    templatePause,
 		Payload:        sleeveRegimePayload(s),
 	}
 }

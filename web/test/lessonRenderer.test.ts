@@ -302,8 +302,43 @@ interface SnapshotCase {
   key: string;
   payload: Record<string, unknown>;
 }
+// observing / throttle / pause exercise the three new tiers introduced
+// by the sample-size grading refactor. We reuse the loser/winner
+// payload shape because the field set is identical — only the
+// recommended action wording changes per tier.
+const observingPayload = {
+  sleeve: "llm_pm",
+  regime: "chop",
+  trade_count: 6,
+  win_rate: 1 / 3,
+  total_pnl: -120,
+  avg_pnl_pct: -0.01,
+  avg_holding_days: 3.6,
+};
+const throttlePayload = {
+  sleeve: "mean_reversion",
+  regime: "chop",
+  trade_count: 12,
+  win_rate: 0.25,
+  total_pnl: -480.5,
+  avg_pnl_pct: -0.04,
+  avg_holding_days: 2.1,
+};
+const pausePayload = {
+  sleeve: "trend",
+  regime: "chop",
+  trade_count: 35,
+  win_rate: 10 / 35,
+  total_pnl: -1800,
+  avg_pnl_pct: -0.06,
+  avg_holding_days: 4.0,
+};
+
 const SNAPSHOT_CASES: SnapshotCase[] = [
   { key: "attribution.lesson.sleeve_regime_loser", payload: loserPayload },
+  { key: "attribution.lesson.sleeve_regime_observing", payload: observingPayload },
+  { key: "attribution.lesson.sleeve_regime_throttle", payload: throttlePayload },
+  { key: "attribution.lesson.sleeve_regime_pause", payload: pausePayload },
   { key: "attribution.lesson.sleeve_regime_winner", payload: winnerPayload },
   {
     key: "attribution.lesson.insufficient_data.watching",
@@ -329,6 +364,24 @@ const SNAPSHOTS: Record<string, { title: string; body: string }> = {
       'Sleeve "mean_reversion" is losing money in regime "chop" (12 trades, win-rate 25%, PnL -480.50)',
     body:
       "Across 12 closed lots in regime chop, the mean_reversion sleeve recorded a 25% win rate and a cumulative realised P&L of -480.50 (avg pnl pct: -4.0%, avg holding 2.1 days). Consider pausing this (sleeve, regime) combination in the fund's strategy sleeves config (fund.config.strategySleeves) until conditions change, or instrumenting the entry filter further to understand why the signal misfires in this regime.",
+  },
+  "en-US::attribution.lesson.sleeve_regime_observing::observing": {
+    title:
+      'Watching sleeve "llm_pm" under regime "chop" (6 trades, win-rate 33%, small sample)',
+    body:
+      "Across 6 closed lots in regime chop, the llm_pm sleeve is currently at a 33% win rate (realised P&L -120.00, avg pnl pct -1.0%, avg holding 3.6 days). The sample is too small to distinguish a real edge problem from a short unlucky streak, so no portfolio change is recommended yet — keep running the sleeve under the current rules, log entry / exit reasoning for each trade, and revisit once the sample grows past 10 trades or the regime shifts.",
+  },
+  "en-US::attribution.lesson.sleeve_regime_throttle::throttle": {
+    title:
+      'Sleeve "mean_reversion" is underperforming in regime "chop" — reduce sizing (12 trades, win-rate 25%, PnL -480.50)',
+    body:
+      "Across 12 closed lots in regime chop, the mean_reversion sleeve recorded a 25% win rate and a cumulative realised P&L of -480.50 (avg pnl pct: -4.0%, avg holding 2.1 days). The sample is large enough to take a risk-management response: consider (a) cutting position size on this (sleeve, regime) pair by ~30%, (b) raising the entry confidence threshold so only higher-conviction signals fire, or (c) trying a shorter-horizon variant (e.g. intraday) for 1–2 weeks. Wait until the sample reaches 30 trades before deciding whether to pause the combination outright.",
+  },
+  "en-US::attribution.lesson.sleeve_regime_pause::pause": {
+    title:
+      'Sleeve "trend" is decisively losing in regime "chop" — pause this pair (35 trades, win-rate 29%, PnL -1,800.00)',
+    body:
+      "Across 35 closed lots in regime chop, the trend sleeve recorded a 29% win rate and a cumulative realised P&L of -1,800.00 (avg pnl pct: -6.0%, avg holding 4.0 days). At this sample size the underperformance is statistically meaningful AND has cost the fund real money. Pause the (sleeve, regime) combination in the fund's strategy sleeves config until the regime changes, and capture a post-mortem of why the entry filter misfired so the next iteration of the sleeve avoids the same setup.",
   },
   "en-US::attribution.lesson.sleeve_regime_winner::winner": {
     title:
@@ -363,6 +416,24 @@ const SNAPSHOTS: Record<string, { title: string; body: string }> = {
       '策略套件 "mean_reversion" 在 "chop" 行情下亏损（12 笔，胜率 25%，盈亏 -480.50）',
     body:
       '在 "chop" 行情下共 12 个已平仓批次，"mean_reversion" 套件录得 25% 胜率，累计已实现盈亏 -480.50（平均收益率 -4.0%，平均持仓 2.1 天）。建议在该基金的「策略套件配置」（fund.config.strategySleeves）中暂停该 (套件, 行情) 组合，直到行情切换；或加强进场过滤，以理解此行情下信号失效的原因。',
+  },
+  "zh-CN::attribution.lesson.sleeve_regime_observing::observing": {
+    title:
+      '正在观察策略套件 "llm_pm" 在 "chop" 行情下的表现（6 笔，胜率 33%，样本较小）',
+    body:
+      '在 "chop" 行情下，"llm_pm" 套件目前已平仓 6 笔，胜率 33%，累计已实现盈亏 -120.00（平均收益率 -1.0%，平均持仓 3.6 天）。样本太小，无法判断是策略问题还是短期运气，暂不建议调整组合权重 — 继续按当前规则跟踪进出场，等样本累积到 10 笔以上或行情切换后再复盘。可同步记录当前的入场理由 / 离场触发，为下一阶段的复盘留素材。',
+  },
+  "zh-CN::attribution.lesson.sleeve_regime_throttle::throttle": {
+    title:
+      '策略套件 "mean_reversion" 在 "chop" 行情下表现偏弱，建议减仓观察（12 笔，胜率 25%，盈亏 -480.50）',
+    body:
+      '在 "chop" 行情下共 12 个已平仓批次，"mean_reversion" 套件录得 25% 胜率，累计已实现盈亏 -480.50（平均收益率 -4.0%，平均持仓 2.1 天）。样本已能支撑风控调整，可从以下三个方向择一收紧：（a）该 (套件, 行情) 组合的单笔仓位下调 ~30%；（b）将入场置信度阈值上调，只让高确信度信号触发；（c）改用更短持仓周期的变体（如日内做 T）观察 1–2 周。到样本累积至 30 笔后再决定是否真的暂停该组合。',
+  },
+  "zh-CN::attribution.lesson.sleeve_regime_pause::pause": {
+    title:
+      '策略套件 "trend" 在 "chop" 行情下持续亏损，建议暂停该组合（35 笔，胜率 29%，盈亏 -1,800.00）',
+    body:
+      '在 "chop" 行情下共 35 个已平仓批次，"trend" 套件录得 29% 胜率，累计已实现盈亏 -1,800.00（平均收益率 -6.0%，平均持仓 4.0 天）。样本量已足以判定该 (套件, 行情) 组合在统计上显著弱于预期，且已对组合造成可见亏损。建议在基金的策略套件配置中暂停该组合，直到行情切换；同时复盘入场过滤器为何在此 regime 下失效，把结论沉淀到下一版套件设计中，避免在新一轮该 regime 出现时重复同样的错误。',
   },
   "zh-CN::attribution.lesson.sleeve_regime_winner::winner": {
     title:
@@ -405,6 +476,15 @@ function snapshotKey(loc: LocaleId, kase: SnapshotCase): string {
   }
   if (kase.key.endsWith(".sleeve_regime_loser")) {
     return `${loc}::${kase.key}::loser`;
+  }
+  if (kase.key.endsWith(".sleeve_regime_observing")) {
+    return `${loc}::${kase.key}::observing`;
+  }
+  if (kase.key.endsWith(".sleeve_regime_throttle")) {
+    return `${loc}::${kase.key}::throttle`;
+  }
+  if (kase.key.endsWith(".sleeve_regime_pause")) {
+    return `${loc}::${kase.key}::pause`;
   }
   if (kase.key.endsWith(".sleeve_regime_winner")) {
     return `${loc}::${kase.key}::winner`;
