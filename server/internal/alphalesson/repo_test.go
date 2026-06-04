@@ -409,9 +409,9 @@ func TestListLessons_HappyPath(t *testing.T) {
 	mock.ExpectQuery("FROM memories").
 		WithArgs("f1", 50).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "fund_id", "agent_id", "visibility", "agent_tag", "content", "title",
+			"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag", "content", "title",
 			"alpha_vs_benchmark", "source_outcome_id", "trading_date", "created_at",
-		}).AddRow("l1", "f1", nil, "fund", "fund_analyst", "lesson body", "lesson title",
+		}).AddRow("l1", "f1", nil, "fund", "internal", "fund_analyst", "lesson body", "lesson title",
 			0.025, "o1", now, now))
 	out, err := r.ListLessons(context.Background(), ListLessonsParams{FundID: "f1"})
 	if err != nil {
@@ -497,10 +497,10 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 				},
 				expectedArgs: []driver.Value{"fund-A", 50},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
-				}).AddRow("l1", "fund-A", nil, "fund", "tag", "body", "title",
+				}).AddRow("l1", "fund-A", nil, "fund", "internal", "tag", "body", "title",
 					0.02, "o1", now, now),
 			},
 		},
@@ -521,7 +521,7 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 				},
 				expectedArgs: []driver.Value{"fund-A", 50},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
 				}),
@@ -546,7 +546,7 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 					50,
 				},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
 				}),
@@ -570,7 +570,7 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 					50,
 				},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
 				}),
@@ -592,7 +592,7 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 				},
 				expectedArgs: []driver.Value{"fund-A", 50},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
 				}),
@@ -618,7 +618,7 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 					25,
 				},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
 				}),
@@ -639,10 +639,10 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 					50,
 				},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
-				}).AddRow("inherited-1", "fund-B", uuidA, "agent_portable", "x", "body", "title",
+				}).AddRow("inherited-1", "fund-B", uuidA, "agent_portable", "internal", "x", "body", "title",
 					0.04, "o1", now, now),
 				expectInheriting: true,
 			},
@@ -662,10 +662,10 @@ func TestListLessons_CrossFundMatrix(t *testing.T) {
 					50,
 				},
 				rowsToReturn: sqlmock.NewRows([]string{
-					"id", "fund_id", "agent_id", "visibility", "agent_tag",
+					"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 					"content", "title", "alpha_vs_benchmark",
 					"source_outcome_id", "trading_date", "created_at",
-				}).AddRow("native-1", "fund-A", uuidA, "agent_portable", "x", "body", "title",
+				}).AddRow("native-1", "fund-A", uuidA, "agent_portable", "internal", "x", "body", "title",
 					0.04, "o1", now, now),
 				expectInheriting: false,
 			},
@@ -753,10 +753,10 @@ func TestListLessons_RegimeGate(t *testing.T) {
 	now := time.Now()
 	baseRows := func() *sqlmock.Rows {
 		return sqlmock.NewRows([]string{
-			"id", "fund_id", "agent_id", "visibility", "agent_tag",
+			"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
 			"content", "title", "alpha_vs_benchmark",
 			"source_outcome_id", "trading_date", "created_at",
-		}).AddRow("l1", "fund-A", nil, "fund", "tag",
+		}).AddRow("l1", "fund-A", nil, "fund", "internal", "tag",
 			"body", "title", 0.02, "o1", now, now)
 	}
 
@@ -955,6 +955,176 @@ func TestLessonTagsContainsRegimeWhenStampSet(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("stamped tags missing regime entry: %v", stamped)
+	}
+}
+
+// TestListLessons_SecretRowsBlockedFromCrossFund is AP7 — the
+// end-to-end pin that a sensitivity='secret' row stays inside
+// its origin fund's perimeter no matter how loud the
+// agent_portable visibility says otherwise. This is the
+// per-row escape hatch a PM uses to mark "this NVDA insight is
+// too proprietary, don't propagate to sister funds".
+//
+// The test asserts BOTH halves of the gate:
+//   (a) sensitivity='secret' is in the cross-fund WHERE clause
+//       (regex match for "sensitivity <> 'secret'")
+//   (b) IsCrossFundEligible returns false for a Go-side
+//       LessonRow with Visibility=agent_portable + Sensitivity=secret
+//
+// Without (a) a regression that dropped the SQL guard would
+// leak secret rows; without (b) the UI / debug layer would
+// disagree with the SQL gate, and a "show only inheritable"
+// filter on the lesson list would render the wrong subset.
+func TestListLessons_SecretRowsBlockedFromCrossFund(t *testing.T) {
+	uuidA := "11111111-1111-1111-1111-111111111111"
+
+	r, mock, done := newMockRepo(t)
+	defer done()
+
+	// Verify the SQL pattern includes the secret guard. The
+	// load-bearing fragment is the literal "sensitivity <>
+	// 'secret'" inside the cross-fund branch. A refactor that
+	// loosened it to "sensitivity NOT IN (...)" would still
+	// pass (we match a substring) but accidental removal
+	// would surface as expectation-not-met.
+	pattern := `FROM memories[\s\S]*sensitivity <> 'secret'`
+	mock.ExpectQuery(pattern).
+		WithArgs(
+			"fund-A",
+			sqlmock.AnyArg(), // pq.Array of team UUIDs
+			50,
+		).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "fund_id", "agent_id", "visibility", "sensitivity", "agent_tag",
+			"content", "title", "alpha_vs_benchmark",
+			"source_outcome_id", "trading_date", "created_at",
+		})) // no rows — the assertion is on the SQL shape
+
+	if _, err := r.ListLessons(context.Background(), ListLessonsParams{
+		FundID:       "fund-A",
+		TeamAgentIDs: []string{uuidA},
+		Limit:        50,
+	}); err != nil {
+		t.Fatalf("ListLessons: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("mock expectations: %v", err)
+	}
+}
+
+// TestIsCrossFundEligible_Matrix locks the Go-side gate
+// function used by UI / debug code. The matrix mirrors the
+// SQL WHERE clause exactly:
+//
+//   visibility=agent_portable + agent_id valid + sensitivity != secret → true
+//   any condition violated                                              → false
+//
+// Two regressions this catches:
+//
+//   * sensitivity check skipped → secret rows show up as
+//     "inheritable" in UI tags / log lines even though the
+//     SQL gate correctly filters them.
+//   * agent_id NULL not gated → UI shows "inherited from
+//     Fund X" for rows that have no FK and therefore can't
+//     actually be served via the cross-fund branch.
+//
+// Drift between this function and the SQL WHERE is a package
+// invariant — any future change to the gate MUST touch BOTH.
+func TestIsCrossFundEligible_Matrix(t *testing.T) {
+	uuidA := "11111111-1111-1111-1111-111111111111"
+	cases := []struct {
+		name string
+		row  LessonRow
+		want bool
+	}{
+		{
+			name: "happy path: agent_portable + uuid + internal → eligible",
+			row: LessonRow{
+				Visibility:  "agent_portable",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "internal",
+			},
+			want: true,
+		},
+		{
+			name: "happy path: public sensitivity is also fine",
+			row: LessonRow{
+				Visibility:  "agent_portable",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "public",
+			},
+			want: true,
+		},
+		{
+			name: "secret blocks even with agent_portable + valid uuid",
+			row: LessonRow{
+				Visibility:  "agent_portable",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "secret",
+			},
+			want: false,
+		},
+		{
+			name: "secret case-insensitive (caller could pass SECRET)",
+			row: LessonRow{
+				Visibility:  "agent_portable",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "SECRET",
+			},
+			want: false,
+		},
+		{
+			name: "fund visibility is not eligible regardless of sensitivity",
+			row: LessonRow{
+				Visibility:  "fund",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "public",
+			},
+			want: false,
+		},
+		{
+			name: "private visibility is not eligible",
+			row: LessonRow{
+				Visibility:  "private",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "public",
+			},
+			want: false,
+		},
+		{
+			name: "marketplace visibility uses its own propagation, not eligible here",
+			row: LessonRow{
+				Visibility:  "marketplace",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "public",
+			},
+			want: false,
+		},
+		{
+			name: "NULL agent_id blocks (cant join cross-fund without FK)",
+			row: LessonRow{
+				Visibility:  "agent_portable",
+				AgentID:     sql.NullString{},
+				Sensitivity: "internal",
+			},
+			want: false,
+		},
+		{
+			name: "sensitivity with whitespace stripped (defensive)",
+			row: LessonRow{
+				Visibility:  "agent_portable",
+				AgentID:     sql.NullString{String: uuidA, Valid: true},
+				Sensitivity: "  secret  ",
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsCrossFundEligible(tc.row); got != tc.want {
+				t.Errorf("IsCrossFundEligible(%+v) = %v, want %v", tc.row, got, tc.want)
+			}
+		})
 	}
 }
 

@@ -51,6 +51,33 @@ var ErrNotFound = errors.New("alphalesson: not found")
 // (passes any filter).
 const regimeTagPrefix = "regime:"
 
+// IsCrossFundEligible reports whether a LessonRow can be
+// served via the agent_portable cross-fund branch in
+// ListLessons. The conditions mirror the reader gate exactly:
+//
+//	visibility  = 'agent_portable'
+//	agent_id    IS NOT NULL
+//	sensitivity != 'secret'
+//
+// Callers (UI / debug tooling) use this to render a lock /
+// fund-private badge without re-implementing the gate. Adding
+// or removing a condition here MUST be mirrored in the SQL
+// WHERE clause of ListLessons, and vice versa — the package
+// invariant is that this Go-side check and the SQL check
+// produce identical answers for any given row.
+func IsCrossFundEligible(l LessonRow) bool {
+	if l.Visibility != "agent_portable" {
+		return false
+	}
+	if !l.AgentID.Valid {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(l.Sensitivity), "secret") {
+		return false
+	}
+	return true
+}
+
 // LessonRow is the projection of an alpha-tagged memory row.
 //
 // AP3 added Visibility, AgentID, and InheritedFromOtherFund.
@@ -76,6 +103,14 @@ type LessonRow struct {
 	// rows whose agent identity was only ever stored in
 	// agent_tag (tag-style strings — see AP2 nullableUUID).
 	AgentID sql.NullString
+	// Sensitivity mirrors memories.sensitivity. Returned by
+	// AP7 so the caller (and IsCrossFundEligible) can tell
+	// at a glance whether this row is gated cross-fund. A row
+	// with sensitivity='secret' will NEVER be returned via
+	// the cross-fund branch (the reader SQL filters it) — so
+	// if you see secret + InheritedFromOtherFund=true in the
+	// same row, that's a bug worth a stack trace.
+	Sensitivity string
 	// InheritedFromOtherFund is true iff this row was
 	// retrieved through the cross-fund agent_portable branch
 	// AND the row's own fund_id does NOT match the querying
@@ -528,7 +563,7 @@ func (r *Repo) ListLessons(ctx context.Context, p ListLessonsParams) ([]LessonRo
 		conds = append(conds, fmt.Sprintf("agent_tag = $%d", len(args)))
 	}
 	args = append(args, limit)
-	q := fmt.Sprintf(`SELECT id, fund_id, agent_id, visibility, agent_tag, content, title,
+	q := fmt.Sprintf(`SELECT id, fund_id, agent_id, visibility, sensitivity, agent_tag, content, title,
 	                         alpha_vs_benchmark, source_outcome_id, trading_date, created_at
 	                    FROM memories
 	                   WHERE %s
@@ -544,8 +579,10 @@ func (r *Repo) ListLessons(ctx context.Context, p ListLessonsParams) ([]LessonRo
 		var l LessonRow
 		var agentTag sql.NullString
 		var visibility sql.NullString
+		var sensitivity sql.NullString
 		if err := rows.Scan(
-			&l.ID, &l.FundID, &l.AgentID, &visibility, &agentTag, &l.Content, &l.Title,
+			&l.ID, &l.FundID, &l.AgentID, &visibility, &sensitivity, &agentTag,
+			&l.Content, &l.Title,
 			&l.AlphaVsBench, &l.SourceOutcomeID, &l.TradingDate, &l.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("alphalesson: scan lesson: %w", err)
@@ -555,6 +592,9 @@ func (r *Repo) ListLessons(ctx context.Context, p ListLessonsParams) ([]LessonRo
 		}
 		if visibility.Valid {
 			l.Visibility = visibility.String
+		}
+		if sensitivity.Valid {
+			l.Sensitivity = sensitivity.String
 		}
 		// Derived flag: a row is "inherited from another fund"
 		// when its own fund_id is different from the querying
