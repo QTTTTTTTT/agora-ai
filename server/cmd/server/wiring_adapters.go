@@ -21249,59 +21249,20 @@ func (m *runtimeMemorySystem) generateAgentLessonsLLM(ctx context.Context, role,
 		cap = 2
 	}
 
-	// Pull at most 5 top holdings into the prompt so the model can
-	// cite symbol-level facts ("301308 仓位 6.4%") instead of
-	// abstract role advice. We sort by absolute MarketValue descending.
-	type holdingLine struct {
-		symbol string
-		weight float64
-	}
-	lines := make([]holdingLine, 0, len(learningCtx.positions))
-	for _, p := range learningCtx.positions {
-		weight := 0.0
-		if learningCtx.nav != nil && learningCtx.nav.TotalAssets > 0 {
-			weight = p.MarketValue / learningCtx.nav.TotalAssets
-		}
-		lines = append(lines, holdingLine{symbol: strings.TrimSpace(p.Symbol), weight: weight})
-	}
-	sort.SliceStable(lines, func(i, j int) bool { return math.Abs(lines[i].weight) > math.Abs(lines[j].weight) })
-	if len(lines) > 5 {
-		lines = lines[:5]
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Fund: %s\n", strings.TrimSpace(learningCtx.fund.Name))
-	fmt.Fprintf(&sb, "Trading date: %s\n", learningCtx.tradingDate.Format("2006-01-02"))
-	fmt.Fprintf(&sb, "Agent role: %s\n", role)
-	if focus != "" {
-		fmt.Fprintf(&sb, "Agent focus: %s\n", focus)
-	}
-	fmt.Fprintf(&sb, "Daily return: %.4f%%\n", dailyReturn*100)
-	fmt.Fprintf(&sb, "Trade stats: total=%d filled=%d partial=%d rejected=%d fillRatio=%.2f\n",
-		tradeStats.total, tradeStats.filled, tradeStats.partial, tradeStats.rejected, tradeStats.fillRatio)
-	if learningCtx.plan != nil {
-		fmt.Fprintf(&sb, "Plan status: %s, action count: %d\n", learningCtx.plan.Status, len(learningCtx.actions))
-	} else {
-		sb.WriteString("Plan: not generated today\n")
-	}
-	if len(lines) > 0 {
-		sb.WriteString("Top holdings (symbol, weight of NAV):\n")
-		for _, h := range lines {
-			fmt.Fprintf(&sb, "  - %s %.2f%%\n", h.symbol, h.weight*100)
-		}
-	}
-	if len(learningCtx.actions) > 0 {
-		sb.WriteString("Plan actions:\n")
-		for i, a := range learningCtx.actions {
-			if i >= 5 {
-				fmt.Fprintf(&sb, "  - … and %d more\n", len(learningCtx.actions)-5)
-				break
-			}
-			amount := a.Amount.Float64
-			fmt.Fprintf(&sb, "  - %s %s amount=%.2f exec=%s\n",
-				strings.TrimSpace(a.Symbol), strings.TrimSpace(a.Action), amount, strings.TrimSpace(a.ExecutionStatus))
-		}
-	}
+	// Role-specific learning body. The four roles in a fund team
+	// observe DIFFERENT facts about the same day — a PM thinks about
+	// allocation + plan quality, a Researcher about how their thesis
+	// translated into actions for their focus area, a Trader about
+	// execution micro-structure, a Risk overseer about concentration
+	// and reject signals. Before this dispatch the LLM saw the same
+	// fund-wide summary block regardless of role, and the only thing
+	// distinguishing the outputs was the role label in the system
+	// prompt — predictably it produced near-identical lessons across
+	// the team. The dispatcher below carves out the fact-subset each
+	// role actually needs so the resulting lessons read like a real
+	// team's per-role journal entries instead of four paraphrases of
+	// the same paragraph.
+	userPromptBody := buildRoleSpecificLearningBody(role, focus, learningCtx, tradeStats, dailyReturn)
 
 	// Prompt design notes (matters because the first cut of this
 	// prompt confused gemini-3.1-pro into echoing the constraint
@@ -21322,12 +21283,13 @@ func (m *runtimeMemorySystem) generateAgentLessonsLLM(ctx context.Context, role,
 	systemPrompt := "你是 AI 基金团队的复盘教练。基于给定的当日数据为一位 agent 生成今日复盘和明日调整方向。" +
 		"严格按 JSON 对象输出（不要 markdown 围栏、不要任何说明文字）。每条字符串：简体中文 1 句，引用数据中的具体数字、占比或股票代码，以 。 结尾。" +
 		"不允许的句子：以 \"为了让\"、\"为了实现\"、\"To maximize\"、\"To improve\" 开头的空洞陈述。\n\n" +
-		"重要：示例中的 <SYM_A> / <SYM_B> 是占位符，请用上文 Top holdings / Plan actions 里出现的真实股票代码替换；不要在最终输出中保留这两个尖括号占位符。\n\n" +
+		roleSpecificSystemHint(role) + "\n\n" +
+		"重要：示例中的 <SYM_A> / <SYM_B> 是占位符，请用上文上下文里出现的真实股票代码替换；不要在最终输出中保留这两个尖括号占位符。\n\n" +
 		"输出格式（这是一个示例，必须完全照抄结构）：\n" +
 		"{\"lessons\":[\"<SYM_A> 当日成交 49984 元，仓位扩张到 5%，符合风控预期。\",\"组合当日收益持平但 watch 类标的仍占 60%，明显说明执行力度不足。\"]," +
 		"\"adjustments\":[\"明日开盘前评估 watch 类标的是否具备转 buy 条件。\",\"对 <SYM_B> 设置明确的放弃条件以减少观望成本。\"]}"
 
-	userPrompt := sb.String() +
+	userPrompt := userPromptBody +
 		"\n\n请仅输出 JSON 对象，2-3 条 lessons + 2-3 条 adjustments，每条不超过 60 个中文字符。"
 
 	req := llm.ChatRequest{
