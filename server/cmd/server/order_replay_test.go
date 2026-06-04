@@ -28,6 +28,7 @@ var orderReplayColumns = []string{
 	"contract_multiplier", "expiry_date", "reduce_only", "slippage_pct",
 	"stop_price", "trail_amount", "trail_percent", "display_qty",
 	"time_in_force", "good_till_date", "parent_trade_id",
+	"strategy", "strategy_parent_trade_id",
 	"client_idempotency_key", "created_at",
 	"cancelled_at", "cancel_reason", "replaced_at", "replace_count",
 }
@@ -81,6 +82,7 @@ func TestReplayOpenOrders_PopulatesSimulatorBook(t *testing.T) {
 			sql.NullString{String: "gtc", Valid: true},
 			sql.NullTime{},
 			sql.NullString{},
+			sql.NullString{}, sql.NullString{}, // strategy + strategy_parent_trade_id
 			sql.NullString{String: "client-restored-1", Valid: true},
 			now,
 			sql.NullTime{}, sql.NullString{}, sql.NullTime{},
@@ -117,6 +119,7 @@ func TestReplayOpenOrders_PopulatesSimulatorBook(t *testing.T) {
 			sql.NullString{String: "gtc", Valid: true},
 			sql.NullTime{},
 			sql.NullString{},
+			sql.NullString{}, sql.NullString{}, // strategy + strategy_parent_trade_id
 			sql.NullString{String: "client-trailing-1", Valid: true},
 			now,
 			sql.NullTime{}, sql.NullString{}, sql.NullTime{},
@@ -234,6 +237,7 @@ func TestReplayOpenOrders_SkipsRowsWithoutBrokerOrderID(t *testing.T) {
 			sql.NullString{},
 			sql.NullTime{},
 			sql.NullString{},
+			sql.NullString{}, sql.NullString{}, // strategy + strategy_parent_trade_id
 			sql.NullString{},
 			now,
 			sql.NullTime{}, sql.NullString{}, sql.NullTime{},

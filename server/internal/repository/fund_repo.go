@@ -243,6 +243,19 @@ type TradeExecution struct {
 	// take-profit / OCO child orders so the engine can de-activate
 	// siblings when one fills.
 	ParentTradeID sql.NullString `json:"parentTradeId"`
+	// Strategy is the execution strategy that produced this fill
+	// (one of broker.ExecutionStrategy: immediate / limit / twap /
+	// vwap / iceberg / pov). NULL for legacy rows; new fills
+	// always populate it via TradeRepo.Create.
+	Strategy sql.NullString `json:"strategy"`
+	// StrategyParentTradeID points at the parent of a sliced
+	// execution (TWAP / VWAP / iceberg / POV). NULL means
+	// "standalone parent" (or pre-088 legacy row). DISTINCT from
+	// ParentTradeID — that one is the bracket / OCO parent, this
+	// one is the execution-strategy slice parent. The two
+	// relationships are orthogonal and both can be set on a
+	// child slice that's also the entry leg of a bracket.
+	StrategyParentTradeID sql.NullString `json:"strategyParentTradeId"`
 	// ClientIdempotencyKey is the caller-minted idempotency key used
 	// by the broker layer (broker.PlaceOrderRequest.ClientOrderID maps
 	// to this column). The Create function performs ON CONFLICT DO
@@ -1245,6 +1258,7 @@ func (r *TradeRepo) Create(ctx context.Context, t *TradeExecution) (string, erro
 				contract_multiplier, expiry_date, reduce_only,
 				stop_price, trail_amount, trail_percent, display_qty,
 				time_in_force, good_till_date, parent_trade_id,
+				strategy, strategy_parent_trade_id,
 				client_idempotency_key
 			)
 			VALUES (
@@ -1256,7 +1270,8 @@ func (r *TradeRepo) Create(ctx context.Context, t *TradeExecution) (string, erro
 				$26, $27, $28,
 				$29, $30, $31, $32,
 				$33, $34, $35,
-				$36
+				$36, $37,
+				$38
 			)
 			ON CONFLICT (client_idempotency_key)
 				WHERE client_idempotency_key IS NOT NULL
@@ -1266,8 +1281,8 @@ func (r *TradeRepo) Create(ctx context.Context, t *TradeExecution) (string, erro
 		SELECT id FROM ins
 		UNION ALL
 		SELECT id FROM trade_executions
-			WHERE client_idempotency_key = $36
-				AND $36 IS NOT NULL
+			WHERE client_idempotency_key = $38
+				AND $38 IS NOT NULL
 		LIMIT 1`
 	err := r.db.QueryRowContext(ctx, sqlInsert,
 		t.FundID, t.PlanID, t.PlanActionID, t.InstrumentKey, t.Symbol,
@@ -1278,6 +1293,7 @@ func (r *TradeRepo) Create(ctx context.Context, t *TradeExecution) (string, erro
 		t.ContractMultiplier, t.ExpiryDate, t.ReduceOnly,
 		t.StopPrice, t.TrailAmount, t.TrailPercent, t.DisplayQty,
 		t.TimeInForce, t.GoodTillDate, t.ParentTradeID,
+		t.Strategy, t.StrategyParentTradeID,
 		t.ClientIdempotencyKey,
 	).Scan(&id)
 	if err != nil {
@@ -1301,6 +1317,7 @@ const tradeExecutionColumns = `
 	contract_multiplier, expiry_date, reduce_only, slippage_pct,
 	stop_price, trail_amount, trail_percent, display_qty,
 	time_in_force, good_till_date, parent_trade_id,
+	strategy, strategy_parent_trade_id,
 	client_idempotency_key, created_at,
 	cancelled_at, cancel_reason, replaced_at, replace_count`
 
@@ -1529,6 +1546,7 @@ func scanTradeExecutions(rows *sql.Rows) ([]TradeExecution, error) {
 			&t.ContractMultiplier, &t.ExpiryDate, &t.ReduceOnly, &t.SlippagePct,
 			&t.StopPrice, &t.TrailAmount, &t.TrailPercent, &t.DisplayQty,
 			&t.TimeInForce, &t.GoodTillDate, &t.ParentTradeID,
+			&t.Strategy, &t.StrategyParentTradeID,
 			&t.ClientIdempotencyKey, &t.CreatedAt,
 			&t.CancelledAt, &t.CancelReason, &t.ReplacedAt, &t.ReplaceCount,
 		); err != nil {

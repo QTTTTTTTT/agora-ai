@@ -172,6 +172,7 @@ func TestOrderActions_Cancel_LiveGateBypassedWhenDisabled(t *testing.T) {
 		"contract_multiplier", "expiry_date", "reduce_only", "slippage_pct",
 		"stop_price", "trail_amount", "trail_percent", "display_qty",
 		"time_in_force", "good_till_date", "parent_trade_id",
+		"strategy", "strategy_parent_trade_id",
 		"client_idempotency_key", "created_at",
 		"cancelled_at", "cancel_reason", "replaced_at", "replace_count",
 	}
@@ -187,6 +188,7 @@ func TestOrderActions_Cancel_LiveGateBypassedWhenDisabled(t *testing.T) {
 			nil, nil, nil, nil,
 			nil, nil, nil, nil,
 			nil, nil, nil,
+			nil, nil, // strategy + strategy_parent_trade_id
 			nil, now,
 			cancelledAt, cancelReason, nil, 0,
 		)

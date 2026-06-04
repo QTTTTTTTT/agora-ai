@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 of 2 done**
+> Status as of 2026-06-04: **step 1 done, step 2 buy-path landed; sell + futures pending**
 
 ## Why this doc exists
 
@@ -103,9 +103,9 @@ orders actually produce distinct strategy values per row.
   tests cover the quantity-gate dominance, plan-price branch, and
   normaliser edge cases (case, whitespace, unknown values).
 
-### B-step 2 — real child-order splitting (**TODO**)
+### B-step 2 — real child-order splitting (**IN-PROGRESS: buy path landed; sell + futures pending**)
 
-When this lands, the picture becomes:
+When this fully lands, the picture becomes:
 
 ```
 runtimeTradingEngine.executePlanAction (PER action)
@@ -122,27 +122,103 @@ runtimeTradingEngine.executePlanAction (PER action)
                                      plan_action.execution_status)
 ```
 
-Step 2 work items:
+#### Step 2 work items — current status
 
-- [ ] Add `trade_executions.strategy TEXT NULL` column (migration
-      087).
-- [ ] Add `TradeExecution.Strategy sql.NullString` field +
-      `TradeRepo.Create` INSERT.
-- [ ] New helper `splitParentIntoChildren(action, strategy)` that
-      returns `[]childOrder{qty, slice_time_offset}` for `twap` /
-      `vwap`; identity for `immediate` / `limit`.
-- [ ] Wrap each child in the existing `pmPathLotSizeGuard` (child
-      qty) and pass `parent_trade_id` to `tradeRepoCreateAndFill`.
-- [ ] Aggregate slippage across children for the parent row
-      (weighted by filled qty).
-- [ ] `cash_ledger` + `position_lots` updates need to be per-child,
-      not per-parent — current helpers can be reused unchanged.
-- [ ] Add a feature flag so existing funds default to "no
-      splitting" (immediate child = parent) until ops sign off.
-- [ ] Integration test: a 4000-share buy with `twap` strategy
-      produces 4 children with `parent_trade_id` chained.
-- [ ] Daily-review LLM context builder: surface "TWAP intent on N
-      shares, M% filled by close" as a Trader-role learning signal.
+**Landed in this PR (buy path only):**
+
+- [x] Migration `088_trade_strategy_and_parent.sql` adds
+      `trade_executions.strategy VARCHAR(16)` (CHECK in the
+      immediate / limit / twap / vwap / iceberg / pov vocabulary)
+      and `trade_executions.strategy_parent_trade_id UUID` with a
+      partial index on the non-NULL slice. The column is
+      **distinct from the pre-existing `parent_trade_id`** that
+      migration 051 wired for OCO / bracket parents; the two
+      relationships are orthogonal (see column COMMENTs for the
+      disambiguation).
+      _Note_: this PR uses migration **088** because migration 087
+      was consumed by the `fund_team_member_specialization` table
+      (T3 work, see `agent_self_learning_prompts.go` notes).
+- [x] `repository.TradeExecution.Strategy` +
+      `StrategyParentTradeID` fields. `TradeRepo.Create` writes
+      both; `tradeExecutionColumns` SELECTs them so every reader
+      sees them.
+- [x] `splitParentIntoChildren(qty, strategy) []int` —
+      `server/cmd/server/pm_path_child_split.go`. Returns
+      `[800,800,800,800,800]` for 4000 TWAP, `[800,800,800,800,801]`
+      for 4001 TWAP (last child absorbs the remainder), `[qty]` for
+      `immediate` / `limit` / unknown so the splitting loop is
+      uniform on every code path.
+- [x] `pmPathChildSplittingEnabled(fund.Config)` — feature flag
+      resolver in `pm_path_feature_flag.go`. Reads
+      `pm_path_child_splitting` bool from the JSON config blob,
+      defaults to **false** on missing key / malformed JSON / type
+      mismatch (fail-safe to legacy single-row path).
+- [x] `tradeRepoCreateAndFillSplit` implements the parent + N
+      children fan-out **for the buy side only**. Parent row
+      carries aggregated qty + summed fees + `strategy` +
+      `strategy_parent_trade_id = NULL`. Each child row carries
+      slice qty + pro-rata fees (`proRataFeeSplit`, last child
+      absorbs the rounding remainder so SUM = parent) +
+      `strategy_parent_trade_id = parent.ID`. **Parent row writes
+      nothing to `cash_ledger` / `position_lots`**; only children
+      do, so FIFO cost basis stays accurate per slice.
+- [x] Idempotency keys: parent uses the legacy
+      `trade:{action}:{side}:{totalQty}` key; children use
+      `trade:{action}:{side}:{totalQty}:child:{idx}` so a retry of
+      the same parent fans out into the same 1+N rows without
+      double-booking.
+- [x] Per-action test coverage: `pm_path_child_split_test.go`
+      (splitter matrix + zero-quantity-child invariant),
+      `pm_path_feature_flag_test.go` (flag resolver branches),
+      `pm_path_split_executor_test.go` (a 4000-share TWAP buy
+      produces 6 INSERTs + 6 UPDATEs in the right order, with the
+      flag off the legacy single-row path is preserved, with the
+      flag on but side=sell the legacy single-row path is
+      preserved, and `proRataFeeSplit` sums exactly to the parent
+      total).
+
+**Deferred to follow-up PRs (still TODO):**
+
+- [ ] Wire the splitter on the **sell** path
+      (`tradeRepoCreateAndFill` with side=sell). The blocker is
+      lot-ledger ordering: a 4000-share TWAP sell against existing
+      FIFO opens has to deterministically pick which open lots to
+      close per child, and `lotledger.ClassifyFuturesSide` +
+      `recordLotFill` currently assume the caller closes the
+      whole parent qty in one shot. Need a `splitSellAgainstLots`
+      pass before the executor can be enabled for sells.
+- [ ] Wire futures `open` (long buy / short sell open) — the
+      current splitter only emits `[qty]` for non-long sides
+      (`recordLotFill` short branch is a no-op). Needs the
+      parallel short-lot ledger landing first.
+- [ ] Wire futures `close` — same FIFO ordering question as
+      equity sell, plus margin-release timing per child.
+- [ ] Per-child fill PRICE (not just qty). The current splitter
+      shares the parent's `executionPrice` across every child
+      because `broker.Simulator` returns a single fill; once the
+      venue path produces distinct intraday prices, change
+      `splitParentIntoChildren` to return
+      `[]struct{Qty int; Price float64}` and aggregate the parent
+      row's `filled_price` as the qty-weighted average.
+- [ ] Aggregate slippage across distinct-price children for the
+      parent row (today every child + parent carry the same
+      slippage because the price is shared).
+- [ ] `plan_action.execution_status` aggregation: when a parent
+      partially fills (3 of 5 TWAP slices land), roll the children
+      into one parent-level status string so the planner UI shows
+      "partial: 60% filled" rather than 5 individual rows.
+- [ ] Daily-review LLM context builder: surface "TWAP intent on
+      N shares, M% filled by close" as a Trader-role learning
+      signal (the structured rows are already on disk now;
+      `buildAgentLearning` just needs to query them).
+- [ ] Defer-add a `FOREIGN KEY (strategy_parent_trade_id)
+      REFERENCES trade_executions(id) ON DELETE SET NULL` once
+      we have production evidence that the buy-path splitter
+      never produces orphans. The current migration skips the FK
+      on purpose (parent + children INSERT in the same tx but the
+      parent's UUID is only available at RETURNING time, so a
+      non-deferred FK would force a partition split that's not
+      worth the lock surface during rollout).
 
 ### Why we did step 1 separately
 

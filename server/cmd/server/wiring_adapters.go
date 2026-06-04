@@ -19073,6 +19073,25 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	// a single action into multiple smaller submissions). The key
 	// is empty when action.ID is empty (synthetic test fixtures);
 	// in that case Create falls back to its non-idempotent path.
+	normalizedStrategy := normalizePMPathStrategy(strategy)
+	// B-step2: if the per-fund flag is on AND the splitter says
+	// this (qty, strategy) pair warrants more than one child AND
+	// the side is buy (sell / futures-close not yet wired in this
+	// commit — see docs/TRADER_AGENT_INTEGRATION.md "step 2: buy
+	// path only"), fan out into a parent + N children. The flag
+	// defaults to false so non-opted-in funds keep the legacy
+	// single-row path on this same call.
+	if strings.EqualFold(side, "buy") &&
+		pmPathChildSplittingEnabled(fund.Config) &&
+		shouldSplitParent(quantity, normalizedStrategy) {
+		return e.tradeRepoCreateAndFillSplit(
+			ctx, fund, plan, action, side, quantity,
+			planPrice, amount, status, filledPrice,
+			feeCommission, feeStampTax, feeTransfer,
+			normalizedStrategy, slippagePct, executedAt,
+		)
+	}
+
 	clientIdempotencyKey := mintTradeIdempotencyKey(action.ID, side, quantity)
 	trade := &repository.TradeExecution{
 		FundID:               fund.ID,
@@ -19107,17 +19126,13 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		ExpiryDate:           action.ExpiryDate,
 		ReduceOnly:           action.ReduceOnly,
 		SlippagePct:          slippagePct,
+		// B-step2: persist the chosen strategy on the single-row
+		// path too. Children inherit this value verbatim when the
+		// splitter path is taken (see tradeRepoCreateAndFillSplit).
+		// Legacy rows (pre-088 migration) keep strategy=NULL.
+		Strategy:             sql.NullString{String: normalizedStrategy, Valid: true},
 		ClientIdempotencyKey: clientIdempotencyKey,
 	}
-	// Strategy is recorded as a structured log line, NOT a column,
-	// until B-step2 (real child-order splitting) lands. Persisting it
-	// to trade_executions today would mean opening a schema column
-	// that has at most one distinct value per parent action (because
-	// we still write exactly one row per action). Logging it keeps
-	// the decision audit-trailable for analytics + the daily-review
-	// LLM while leaving the schema work for the splitter PR that
-	// will use it on every child row.
-	normalizedStrategy := normalizePMPathStrategy(strategy)
 	slog.Info("pm-path execute trade",
 		"fund_id", fund.ID,
 		"plan_id", plan.ID,
@@ -19128,6 +19143,7 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		"strategy", normalizedStrategy,
 		"plan_price", planPrice,
 		"status", status,
+		"path", "single",
 	)
 	tradeID, err := e.tradeRepo.Create(ctx, trade)
 	if err != nil {
@@ -19154,6 +19170,259 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		e.recordCashLedgerForFill(ctx, fund, plan, action, tradeID, side, quantity, filledExecutionPrice, amount, feeCommission, feeStampTax, feeTransfer, executedAt)
 	}
 	return nil
+}
+
+// tradeRepoCreateAndFillSplit is the B-step2 child-order splitting
+// path. Reached only when ALL of the following are true (the gate
+// is enforced at the call site, not here, so this function can
+// always assume splitting is appropriate):
+//
+//   - side == "buy" (sell + futures-close land in a follow-up
+//     commit, see ADR docs/TRADER_AGENT_INTEGRATION.md).
+//   - pmPathChildSplittingEnabled(fund.Config) returned true.
+//   - shouldSplitParent(quantity, strategy) returned true (i.e.
+//     splitParentIntoChildren produces > 1 slice).
+//
+// Behaviour:
+//
+//   * INSERT a single PARENT row carrying the aggregated qty +
+//     summed fees + the chosen strategy. The parent has
+//     strategy_parent_trade_id = NULL and is NEVER written to
+//     cash_ledger / position_lots — those follow the children so
+//     FIFO cost basis remains accurate per slice. The parent's
+//     filled_price is the (shared) execution price for this
+//     commit; a future variant of the splitter that returns
+//     per-slice prices will populate it as a weighted average.
+//
+//   * For each child slice, INSERT a child row (qty = slice qty,
+//     strategy = inherited, strategy_parent_trade_id = parent.ID,
+//     fees = pro-rata share by qty with the LAST child absorbing
+//     rounding remainder). Each child writes its own
+//     cash_ledger legs + position_lots entry.
+//
+//   * Slippage on every row equals the parent's slippage (single
+//     execution price model in this commit). The aggregation work
+//     a multi-price model would need (qty-weighted avg fill price,
+//     per-child slippage vs parent reference) is in scope for the
+//     next commit; this one preserves the contract that all rows
+//     for one action carry consistent slippage so reports don't
+//     regress.
+//
+// All children share the executedAt timestamp because the underlying
+// broker.Simulator call returned a single fill (we're not yet
+// stretching the slices across the trading day). This is purely a
+// step-2 simplification — schema, indices, and downstream readers
+// are already ready for distinct per-child executedAt values when
+// the venue path produces them.
+func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
+	ctx context.Context,
+	fund *repository.Fund,
+	plan *repository.InvestmentPlan,
+	action repository.PlanAction,
+	side string,
+	quantity int,
+	planPrice float64,
+	amount float64,
+	status string,
+	filledPrice sql.NullFloat64,
+	feeCommission, feeStampTax, feeTransfer float64,
+	normalizedStrategy string,
+	slippagePct sql.NullFloat64,
+	executedAt time.Time,
+) error {
+	childQtys := splitParentIntoChildren(quantity, normalizedStrategy)
+	if len(childQtys) <= 1 {
+		// Should never happen — the gate at the call site
+		// already verified shouldSplitParent. Belt + suspenders.
+		return fmt.Errorf("tradeRepoCreateAndFillSplit: splitter returned %d child(ren) for qty=%d strategy=%s",
+			len(childQtys), quantity, normalizedStrategy)
+	}
+
+	instrumentKey := firstNonEmptyValue(action.InstrumentKey, buildInstrumentKey(action.Exchange.String, action.Symbol), action.Symbol)
+	tradingMode := normalizedTradingMode(fund.TradingMode)
+	executionPrice := planPrice
+	if filledPrice.Valid && filledPrice.Float64 > 0 {
+		executionPrice = filledPrice.Float64
+	}
+
+	// Parent INSERT — same total qty + summed fees as the legacy
+	// single-row path so any reader that only looks at the parent
+	// (e.g. a NAV reconciler that hasn't been updated yet) sees
+	// the same totals it would have seen pre-088. The
+	// strategy_parent_trade_id is NULL: parent rows do not chain.
+	parentTrade := &repository.TradeExecution{
+		FundID:               fund.ID,
+		PlanID:               nullUUID(plan.ID),
+		PlanActionID:         nullUUID(action.ID),
+		InstrumentKey:        instrumentKey,
+		Symbol:               action.Symbol,
+		Market:               action.Market,
+		Exchange:             action.Exchange,
+		AssetClass:           action.AssetClass,
+		InstrumentType:       action.InstrumentType,
+		Side:                 side,
+		PositionSide:         action.PositionSide,
+		OpenClose:            action.OpenClose,
+		OrderType:            executionOrderType(action),
+		Quantity:             float64(quantity),
+		Price:                nullableFloat(planPrice),
+		Amount:               nullableFloat(amount),
+		FilledQty:            float64(quantity),
+		FilledPrice:          filledPrice,
+		FeeCommission:        feeCommission,
+		FeeStampTax:          feeStampTax,
+		FeeTransfer:          feeTransfer,
+		TradingMode:          tradingMode,
+		Status:               status,
+		ExecutedAt:           sql.NullTime{Time: executedAt, Valid: true},
+		QuoteCurrency:        action.QuoteCurrency,
+		SettlementCurrency:   action.SettlementCurrency,
+		MarginMode:           action.MarginMode,
+		Leverage:             action.Leverage,
+		ContractMultiplier:   action.ContractMultiplier,
+		ExpiryDate:           action.ExpiryDate,
+		ReduceOnly:           action.ReduceOnly,
+		SlippagePct:          slippagePct,
+		Strategy:             sql.NullString{String: normalizedStrategy, Valid: true},
+		// strategy_parent_trade_id = NULL — this IS the parent.
+		ClientIdempotencyKey: mintTradeIdempotencyKey(action.ID, side, quantity),
+	}
+	parentID, err := e.tradeRepo.Create(ctx, parentTrade)
+	if err != nil {
+		return mapRepositoryError(err)
+	}
+	if err := e.tradeRepo.UpdateStatus(ctx, parentID, status, float64(quantity), filledPrice, feeCommission, feeStampTax, feeTransfer, slippagePct); err != nil {
+		return mapRepositoryError(err)
+	}
+	slog.Info("pm-path execute trade",
+		"fund_id", fund.ID,
+		"plan_id", plan.ID,
+		"action_id", action.ID,
+		"symbol", action.Symbol,
+		"side", side,
+		"quantity", quantity,
+		"strategy", normalizedStrategy,
+		"plan_price", planPrice,
+		"status", status,
+		"path", "split-parent",
+		"parent_trade_id", parentID,
+		"child_count", len(childQtys),
+	)
+
+	// Pro-rata fee split: first N-1 children get
+	// round(fee * childQty/totalQty); last child absorbs the
+	// rounding remainder so sum equals the input exactly. We
+	// round per leg independently (commission, stamp tax,
+	// transfer) so the per-leg invariant holds in isolation.
+	commissionByChild := proRataFeeSplit(feeCommission, childQtys)
+	stampByChild := proRataFeeSplit(feeStampTax, childQtys)
+	transferByChild := proRataFeeSplit(feeTransfer, childQtys)
+
+	// Notional is the row's signed-price * qty input.
+	// Recompute per child rather than pro-rata-dividing the
+	// parent's notional so rounding stays consistent with the
+	// existing single-row legacy behaviour.
+	for childIdx, childQty := range childQtys {
+		childNotional := executionPrice * float64(childQty)
+
+		childTrade := &repository.TradeExecution{
+			FundID:                fund.ID,
+			PlanID:                nullUUID(plan.ID),
+			PlanActionID:          nullUUID(action.ID),
+			InstrumentKey:         instrumentKey,
+			Symbol:                action.Symbol,
+			Market:                action.Market,
+			Exchange:              action.Exchange,
+			AssetClass:            action.AssetClass,
+			InstrumentType:        action.InstrumentType,
+			Side:                  side,
+			PositionSide:          action.PositionSide,
+			OpenClose:             action.OpenClose,
+			OrderType:             executionOrderType(action),
+			Quantity:              float64(childQty),
+			Price:                 nullableFloat(planPrice),
+			Amount:                nullableFloat(childNotional),
+			FilledQty:             float64(childQty),
+			FilledPrice:           filledPrice,
+			FeeCommission:         commissionByChild[childIdx],
+			FeeStampTax:           stampByChild[childIdx],
+			FeeTransfer:           transferByChild[childIdx],
+			TradingMode:           tradingMode,
+			Status:                status,
+			ExecutedAt:            sql.NullTime{Time: executedAt, Valid: true},
+			QuoteCurrency:         action.QuoteCurrency,
+			SettlementCurrency:    action.SettlementCurrency,
+			MarginMode:            action.MarginMode,
+			Leverage:              action.Leverage,
+			ContractMultiplier:    action.ContractMultiplier,
+			ExpiryDate:            action.ExpiryDate,
+			ReduceOnly:            action.ReduceOnly,
+			SlippagePct:           slippagePct,
+			Strategy:              sql.NullString{String: normalizedStrategy, Valid: true},
+			StrategyParentTradeID: sql.NullString{String: parentID, Valid: true},
+			ClientIdempotencyKey: sql.NullString{
+				String: fmt.Sprintf("trade:%s:%s:%d:child:%d", action.ID, side, quantity, childIdx),
+				Valid:  action.ID != "",
+			},
+		}
+		childID, err := e.tradeRepo.Create(ctx, childTrade)
+		if err != nil {
+			return mapRepositoryError(err)
+		}
+		if err := e.tradeRepo.UpdateStatus(ctx, childID, status, float64(childQty), filledPrice,
+			commissionByChild[childIdx], stampByChild[childIdx], transferByChild[childIdx],
+			slippagePct); err != nil {
+			return mapRepositoryError(err)
+		}
+		// Per-child lot + cash ledger. Same call signatures as the
+		// single-row path; the only difference is they're invoked
+		// N times (and never for the parent).
+		childTotalFees := commissionByChild[childIdx] + stampByChild[childIdx] + transferByChild[childIdx]
+		e.recordLotFill(ctx, fund, action, childID, side, childQty, filledPrice, planPrice, childTotalFees, executedAt, status)
+		if status == "filled" {
+			e.recordCashLedgerForFill(ctx, fund, plan, action, childID, side, childQty, executionPrice, childNotional,
+				commissionByChild[childIdx], stampByChild[childIdx], transferByChild[childIdx], executedAt)
+		}
+	}
+	return nil
+}
+
+// proRataFeeSplit returns the per-child share of `total` allocated
+// proportional to qtys. First N-1 children get
+// round(total * qty[i]/sumQty, 4); the last child absorbs whatever
+// remainder is needed so the sum equals `total` exactly. Rounding
+// is to 4 decimal places to match recordCashLedgerForFill's
+// roundCurrency convention.
+//
+// If total is 0 (e.g. zero-fee trade), all children get 0 — same
+// invariant the cash_ledger leg loop already enforces (skip zero
+// amounts).
+func proRataFeeSplit(total float64, qtys []int) []float64 {
+	if len(qtys) == 0 {
+		return nil
+	}
+	out := make([]float64, len(qtys))
+	if total == 0 {
+		return out
+	}
+	sumQty := 0
+	for _, q := range qtys {
+		sumQty += q
+	}
+	if sumQty == 0 {
+		return out
+	}
+	allocated := 0.0
+	for i := 0; i < len(qtys)-1; i++ {
+		share := roundCurrency(total * float64(qtys[i]) / float64(sumQty))
+		out[i] = share
+		allocated += share
+	}
+	// Last child absorbs remainder so the sum is exact. We
+	// don't round here — the residual is already at most one
+	// rounding-step's worth of float drift.
+	out[len(qtys)-1] = total - allocated
+	return out
 }
 
 // recordCashLedgerForFill writes the per-leg cash_ledger rows
