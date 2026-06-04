@@ -103,10 +103,12 @@ type stubTeamService struct {
 	getLineageFn        func(string, string) (*AgentLineageTree, error)
 	getLLMUsageFn       func(string, string, time.Time, time.Time) (*LLMUsageVisibility, error)
 	listAuditLogsFn     func(string, string, int) (*AuditLogResponse, error)
-	exportAuditLogsFn   func(string, string, int) (*AuditLogResponse, error)
-	listActivityFn      func(string, string, int, uint64) ([]TeamActivityItem, error)
-	pageActivityFn      func(string, string, time.Time, int) ([]TeamActivityItem, error)
-	subscribeActivityFn func(string, string) (*TeamActivityStream, error)
+	exportAuditLogsFn            func(string, string, int) (*AuditLogResponse, error)
+	listActivityFn               func(string, string, int, uint64) ([]TeamActivityItem, error)
+	pageActivityFn               func(string, string, time.Time, int) ([]TeamActivityItem, error)
+	subscribeActivityFn          func(string, string) (*TeamActivityStream, error)
+	getAgentSpecializationFn     func(string, string, string) (*AgentSpecialization, error)
+	updateAgentSpecializationFn  func(string, string, string, AgentSpecialization) (*AgentSpecialization, error)
 }
 
 func (s stubTeamService) AddAgent(userID, fundID, role, focus string) (*Agent, error) {
@@ -216,6 +218,18 @@ func (s stubTeamService) PageTeamActivity(userID, fundID string, before time.Tim
 		return s.pageActivityFn(userID, fundID, before, limit)
 	}
 	return nil, errors.New("unexpected PageTeamActivity call")
+}
+func (s stubTeamService) GetAgentSpecialization(userID, fundID, agentID string) (*AgentSpecialization, error) {
+	if s.getAgentSpecializationFn != nil {
+		return s.getAgentSpecializationFn(userID, fundID, agentID)
+	}
+	return nil, errors.New("unexpected GetAgentSpecialization call")
+}
+func (s stubTeamService) UpdateAgentSpecialization(userID, fundID, agentID string, body AgentSpecialization) (*AgentSpecialization, error) {
+	if s.updateAgentSpecializationFn != nil {
+		return s.updateAgentSpecializationFn(userID, fundID, agentID, body)
+	}
+	return nil, errors.New("unexpected UpdateAgentSpecialization call")
 }
 
 type stubPlanService struct {

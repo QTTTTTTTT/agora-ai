@@ -2921,6 +2921,142 @@ func (r *TeamRepo) CountByFund(ctx context.Context, fundID string) (int, error) 
 	return count, nil
 }
 
+// ---------------------------------------------------------------------------
+// Specialization (migration 087)
+// ---------------------------------------------------------------------------
+
+// TeamMemberSpecialization is the structured replacement for the
+// legacy free-form `fund_team_members.focus` string when answering
+// "which instruments does this researcher cover?". A row is
+// OPTIONAL: a member without a row is treated as "no specialization
+// set" and consumers fall back to the focus-string heuristic in
+// agent_self_learning_prompts.go.
+//
+// Arrays are stored exactly as the caller writes them. The
+// admin handler normalizes them to lower-case before persistence
+// so prompt-time comparisons stay symmetric — see
+// adminTeamMemberSpecializationHandler.
+type TeamMemberSpecialization struct {
+	MemberID    string    `json:"memberId"`
+	Instruments []string  `json:"instruments"`
+	Themes      []string  `json:"themes"`
+	Markets     []string  `json:"markets"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// GetSpecialization fetches the structured coverage for one
+// member, returning (nil, nil) when no row exists — that's a
+// legitimate state, not an error. Callers MUST handle the nil
+// case by falling back to the legacy focus column.
+func (r *TeamRepo) GetSpecialization(ctx context.Context, memberID string) (*TeamMemberSpecialization, error) {
+	spec := &TeamMemberSpecialization{}
+	err := r.db.QueryRowContext(ctx,
+		`SELECT member_id, instruments, themes, markets, updated_at
+		 FROM fund_team_member_specialization
+		 WHERE member_id = $1`,
+		memberID,
+	).Scan(
+		&spec.MemberID,
+		pq.Array(&spec.Instruments),
+		pq.Array(&spec.Themes),
+		pq.Array(&spec.Markets),
+		&spec.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("team_repo: get specialization: %w", err)
+	}
+	return spec, nil
+}
+
+// UpsertSpecialization replaces the entire row (PUT semantics).
+// Partial updates would require us to teach the API a separate
+// PATCH grammar; the simpler "client sends the full target
+// state" matches what the team-members admin UI does for the
+// rest of the member fields.
+//
+// Returns the persisted row including the server-set updated_at,
+// so the frontend can show "updated 2s ago" without a follow-up GET.
+func (r *TeamRepo) UpsertSpecialization(ctx context.Context, spec *TeamMemberSpecialization) (*TeamMemberSpecialization, error) {
+	if spec == nil || strings.TrimSpace(spec.MemberID) == "" {
+		return nil, fmt.Errorf("team_repo: upsert specialization: member_id required")
+	}
+	out := &TeamMemberSpecialization{}
+	err := r.db.QueryRowContext(ctx,
+		`INSERT INTO fund_team_member_specialization (member_id, instruments, themes, markets, updated_at)
+		 VALUES ($1, $2, $3, $4, NOW())
+		 ON CONFLICT (member_id) DO UPDATE
+		   SET instruments = EXCLUDED.instruments,
+		       themes      = EXCLUDED.themes,
+		       markets     = EXCLUDED.markets,
+		       updated_at  = NOW()
+		 RETURNING member_id, instruments, themes, markets, updated_at`,
+		spec.MemberID,
+		pq.Array(spec.Instruments),
+		pq.Array(spec.Themes),
+		pq.Array(spec.Markets),
+	).Scan(
+		&out.MemberID,
+		pq.Array(&out.Instruments),
+		pq.Array(&out.Themes),
+		pq.Array(&out.Markets),
+		&out.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("team_repo: upsert specialization: %w", err)
+	}
+	return out, nil
+}
+
+// DeleteSpecialization removes the row so the consumer falls
+// back to the legacy focus-string heuristic. Idempotent — no
+// error when the row didn't exist.
+func (r *TeamRepo) DeleteSpecialization(ctx context.Context, memberID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`DELETE FROM fund_team_member_specialization WHERE member_id = $1`, memberID,
+	)
+	if err != nil {
+		return fmt.Errorf("team_repo: delete specialization: %w", err)
+	}
+	return nil
+}
+
+// ListSpecializationsByFund returns every member's specialization
+// row for the given fund as a map keyed by member_id. Used by the
+// learningContext builder to bulk-load all coverage data for the
+// fund's team in one query instead of N+1 hitting the DB per
+// member during prompt construction.
+func (r *TeamRepo) ListSpecializationsByFund(ctx context.Context, fundID string) (map[string]*TeamMemberSpecialization, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT s.member_id, s.instruments, s.themes, s.markets, s.updated_at
+		 FROM fund_team_member_specialization s
+		 JOIN fund_team_members m ON m.id = s.member_id
+		 WHERE m.fund_id = $1`,
+		fundID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("team_repo: list specializations by fund: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]*TeamMemberSpecialization{}
+	for rows.Next() {
+		spec := &TeamMemberSpecialization{}
+		if err := rows.Scan(
+			&spec.MemberID,
+			pq.Array(&spec.Instruments),
+			pq.Array(&spec.Themes),
+			pq.Array(&spec.Markets),
+			&spec.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("team_repo: scan specialization: %w", err)
+		}
+		out[spec.MemberID] = spec
+	}
+	return out, rows.Err()
+}
+
 func (r *AgentRepo) Create(ctx context.Context, agent *Agent) (string, error) {
 	return createAgentOn(ctx, r.db, agent)
 }

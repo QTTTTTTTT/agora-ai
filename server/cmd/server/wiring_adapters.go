@@ -7080,6 +7080,98 @@ func (s *teamServiceAdapter) RemoveAgent(userID, fundID, agentID string) error {
 	return nil
 }
 
+// GetAgentSpecialization resolves the structured coverage row for
+// (fund, agent). Returns (nil, nil) when no row exists — handler
+// translates that into an empty-array response so the UI gets a
+// consistent shape regardless of whether coverage has been set.
+//
+// Auth: ownership of the fund (same contract as UpdateAgent).
+// We additionally validate the (fund, agent) pair is a real team
+// row before touching the specialization table, so an unrelated
+// agent_id can't be used to fish coverage rows from other funds.
+func (s *teamServiceAdapter) GetAgentSpecialization(userID, fundID, agentID string) (*api.AgentSpecialization, error) {
+	if _, err := s.getAuthorizedFund(userID, fundID); err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	member, err := s.teamRepo.GetMember(ctx, fundID, agentID)
+	if err != nil {
+		return nil, mapRepositoryError(err)
+	}
+	spec, err := s.teamRepo.GetSpecialization(ctx, member.ID)
+	if err != nil {
+		return nil, mapRepositoryError(err)
+	}
+	if spec == nil {
+		return nil, nil
+	}
+	return &api.AgentSpecialization{
+		FundID:      fundID,
+		AgentID:     agentID,
+		Instruments: spec.Instruments,
+		Themes:      spec.Themes,
+		Markets:     spec.Markets,
+		UpdatedAt:   spec.UpdatedAt,
+	}, nil
+}
+
+// UpdateAgentSpecialization upserts the row. Arrays are normalized
+// to lower-case here, ONCE — the rest of the pipeline (prompt
+// builder, future filters) can rely on case-insensitive comparison
+// without rewriting it. UI shows whatever the user typed.
+//
+// Empty-array writes are a legitimate "clear coverage" signal;
+// they intentionally do NOT delete the row, because keeping an
+// empty row preserves audit history (updated_at) and lets the
+// builder still see "this researcher EXPLICITLY has no
+// instruments" — different from "never set up".
+func (s *teamServiceAdapter) UpdateAgentSpecialization(userID, fundID, agentID string, body api.AgentSpecialization) (*api.AgentSpecialization, error) {
+	if _, err := s.getAuthorizedFund(userID, fundID); err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	member, err := s.teamRepo.GetMember(ctx, fundID, agentID)
+	if err != nil {
+		return nil, mapRepositoryError(err)
+	}
+	normalize := func(items []string) []string {
+		if len(items) == 0 {
+			return []string{}
+		}
+		seen := map[string]struct{}{}
+		out := make([]string, 0, len(items))
+		for _, raw := range items {
+			s := strings.ToLower(strings.TrimSpace(raw))
+			if s == "" {
+				continue
+			}
+			if _, ok := seen[s]; ok {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+		return out
+	}
+	persisted, err := s.teamRepo.UpsertSpecialization(ctx, &repository.TeamMemberSpecialization{
+		MemberID:    member.ID,
+		Instruments: normalize(body.Instruments),
+		Themes:      normalize(body.Themes),
+		Markets:     normalize(body.Markets),
+	})
+	if err != nil {
+		return nil, mapRepositoryError(err)
+	}
+	return &api.AgentSpecialization{
+		FundID:      fundID,
+		AgentID:     agentID,
+		Instruments: persisted.Instruments,
+		Themes:      persisted.Themes,
+		Markets:     persisted.Markets,
+		UpdatedAt:   persisted.UpdatedAt,
+	}, nil
+}
+
 func (s *teamServiceAdapter) UpdateAgent(userID, fundID, agentID string, cfg api.AgentConfig) (*api.Agent, error) {
 	if _, err := s.getAuthorizedFund(userID, fundID); err != nil {
 		return nil, err
@@ -21174,7 +21266,22 @@ func (m *runtimeMemorySystem) buildAgentLearning(ctx context.Context, member rep
 	// where the templates and the LLM would say roughly the same
 	// thing anyway.
 	if m.shouldGenerateLLMLessons(learningCtx, tradeStats, dailyReturn) {
-		if llmLessons, llmAdjustments, err := m.generateAgentLessonsLLM(ctx, role, focus, learningCtx, tradeStats, dailyReturn, maxLessons); err == nil {
+		// Resolve the team member's structured specialization (migration
+		// 087). When set, this becomes the canonical "what does this
+		// researcher cover?" signal — the legacy focus-string regex is
+		// only consulted as a fallback inside the prompt builder.
+		// Failure here is non-fatal: a DB hiccup shouldn't suppress the
+		// LLM call, we just lose the per-researcher isolation for this
+		// run and the builder falls back to focus parsing.
+		var coverage []string
+		if m.teamRepo != nil {
+			if spec, specErr := m.teamRepo.GetSpecialization(ctx, member.ID); specErr == nil && spec != nil {
+				coverage = spec.Instruments
+			} else if specErr != nil {
+				slog.Warn("daily review: specialization lookup failed; falling back to focus string", "member_id", member.ID, "err", specErr)
+			}
+		}
+		if llmLessons, llmAdjustments, err := m.generateAgentLessonsLLM(ctx, role, focus, coverage, learningCtx, tradeStats, dailyReturn, maxLessons); err == nil {
 			if len(llmLessons) > 0 {
 				lessons = llmLessons
 			}
@@ -21277,7 +21384,7 @@ func (m *runtimeMemorySystem) shouldGenerateLLMLessons(learningCtx *learningCont
 // because the caller treats the output as `[]string`; a malformed
 // response (or no JSON at all) returns an error and the caller falls
 // back to the role templates.
-func (m *runtimeMemorySystem) generateAgentLessonsLLM(ctx context.Context, role, focus string, learningCtx *learningContext, tradeStats tradeSummary, dailyReturn float64, maxLessons int) ([]string, []string, error) {
+func (m *runtimeMemorySystem) generateAgentLessonsLLM(ctx context.Context, role, focus string, coverage []string, learningCtx *learningContext, tradeStats tradeSummary, dailyReturn float64, maxLessons int) ([]string, []string, error) {
 	if m == nil || m.llmRuntime == nil {
 		return nil, nil, errors.New("memory: llm runtime not configured")
 	}
@@ -21303,7 +21410,13 @@ func (m *runtimeMemorySystem) generateAgentLessonsLLM(ctx context.Context, role,
 	// role actually needs so the resulting lessons read like a real
 	// team's per-role journal entries instead of four paraphrases of
 	// the same paragraph.
-	userPromptBody := buildRoleSpecificLearningBody(role, focus, learningCtx, tradeStats, dailyReturn)
+	//
+	// `coverage` is the structured instrument list from migration
+	// 087's fund_team_member_specialization. When set, the researcher
+	// branch uses it directly; when empty the builder falls back to
+	// extractFocusSymbols(focus) for legacy funds that haven't been
+	// migrated yet.
+	userPromptBody := buildRoleSpecificLearningBody(role, focus, coverage, learningCtx, tradeStats, dailyReturn)
 
 	// Prompt design notes (matters because the first cut of this
 	// prompt confused gemini-3.1-pro into echoing the constraint

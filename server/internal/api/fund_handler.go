@@ -1229,6 +1229,43 @@ type TeamService interface {
 	// Cancel exactly once (typically via defer in the SSE handler) so the
 	// per-subscriber goroutine is released.
 	SubscribeTeamActivity(userID, fundID string) (*TeamActivityStream, error)
+
+	// GetAgentSpecialization returns the structured coverage record
+	// for the (fund, agent) pair. Returns (nil, nil) when the agent
+	// has no row — that's the "no specialization configured" state
+	// and consumers fall back to the legacy focus string. Auth: the
+	// caller must own the fund (same contract as ListAgents).
+	GetAgentSpecialization(userID, fundID, agentID string) (*AgentSpecialization, error)
+	// UpdateAgentSpecialization upserts the row. PUT semantics —
+	// arrays passed in fully replace the persisted set; passing
+	// empty arrays clears coverage and falls back to the legacy
+	// heuristic. Returns the persisted row (including updated_at)
+	// so the UI can show "saved Xs ago" without a follow-up GET.
+	UpdateAgentSpecialization(userID, fundID, agentID string, spec AgentSpecialization) (*AgentSpecialization, error)
+}
+
+// AgentSpecialization is the JSON projection of the structured
+// coverage record introduced by migration 087. Used by the
+// /api/funds/{fundId}/team/{agentId}/specialization endpoints.
+//
+// Arrays are normalized to lower-case by the service adapter
+// before persistence so the prompt builder can match against
+// position symbols without a separate case-fold pass. The UI
+// can show them however it likes — uppercase tickers, etc. —
+// because the lower-cased version on disk is purely an internal
+// matching index.
+//
+// FundID is included in the response (not the request body) so
+// the UI can confirm the row belongs to the fund it currently
+// has in scope; passing a member from a different fund is a
+// service-layer auth failure, not a JSON-shape validation.
+type AgentSpecialization struct {
+	FundID      string    `json:"fundId"`
+	AgentID     string    `json:"agentId"`
+	Instruments []string  `json:"instruments"`
+	Themes      []string  `json:"themes"`
+	Markets     []string  `json:"markets"`
+	UpdatedAt   time.Time `json:"updatedAt,omitempty"`
 }
 
 // TeamActivityItem is the JSON-friendly projection of a workflow.ActivityEvent
@@ -1931,6 +1968,8 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/funds/{fundId}/team/bind", h.BindAgent)
 	mux.HandleFunc("DELETE /api/funds/{fundId}/team/{agentId}", h.RemoveAgent)
 	mux.HandleFunc("PUT /api/funds/{fundId}/team/{agentId}", h.UpdateAgent)
+	mux.HandleFunc("GET /api/funds/{fundId}/team/{agentId}/specialization", h.GetAgentSpecialization)
+	mux.HandleFunc("PUT /api/funds/{fundId}/team/{agentId}/specialization", h.UpdateAgentSpecialization)
 	mux.HandleFunc("GET /api/funds/{fundId}/team", h.ListTeam)
 	mux.HandleFunc("GET /api/funds/{fundId}/team/activity", h.ListTeamActivity)
 	mux.HandleFunc("GET /api/funds/{fundId}/team/activity/stream", h.StreamTeamActivity)
@@ -2738,6 +2777,80 @@ func (h *FundHandler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, agent)
+}
+
+// GetAgentSpecialization handles GET /api/funds/{fundId}/team/{agentId}/specialization.
+// Returns 200 with the persisted row when the agent has structured
+// coverage configured, or 200 with empty arrays when no row exists
+// (the "no specialization set, fall back to focus string" state).
+// We deliberately return 200 + empty arrays rather than 404 so the
+// frontend can treat "missing" and "explicitly empty" identically.
+func (h *FundHandler) GetAgentSpecialization(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireAuthenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+	fundID := pathValue(r, "fundId")
+	agentID := pathValue(r, "agentId")
+	if !requireNonEmpty(w, fundID, "fundId") || !requireNonEmpty(w, agentID, "agentId") {
+		return
+	}
+	spec, err := h.teams.GetAgentSpecialization(userID, fundID, agentID)
+	if err != nil {
+		handleServiceError(w, err, "specialization")
+		return
+	}
+	if spec == nil {
+		// Empty-state response — the UI gets an editable "no
+		// coverage configured yet" shell instead of a 404 it has
+		// to special-case.
+		spec = &AgentSpecialization{
+			FundID:      fundID,
+			AgentID:     agentID,
+			Instruments: []string{},
+			Themes:      []string{},
+			Markets:     []string{},
+		}
+	}
+	writeJSON(w, http.StatusOK, spec)
+}
+
+// UpdateAgentSpecialization handles PUT /api/funds/{fundId}/team/{agentId}/specialization.
+// Body shape: { instruments: string[], themes: string[], markets: string[] }.
+// Passing empty arrays clears coverage and falls back to focus-string
+// behaviour — that's the intended way to "unset" specialization.
+func (h *FundHandler) UpdateAgentSpecialization(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireAuthenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+	fundID := pathValue(r, "fundId")
+	agentID := pathValue(r, "agentId")
+	if !requireNonEmpty(w, fundID, "fundId") || !requireNonEmpty(w, agentID, "agentId") {
+		return
+	}
+	var body AgentSpecialization
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", err.Error())
+		return
+	}
+	// Defensive nil → empty so callers don't have to pre-fill;
+	// pgx will reject a NULL TEXT[] write either way.
+	if body.Instruments == nil {
+		body.Instruments = []string{}
+	}
+	if body.Themes == nil {
+		body.Themes = []string{}
+	}
+	if body.Markets == nil {
+		body.Markets = []string{}
+	}
+	spec, err := h.teams.UpdateAgentSpecialization(userID, fundID, agentID, body)
+	if err != nil {
+		handleServiceError(w, err, "specialization")
+		return
+	}
+	writeJSON(w, http.StatusOK, spec)
 }
 
 func (h *FundHandler) ListTeam(w http.ResponseWriter, r *http.Request) {

@@ -130,7 +130,7 @@ func tradeStatsFromCtx(ctx *learningContext) tradeSummary {
 // on those.
 func TestRoleSpecificBody_PMShowsAllocationNotExecutionDetail(t *testing.T) {
 	ctx := buildLearningCtx()
-	body := buildRoleSpecificLearningBody("pm", "", ctx, tradeStatsFromCtx(ctx), ctx.nav.DailyReturn)
+	body := buildRoleSpecificLearningBody("pm", "", nil, ctx, tradeStatsFromCtx(ctx), ctx.nav.DailyReturn)
 
 	mustContain(t, body, "[组合层视角]")
 	mustContain(t, body, "Plan status: completed")
@@ -153,6 +153,7 @@ func TestRoleSpecificBody_ResearcherFocusIsolation(t *testing.T) {
 	body := buildRoleSpecificLearningBody(
 		"researcher",
 		"688205, 300552",
+		nil,
 		ctx,
 		tradeStatsFromCtx(ctx),
 		ctx.nav.DailyReturn,
@@ -174,6 +175,64 @@ func TestRoleSpecificBody_ResearcherFocusIsolation(t *testing.T) {
 	mustContain(t, body, "focus=688205, 300552")
 }
 
+// TestRoleSpecificBody_ResearcherStructuredCoverageBeatsFocus pins
+// migration-087 behaviour: when the fund_team_member_specialization
+// row exists, its `instruments[]` overrides whatever the legacy
+// focus string says. The OCS-fund kind of case where focus is the
+// 3-value category string ("stock" / "fundamental" / "macro") —
+// which extractFocusSymbols can never produce ticker tokens from —
+// is exactly the situation where the structured path saves us.
+//
+// Concretely: focus="fundamental" (yields zero focus tokens via
+// the legacy heuristic) PLUS coverage=["688205","300552"] must
+// still isolate the researcher's view to those two symbols.
+func TestRoleSpecificBody_ResearcherStructuredCoverageBeatsFocus(t *testing.T) {
+	ctx := buildLearningCtx()
+	body := buildRoleSpecificLearningBody(
+		"researcher",
+		// `focus` deliberately set to a value the legacy
+		// extractFocusSymbols cannot extract tickers from —
+		// matches the production fund_team_members.focus CHECK
+		// constraint ('stock' / 'fundamental' / 'macro').
+		"fundamental",
+		[]string{"688205", "300552"},
+		ctx,
+		tradeStatsFromCtx(ctx),
+		ctx.nav.DailyReturn,
+	)
+	mustContain(t, body, "[研究方向视角]")
+	// Coverage source label proves the structured branch fired.
+	mustContain(t, body, "结构化覆盖 (specialization)")
+	mustContain(t, body, "Focus 解析为 2 个聚焦标的")
+	mustContain(t, body, "688205")
+	mustContain(t, body, "300552")
+	// Out-of-coverage symbols must NOT leak in.
+	mustNotContain(t, body, "600519")
+	mustNotContain(t, body, "NVDA")
+}
+
+// TestRoleSpecificBody_ResearcherEmptyCoverageFallsBackToFocus
+// confirms the fallback direction: when coverage[] is empty
+// (the team-member has no specialization row yet), the builder
+// falls through to the legacy focus-string heuristic exactly
+// as before. Guards against accidentally silencing the
+// fallback path during the 087 rollout.
+func TestRoleSpecificBody_ResearcherEmptyCoverageFallsBackToFocus(t *testing.T) {
+	ctx := buildLearningCtx()
+	body := buildRoleSpecificLearningBody(
+		"researcher",
+		"688205, 300552",
+		[]string{}, // explicit empty = "no specialization row"
+		ctx,
+		tradeStatsFromCtx(ctx),
+		ctx.nav.DailyReturn,
+	)
+	mustContain(t, body, "[研究方向视角]")
+	mustContain(t, body, "legacy focus 字符串")
+	mustContain(t, body, "Focus 解析为 2 个聚焦标的")
+	mustContain(t, body, "688205")
+}
+
 // TestRoleSpecificBody_ResearcherFallbackOnThemeFocus covers the
 // theme-shaped focus path (no ticker tokens). The prompt should
 // fall back to the team-wide holdings + a note that focus didn't
@@ -184,6 +243,7 @@ func TestRoleSpecificBody_ResearcherFallbackOnThemeFocus(t *testing.T) {
 	body := buildRoleSpecificLearningBody(
 		"researcher",
 		"半导体",
+		nil,
 		ctx,
 		tradeStatsFromCtx(ctx),
 		ctx.nav.DailyReturn,
@@ -201,7 +261,7 @@ func TestRoleSpecificBody_ResearcherFallbackOnThemeFocus(t *testing.T) {
 // reason histogram, no holdings table.
 func TestRoleSpecificBody_TraderShowsSlippageAndRejects(t *testing.T) {
 	ctx := buildLearningCtx()
-	body := buildRoleSpecificLearningBody("trader", "", ctx, tradeStatsFromCtx(ctx), ctx.nav.DailyReturn)
+	body := buildRoleSpecificLearningBody("trader", "", nil, ctx, tradeStatsFromCtx(ctx), ctx.nav.DailyReturn)
 
 	mustContain(t, body, "[执行层视角]")
 	mustContain(t, body, "Per-trade execution detail:")
@@ -223,7 +283,7 @@ func TestRoleSpecificBody_TraderShowsSlippageAndRejects(t *testing.T) {
 // daily return is negative.
 func TestRoleSpecificBody_RiskShowsConcentrationAndGateSignals(t *testing.T) {
 	ctx := buildLearningCtx()
-	body := buildRoleSpecificLearningBody("risk", "", ctx, tradeStatsFromCtx(ctx), ctx.nav.DailyReturn)
+	body := buildRoleSpecificLearningBody("risk", "", nil, ctx, tradeStatsFromCtx(ctx), ctx.nav.DailyReturn)
 
 	mustContain(t, body, "[风控视角]")
 	mustContain(t, body, "Max single position: 600519") // baijiu is the biggest
@@ -248,10 +308,10 @@ func TestRoleSpecificBody_AllFourRolesDifferAcrossSameDay(t *testing.T) {
 	dr := ctx.nav.DailyReturn
 
 	bodies := map[string]string{
-		"pm":         buildRoleSpecificLearningBody("pm", "", ctx, stats, dr),
-		"researcher": buildRoleSpecificLearningBody("researcher", "688205, 300552", ctx, stats, dr),
-		"trader":     buildRoleSpecificLearningBody("trader", "", ctx, stats, dr),
-		"risk":       buildRoleSpecificLearningBody("risk", "", ctx, stats, dr),
+		"pm":         buildRoleSpecificLearningBody("pm", "", nil, ctx, stats, dr),
+		"researcher": buildRoleSpecificLearningBody("researcher", "688205, 300552", nil, ctx, stats, dr),
+		"trader":     buildRoleSpecificLearningBody("trader", "", nil, ctx, stats, dr),
+		"risk":       buildRoleSpecificLearningBody("risk", "", nil, ctx, stats, dr),
 	}
 	// All-pairs distinctness check: 6 pairs across 4 roles.
 	roles := []string{"pm", "researcher", "trader", "risk"}

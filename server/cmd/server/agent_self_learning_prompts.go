@@ -43,8 +43,17 @@ import (
 //
 // Unknown roles fall through to the legacy fund-wide block so newer
 // roles we may add later don't silently produce empty prompts.
+//
+// coverage is the structured instrument list resolved from the new
+// fund_team_member_specialization table (migration 087). When it's
+// non-empty for a researcher, the researcher block isolates the view
+// to those instruments only; the legacy `focus`-string regex
+// heuristic is kept as the fallback for members that don't have a
+// specialization row yet. Caller is expected to bulk-load the row,
+// already lower-cased per the admin upsert path.
 func buildRoleSpecificLearningBody(
 	role, focus string,
+	coverage []string,
 	learningCtx *learningContext,
 	tradeStats tradeSummary,
 	dailyReturn float64,
@@ -59,7 +68,7 @@ func buildRoleSpecificLearningBody(
 	case "pm", "portfolio_manager":
 		writePMLearningBody(&sb, learningCtx, tradeStats, dailyReturn)
 	case "researcher", "analyst":
-		writeResearcherLearningBody(&sb, focus, learningCtx, tradeStats, dailyReturn)
+		writeResearcherLearningBody(&sb, focus, coverage, learningCtx, tradeStats, dailyReturn)
 	case "trader":
 		writeTraderLearningBody(&sb, learningCtx, tradeStats, dailyReturn)
 	case "risk", "risk_overseer":
@@ -158,11 +167,22 @@ func writePMLearningBody(
 // ---------------------------------------------------------------------------
 
 // writeResearcherLearningBody — researcher view: only the focus
-// area. `focus` is the team_member.focus string; we extract symbol
-// tokens from it (comma/slash/space separated) and filter holdings +
-// actions to only those tickers. If the focus is a theme that doesn't
-// resolve to tickers, we still cap the holdings/actions list but keep
-// the prompt's last line "from your focus={focus} angle".
+// area. Two sources of "what does this researcher cover?":
+//
+//  1. coverage (structured, migration 087). When non-empty, we
+//     trust it absolutely and use those instruments verbatim as
+//     the symbol filter. This is the production path going
+//     forward — operators configure it through the team-member
+//     specialization admin endpoint.
+//  2. legacy `focus` string heuristic. Used ONLY when coverage is
+//     empty (no specialization row exists for the team member).
+//     extractFocusSymbols scans for ticker-shaped tokens in the
+//     free-form focus column. With the current
+//     fund_team_members.focus CHECK constraint (one of
+//     stock/fundamental/macro), this branch effectively never
+//     fires in production — but we keep it so funds that haven't
+//     been migrated yet still produce a usable prompt instead of
+//     falling all the way back to the global view.
 //
 // Why limit to focus tickers: real researchers DON'T review trades on
 // names they don't cover. A semiconductor researcher journaling about
@@ -170,14 +190,38 @@ func writePMLearningBody(
 func writeResearcherLearningBody(
 	sb *strings.Builder,
 	focus string,
+	coverage []string,
 	learningCtx *learningContext,
 	tradeStats tradeSummary,
 	dailyReturn float64,
 ) {
-	focusSyms := extractFocusSymbols(focus)
+	// Prefer structured coverage when set; fall back to legacy focus parsing.
+	var (
+		focusSyms     []string
+		coverageNotes string
+	)
+	if len(coverage) > 0 {
+		focusSyms = make([]string, 0, len(coverage))
+		seen := map[string]struct{}{}
+		for _, c := range coverage {
+			t := strings.TrimSpace(c)
+			if t == "" {
+				continue
+			}
+			if _, dup := seen[t]; dup {
+				continue
+			}
+			seen[t] = struct{}{}
+			focusSyms = append(focusSyms, t)
+		}
+		coverageNotes = "结构化覆盖 (specialization)"
+	} else {
+		focusSyms = extractFocusSymbols(focus)
+		coverageNotes = "legacy focus 字符串"
+	}
 	sb.WriteString("[研究方向视角]\n")
 	if len(focusSyms) > 0 {
-		fmt.Fprintf(sb, "Focus 解析为 %d 个聚焦标的: %s\n", len(focusSyms), strings.Join(focusSyms, ", "))
+		fmt.Fprintf(sb, "Focus 解析为 %d 个聚焦标的（来源：%s）: %s\n", len(focusSyms), coverageNotes, strings.Join(focusSyms, ", "))
 		// Filter holdings + actions to focus-only.
 		filteredHoldings := filterHoldingsBySymbols(learningCtx.positions, focusSyms)
 		filteredActions := filterActionsBySymbols(learningCtx.actions, focusSyms)
