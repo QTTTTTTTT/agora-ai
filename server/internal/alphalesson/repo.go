@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -71,10 +72,20 @@ type WriteOptions struct {
 	// Layer is the memory layer to write into. Defaults to
 	// "long_term".
 	Layer string
-	// Visibility is the memories.visibility value. Defaults to
-	// "fund" (every agent in the fund team can read it).
+	// Visibility is the memories.visibility value. Pre-AP2 this
+	// defaulted to "fund" globally. Post-AP2 the EMPTY default
+	// triggers per-outcome resolution via
+	// defaultVisibilityForKind(AgentKind) so researcher /
+	// analyst lessons go straight to 'agent_portable' (portable
+	// across funds, see migration 091). Setting Visibility
+	// explicitly OVERRIDES the per-outcome resolver — useful for
+	// tests / forced-fund-private backfills.
 	Visibility string
-	// Sensitivity defaults to "internal".
+	// Sensitivity defaults to "internal". A row written with
+	// sensitivity='secret' is excluded from agent_portable
+	// cross-fund propagation regardless of its visibility (AP7
+	// reader gate enforces this — writer here just stamps the
+	// requested sensitivity).
 	Sensitivity string
 	// OriginKind defaults to "alpha_lesson".
 	OriginKind string
@@ -87,9 +98,9 @@ func (o WriteOptions) normalize() WriteOptions {
 	if strings.TrimSpace(o.Layer) == "" {
 		o.Layer = "long_term"
 	}
-	if strings.TrimSpace(o.Visibility) == "" {
-		o.Visibility = "fund"
-	}
+	// Visibility: deliberately NOT defaulted here. An empty
+	// value signals "let the per-outcome resolver pick based on
+	// AgentKind". See defaultVisibilityForKind below.
 	if strings.TrimSpace(o.Sensitivity) == "" {
 		o.Sensitivity = "internal"
 	}
@@ -97,6 +108,81 @@ func (o WriteOptions) normalize() WriteOptions {
 		o.OriginKind = "alpha_lesson"
 	}
 	return o
+}
+
+// uuidPattern matches the canonical 8-4-4-4-12 hex shape. We
+// use Go-side validation (rather than letting Postgres
+// '$arg::uuid' implicit casts fail) so a single bad agent tag
+// in a 100-row batch downgrades that ONE row to NULL rather
+// than aborting the whole transaction.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// nullableUUID returns a sql.NullString that's Valid iff s
+// parses as a canonical UUID. Used to populate memories.agent_id
+// (UUID FK) from outcome.AgentID which is loosely-typed (some
+// historical advocate / role-tag rows are non-UUID strings).
+// A non-UUID input yields {Valid:false} — the DB will store
+// NULL and the agent_portable read path will simply not see
+// the row (correct: we can't safely propagate a row whose
+// agent identity is opaque to the join key).
+func nullableUUID(s string) sql.NullString {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return sql.NullString{}
+	}
+	if !uuidPattern.MatchString(s) {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
+}
+
+// defaultVisibilityForKind picks the memories.visibility value
+// for a new alpha-tagged lesson when the caller did not pin one
+// explicitly via WriteOptions.Visibility. The mapping:
+//
+//	AgentKind        Default visibility    Why
+//	---------------  --------------------  ----------------------
+//	researcher       agent_portable        instrument-level IP
+//	                                       that follows the agent
+//	analyst          agent_portable        category-level analysis
+//	                                       (fundamentals, news,
+//	                                       social) that's about
+//	                                       the issuer, not the
+//	                                       fund's portfolio
+//	pm               fund                  portfolio construction
+//	                                       lessons are about THIS
+//	                                       fund's sleeves / risk
+//	                                       limits — not portable
+//	advocate         fund                  bull/bear stance is
+//	                                       role-played for a fund
+//	                                       context; portability
+//	                                       can come later if the
+//	                                       advocate track-record
+//	                                       turns out to be agent
+//	                                       IP in practice
+//	(unknown)        fund                  conservative — when
+//	                                       in doubt, keep
+//	                                       lessons fund-private
+//
+// This split mirrors the user's stated intent: "the research
+// agent's experience follows the agent across teams". PM lessons
+// are intentionally NOT portable because they encode this fund's
+// sleeve weights, risk limits, and team interaction patterns —
+// none of which transfer when the agent joins a different fund
+// with different sleeves and a different team.
+//
+// To change the default behaviour for an entire batch, set
+// WriteOptions.Visibility explicitly. To override at the row
+// level, the caller must split the batch — there is no
+// per-outcome override field on Outcome itself today (would
+// require a schema change to agentreputation.Outcome which is
+// out of scope for AP2).
+func defaultVisibilityForKind(kind agentreputation.AgentKind) string {
+	switch kind {
+	case agentreputation.KindResearcher, agentreputation.KindAnalyst:
+		return "agent_portable"
+	}
+	return "fund"
 }
 
 // WriteAlphaLessonsForOutcomes satisfies the
@@ -130,18 +216,35 @@ func (r *Repo) WriteAlphaLessons(ctx context.Context, outcomes []agentreputation
 	// require a temp table; the per-row check is cheap because
 	// the backfill batch size is bounded.
 	const checkSQL = `SELECT 1 FROM memories WHERE source_outcome_id = $1 LIMIT 1`
+	// AP2 widened the INSERT to also populate the agent_id FK
+	// (was previously NULL on every alpha lesson row — the
+	// agent's UUID went into agent_tag as text only). The new
+	// agent_id column is what AP3's read path joins on for the
+	// agent_portable cross-fund retrieval, so populating it
+	// here is the prerequisite for the new visibility class.
+	// agent_tag is preserved unchanged for back-compat with
+	// existing consumers (the prompt builder still reads it).
 	const insertSQL = `INSERT INTO memories
-		(fund_id, layer, visibility, sensitivity, origin_kind,
+		(fund_id, agent_id, layer, visibility, sensitivity, origin_kind,
 		 title, content, trading_date, tags,
 		 agent_tag, alpha_vs_benchmark, source_outcome_id)
-		VALUES ($1, $2, $3, $4, $5,
-		        $6, $7, $8, $9,
-		        $10, $11, $12)`
+		VALUES ($1, $2, $3, $4, $5, $6,
+		        $7, $8, $9, $10,
+		        $11, $12, $13)`
 	insertStmt, err := tx.PrepareContext(ctx, insertSQL)
 	if err != nil {
 		return 0, fmt.Errorf("alphalesson: prepare insert: %w", err)
 	}
 	defer insertStmt.Close()
+
+	// optsVisibilityExplicit captures whether the caller pinned
+	// a Visibility value before normalize() stripped its
+	// default. We have to read it BEFORE the per-outcome loop
+	// because normalize() ran above and we re-derive the
+	// explicit-vs-resolver decision once per batch (the whole
+	// batch shares one explicit override; per-row override is
+	// out of scope, see defaultVisibilityForKind doc).
+	optsVisibilityExplicit := strings.TrimSpace(opts.Visibility) != ""
 
 	count := 0
 	for _, o := range outcomes {
@@ -173,8 +276,31 @@ func (r *Repo) WriteAlphaLessons(ctx context.Context, outcomes []agentreputation
 		if strings.TrimSpace(o.ID) != "" {
 			sourceID = sql.NullString{String: o.ID, Valid: true}
 		}
+		// Per-outcome visibility resolution. An explicit
+		// opts.Visibility wins; otherwise the AgentKind picks
+		// 'agent_portable' (researcher / analyst) or 'fund'
+		// (pm / advocate / unknown). See
+		// defaultVisibilityForKind comment for the full table.
+		visibility := opts.Visibility
+		if !optsVisibilityExplicit {
+			visibility = defaultVisibilityForKind(o.AgentKind)
+		}
+		// agent_id is the UUID FK. We try to populate it from
+		// o.AgentID — if it doesn't parse as a UUID (some
+		// historical advocate rows use 'bull_researcher'-style
+		// string tags) we leave the FK NULL and rely on
+		// agent_tag for downstream attribution. The CHECK
+		// constraint on memories.visibility allows
+		// 'agent_portable' even when agent_id is NULL, so we
+		// don't downgrade the visibility for tag-style rows —
+		// but the AP3 read path will skip them on the
+		// cross-fund branch because the join key is agent_id.
+		// That's the right outcome: a tag-style row can't be
+		// safely propagated cross-fund because we don't know
+		// which actual agents.id it refers to.
+		agentIDArg := nullableUUID(o.AgentID)
 		if _, err := insertStmt.ExecContext(ctx,
-			o.FundID, opts.Layer, opts.Visibility, opts.Sensitivity, opts.OriginKind,
+			o.FundID, agentIDArg, opts.Layer, visibility, opts.Sensitivity, opts.OriginKind,
 			sql.NullString{String: title, Valid: title != ""}, content,
 			tradingDate, pq.Array(tags),
 			sql.NullString{String: o.AgentID, Valid: o.AgentID != ""},
