@@ -328,7 +328,7 @@ const SNAPSHOTS: Record<string, { title: string; body: string }> = {
     title:
       'Sleeve "mean_reversion" is losing money in regime "chop" (12 trades, win-rate 25%, PnL -480.50)',
     body:
-      "Across 12 closed lots in regime chop, the mean_reversion sleeve recorded a 25% win rate and a cumulative realised P&L of -480.50 (avg pnl pct: -4.0%, avg holding 2.1 days). Consider pausing this (sleeve, regime) combination in fund.config.strategySleeves until conditions change, or instrumenting the entry filter further to understand why the signal misfires in this regime.",
+      "Across 12 closed lots in regime chop, the mean_reversion sleeve recorded a 25% win rate and a cumulative realised P&L of -480.50 (avg pnl pct: -4.0%, avg holding 2.1 days). Consider pausing this (sleeve, regime) combination in the fund's strategy sleeves config (fund.config.strategySleeves) until conditions change, or instrumenting the entry filter further to understand why the signal misfires in this regime.",
   },
   "en-US::attribution.lesson.sleeve_regime_winner::winner": {
     title:
@@ -362,7 +362,7 @@ const SNAPSHOTS: Record<string, { title: string; body: string }> = {
     title:
       '策略套件 "mean_reversion" 在 "chop" 行情下亏损（12 笔，胜率 25%，盈亏 -480.50）',
     body:
-      '在 "chop" 行情下共 12 个已平仓批次，"mean_reversion" 套件录得 25% 胜率，累计已实现盈亏 -480.50（平均收益率 -4.0%，平均持仓 2.1 天）。建议在 fund.config.strategySleeves 中暂停该 (套件, 行情) 组合直到行情切换，或加强进场过滤以理解此行情下信号失效的原因。',
+      '在 "chop" 行情下共 12 个已平仓批次，"mean_reversion" 套件录得 25% 胜率，累计已实现盈亏 -480.50（平均收益率 -4.0%，平均持仓 2.1 天）。建议在该基金的「策略套件配置」（fund.config.strategySleeves）中暂停该 (套件, 行情) 组合，直到行情切换；或加强进场过滤，以理解此行情下信号失效的原因。',
   },
   "zh-CN::attribution.lesson.sleeve_regime_winner::winner": {
     title:

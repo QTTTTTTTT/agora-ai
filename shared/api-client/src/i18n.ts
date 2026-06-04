@@ -3565,8 +3565,8 @@ export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = 
       body:
         '在 "{regime}" 行情下共 {trade_count|number} 个已平仓批次，"{sleeve}" 套件录得 {win_rate|percent} 胜率，'
         + '累计已实现盈亏 {total_pnl|signed:2}（平均收益率 {avg_pnl_pct|signed_pct}，平均持仓 {avg_holding_days|number:1} 天）。'
-        + '建议在 fund.config.strategySleeves 中暂停该 (套件, 行情) 组合直到行情切换，'
-        + '或加强进场过滤以理解此行情下信号失效的原因。',
+        + '建议在该基金的「策略套件配置」（fund.config.strategySleeves）中暂停该 (套件, 行情) 组合，直到行情切换；'
+        + '或加强进场过滤，以理解此行情下信号失效的原因。',
     },
     'attribution.lesson.sleeve_regime_winner': {
       title:
@@ -3604,9 +3604,9 @@ export const lessonMessages: Record<LocaleId, Record<string, LessonTemplate>> = 
         'Across {trade_count|number} closed lots in regime {regime}, the {sleeve} sleeve recorded a '
         + '{win_rate|percent} win rate and a cumulative realised P&L of {total_pnl|signed:2} '
         + '(avg pnl pct: {avg_pnl_pct|signed_pct}, avg holding {avg_holding_days|number:1} days). '
-        + 'Consider pausing this (sleeve, regime) combination in fund.config.strategySleeves '
-        + 'until conditions change, or instrumenting the entry filter further to understand '
-        + 'why the signal misfires in this regime.',
+        + 'Consider pausing this (sleeve, regime) combination in the fund\'s strategy sleeves config '
+        + '(fund.config.strategySleeves) until conditions change, or instrumenting the entry filter '
+        + 'further to understand why the signal misfires in this regime.',
     },
     'attribution.lesson.sleeve_regime_winner': {
       title:
