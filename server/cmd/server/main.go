@@ -921,6 +921,23 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		newOverridesResolver(instrumentMetadataRepo),
 	)
 
+	// S12-followup (2026-06-04): inject the four broker-side
+	// regulatory gates into the workflow service so the PM-
+	// direct-fill path (runtimeTradingEngine.executePlanAction)
+	// runs the SAME gate impls broker.Simulator runs. Lot-size
+	// is intentionally NOT mirrored here — pmPathLotSizeGuard
+	// uses a faster in-memory check against the engine's
+	// already-loaded position snapshot. Calling WithPMPathGates
+	// AFTER all four impls are constructed (and idempotent on
+	// subsequent calls) so a future hot-swap of any individual
+	// gate stays a one-line edit in this file.
+	workflowService = workflowService.WithPMPathGates(
+		marketStatusGate,
+		lockupGateImpl,
+		borrowGateImpl,
+		priceCollarGateImpl,
+	)
+
 	// S6.5 — WebSocket real-time market data. The cache sits
 	// between the manager (which fans out raw ticks) and the
 	// broker hot path. When WSFEED_ENABLED is false the cache

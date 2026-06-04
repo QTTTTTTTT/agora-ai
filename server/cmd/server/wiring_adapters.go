@@ -26,6 +26,7 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/attribution"
 	"github.com/fundai/server/internal/audit"
+	"github.com/fundai/server/internal/broker"
 	"github.com/fundai/server/internal/cooldown"
 	"github.com/fundai/server/internal/debate"
 	"github.com/fundai/server/internal/correlation"
@@ -1340,6 +1341,23 @@ type workflowServiceAdapter struct {
 	// planLifecycleNotifier is the Sprint 4 / android-core push
 	// fan-out hook. Optional — nil = no push notifications.
 	planLifecycleNotifier workflow.PlanLifecycleNotifier
+
+	// S12-followup (2026-06-04): four of broker.Simulator's
+	// five pre-trade gates mirrored onto the PM-direct-fill
+	// path. The fifth (LotSizeGate) is intentionally handled
+	// by the faster in-memory pmPathLotSizeGuard. The adapter
+	// stores the IMPLEMENTATIONS so each per-fund
+	// runtimeTradingEngine constructed by newRuntime sees the
+	// same singletons the broker.Simulator was wired with —
+	// any holiday calendar update, lock-up flip, or borrow
+	// inventory change propagates to both paths at once.
+	// All four fields are optional (nil = no-op allow) so
+	// legacy / smoke wiring still works.
+	marketStatusGate broker.MarketStatusGate
+	lockupGate       broker.LockupGate
+	borrowGate       broker.BorrowGate
+	priceCollarGate  broker.PriceCollarGate
+
 	mu                 sync.Mutex
 	runtimes           map[string]*workflowRuntime
 	scheduler          *fundWorkflowScheduler
@@ -1363,6 +1381,32 @@ func (s *workflowServiceAdapter) WithLLMRuntime(runtime *llmRuntime) *workflowSe
 	if s != nil {
 		s.runtime = runtime
 	}
+	return s
+}
+
+// WithPMPathGates injects the same broker-side pre-trade gate
+// implementations the broker.Simulator was constructed with, so
+// the PM-direct-fill path in runtimeTradingEngine.executePlanAction
+// runs the same regulatory checks (market-status, lockup, borrow,
+// price-collar) as orders that flow through broker.SubmitOrder.
+// Passing nil for any individual gate is fine — the engine treats
+// nil as "no-op allow", matching broker.Simulator's contract.
+// Idempotent and safe to call before or after the workflow
+// scheduler is started; each per-fund runtime is constructed
+// lazily by newRuntime and reads the current values.
+func (s *workflowServiceAdapter) WithPMPathGates(
+	marketStatus broker.MarketStatusGate,
+	lockup broker.LockupGate,
+	borrowGate broker.BorrowGate,
+	priceCollar broker.PriceCollarGate,
+) *workflowServiceAdapter {
+	if s == nil {
+		return s
+	}
+	s.marketStatusGate = marketStatus
+	s.lockupGate = lockup
+	s.borrowGate = borrowGate
+	s.priceCollarGate = priceCollar
 	return s
 }
 
@@ -1910,6 +1954,33 @@ type runtimeTradingEngine struct {
 	// journal, which is the legacy behaviour and is fine for
 	// tests that don't care about reconciliation.
 	cashLedger *repository.CashLedgerRepo
+
+	// S12-followup (2026-06-04): broker-side pre-trade gates
+	// mirrored to the PM-direct-fill path. broker.Simulator
+	// already runs these five gates inside SubmitOrder, but
+	// runtimeTradingEngine.tradeRepoCreateAndFill bypasses the
+	// simulator and writes trade_executions directly. Holding
+	// references to the same gate IMPLEMENTATIONS here means
+	// PM-path fills go through the SAME regulatory checks as
+	// broker-path orders — no behaviour drift between the two
+	// code paths.
+	//
+	// All five fields are optional: a nil gate is treated as
+	// "no-op allow" so legacy tests / single-binary smoke builds
+	// that don't wire the gates keep working. The production
+	// wiring in main.go always sets all five.
+	//
+	// Lot-size is intentionally NOT covered by broker.LotSizeGate
+	// here — pmPathLotSizeGuard runs a faster in-memory check
+	// using the positionsByKey snapshot the engine already
+	// loaded, avoiding the redundant DB lookup that the broker-
+	// side gate performs. The two implementations enforce the
+	// exact same A-share board rules; the regression tests in
+	// pmpath_lotsize_guard_test.go pin that parity.
+	marketStatusGate broker.MarketStatusGate
+	lockupGate       broker.LockupGate
+	borrowGate       broker.BorrowGate
+	priceCollarGate  broker.PriceCollarGate
 }
 
 type hardRiskState struct {
@@ -6510,6 +6581,15 @@ func (s *workflowServiceAdapter) newRuntime(fund *repository.Fund, tradingDate t
 			lotLedger:    lotLedger,
 			uow:          uow,
 			cashLedger:   repository.NewCashLedgerRepo(s.db),
+			// S12-followup: share the same gate impls the
+			// broker.Simulator was wired with, so PM-direct
+			// fills see identical market-status / lockup /
+			// borrow / price-collar verdicts. nil-tolerant on
+			// each field (engine-side no-op when nil).
+			marketStatusGate: s.marketStatusGate,
+			lockupGate:       s.lockupGate,
+			borrowGate:       s.borrowGate,
+			priceCollarGate:  s.priceCollarGate,
 		},
 		&runtimeMemorySystem{
 			db:           s.db,
@@ -18090,6 +18170,21 @@ func (e *runtimeTradingEngine) executePlanAction(
 		}
 		return "rejected", err
 	}
+
+	// S12-followup (2026-06-04): mirror the four broker-side
+	// regulatory gates (market-status, lockup, borrow, price-
+	// collar) on the PM-direct-fill path BEFORE the equity /
+	// futures branch split. Without this, after-hours / halted
+	// / fat-finger / borrow-denied orders silently filled
+	// because tradeRepoCreateAndFill bypasses broker.Simulator.
+	// LotSizeGate (the fifth simulator gate) is kept on the
+	// faster in-memory pmPathLotSizeGuard path further down,
+	// after the cash / qty availability checks.
+	clientOrderID := mintTradeIdempotencyKey(action.ID, side, quantity).String
+	if _, gateErr := e.pmPathPreTradeGateChain(ctx, fund, action, side, quantity, orderPrice, clientOrderID); gateErr != nil {
+		return "rejected", gateErr
+	}
+
 	if isFuturesAction(action) {
 		status, err := e.executeFuturesPlanAction(ctx, fund, plan, action, positionKey, position, positionsByKey, availableCash, side, quantity, planPrice, orderPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer)
 		if err == nil {
@@ -18113,10 +18208,14 @@ func (e *runtimeTradingEngine) executePlanAction(
 		}
 		filledPrice = sql.NullFloat64{Float64: orderPrice, Valid: orderPrice > 0}
 	}
+
 	if side == "buy" {
 		totalDebit := amount + feeCommission + feeTransfer + feeStampTax
 		if totalDebit > *availableCash+0.0001 {
 			return "rejected", api.ErrConflict
+		}
+		if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
+			return "rejected", err
 		}
 		if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer); err != nil {
 			return "rejected", err
@@ -18131,6 +18230,9 @@ func (e *runtimeTradingEngine) executePlanAction(
 	availableQty := int(position.AvailableQty)
 	if availableQty < quantity {
 		return "rejected", api.ErrConflict
+	}
+	if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
+		return "rejected", err
 	}
 	if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer); err != nil {
 		return "rejected", err
@@ -18549,6 +18651,283 @@ func (e *runtimeTradingEngine) buildSkillContext(ctx context.Context, plan *repo
 	fundFocusContext, specializationContext := buildRuntimeFundContextsByID(ctx, plan.FundID, traderAgent, e.fundRepo)
 	context = appendSkillContext(context, fundFocusContext)
 	return appendSkillContext(context, specializationContext)
+}
+
+// pmPathLotSizeGuard is the PM-direct-fill counterpart to
+// broker.LotSizeGate (S12.1). The broker-side gate only catches
+// orders that flow through Simulator.SubmitOrder; the runtime
+// trading engine's "direct fill" path (executePlanAction →
+// tradeRepoCreateAndFill, written for fast plan-action settlement)
+// previously skipped that gate entirely, so an A-share order whose
+// quantity violated the board's MinLot/Step rules could land in
+// trade_executions unchallenged.
+//
+// Trigger story: 2026-06-03 the OCS A-share fund (STAR-Market
+// instruments 688205 / 688195) accumulated 105 / 283-share
+// fractional / odd-lot residuals because the PM sized partial sells
+// (62, 85, 104 …) that would leave a residual < 200 (STAR MinLot).
+// All eleven trade_executions for that fund had broker_order_id =
+// NULL — definitive proof they bypassed the simulator. This guard
+// closes the gap so PM-path fills get the same odd-lot residual /
+// step-alignment treatment as broker-path orders.
+//
+// Verdict semantics mirror instrument.IsAligned (buy) and
+// instrument.NormalizeSellQty (sell). On reject the function
+// returns a wrapped api.ErrConflict so the caller bubbles the
+// action to "rejected" without any side effects on holdings,
+// cash, or the lot ledger.
+//
+// Non-A-share symbols (US, HK, crypto, futures) are partially
+// covered: A-share board lot rules and US ≥$1 / sub-dollar tick
+// rules are deterministic in code, so we enforce them here. HK
+// banded ticks and crypto step_size still rely on broker-side
+// LotSizeGate (instrument_metadata-backed) when those orders
+// flow through broker.Simulator.SubmitOrder. PM-direct fills of
+// HK / crypto skip the tick check on this path — production
+// wiring should not route those venues through tradeRepoCreateAndFill.
+//
+// orderPrice is the limit price the trade will be recorded at
+// (filled_price for limit orders). Pass 0 for market orders;
+// the tick check is then skipped because the broker would fill
+// at the venue's own tick-aligned price.
+func (e *runtimeTradingEngine) pmPathLotSizeGuard(
+	side string,
+	action repository.PlanAction,
+	quantity int,
+	orderPrice float64,
+	position repository.HoldingPosition,
+) error {
+	if quantity <= 0 {
+		return nil
+	}
+	hint := instrument2.Hint{
+		Market:     action.Market.String,
+		Exchange:   action.Exchange.String,
+		AssetClass: action.AssetClass.String,
+	}
+
+	// S12-followup tick check: applies to A-share (0.01 CNY
+	// across all boards) and US equity (Reg NMS 612 — 0.01 USD
+	// at ≥$1, 0.0001 at <$1). Returns 0 / aligned-true for
+	// venues we don't deterministically model (HK banded,
+	// crypto step) — those are gated by the broker-side
+	// LotSizeGate via instrument_metadata, separately.
+	if orderPrice > 0 && !instrument2.IsTickAligned(action.Symbol, hint, orderPrice) {
+		tick := instrument2.TickSizeFor(action.Symbol, hint, orderPrice)
+		suggested := instrument2.FloorToTick(action.Symbol, hint, orderPrice)
+		e.recordPMPathLotSizeReject("tick")
+		return fmt.Errorf("%w: tick-size: %s price=%g not aligned to %g; suggested floor=%g",
+			api.ErrConflict, action.Symbol, orderPrice, tick, suggested)
+	}
+
+	spec := instrument2.SpecFor(instrument2.Classify(action.Symbol, hint))
+	if !spec.IsAShare() {
+		return nil
+	}
+	qty := float64(quantity)
+	normalisedSide := strings.ToLower(strings.TrimSpace(side))
+	switch normalisedSide {
+	case "buy":
+		if !instrument2.IsAligned(action.Symbol, hint, qty) {
+			suggested := instrument2.NormalizeBuyQty(action.Symbol, hint, qty)
+			e.recordPMPathLotSizeReject("buy")
+			return fmt.Errorf("%w: lot-size: %s buy qty=%d violates %s board (min_lot=%d, step=%d); suggested qty=%g",
+				api.ErrConflict, action.Symbol, quantity, spec.Board, spec.MinLot, spec.Step, suggested)
+		}
+	case "sell", "reduce", "close_long", "close_short":
+		held := position.AvailableQty
+		if held <= 0 {
+			held = position.Quantity
+		}
+		if held <= 0 {
+			e.recordPMPathLotSizeReject("sell_no_position")
+			return fmt.Errorf("%w: lot-size: %s sell rejected — no recorded position",
+				api.ErrConflict, action.Symbol)
+		}
+		legal := instrument2.NormalizeSellQty(action.Symbol, hint, qty, held)
+		// Allow a tiny float fuzz when comparing the legal value
+		// against the requested quantity (NormalizeSellQty returns
+		// integer share counts as float64).
+		if legal-qty > 1e-6 || qty-legal > 1e-6 {
+			e.recordPMPathLotSizeReject("sell_residual")
+			return fmt.Errorf("%w: lot-size: %s sell qty=%d on holding %g would leave odd-lot residual (< %s board min_lot=%d); must sell %g to liquidate",
+				api.ErrConflict, action.Symbol, quantity, held, spec.Board, spec.MinLot, legal)
+		}
+	}
+	return nil
+}
+
+// recordPMPathLotSizeReject bumps the lot-size metric with a
+// PM-path discriminator so the dashboard can separate broker-path
+// rejects (already tracked) from PM-direct-fill rejects (this gate).
+func (e *runtimeTradingEngine) recordPMPathLotSizeReject(reason string) {
+	if e == nil || e.metrics == nil {
+		return
+	}
+	e.metrics.RecordLotSizeEvent("pmpath_reject_" + reason)
+}
+
+// pmPathPreTradeGateChain runs the four broker-side regulatory
+// gates (market-status, lockup, borrow, price-collar) against a
+// PM-direct-fill request. Mirrors broker.Simulator.SubmitOrder's
+// chain so trades that bypass the simulator face exactly the same
+// pre-trade checks. The fifth gate (lot-size) lives in
+// pmPathLotSizeGuard and runs separately after the cash / qty
+// availability checks — same ordering as the broker path.
+//
+// All four gates are nil-tolerant: a nil field is treated as "no
+// gate wired" and skipped, identical to how broker.Simulator
+// behaves when its WithXxxGate option isn't applied. This keeps
+// the chain a no-op under legacy test wiring and single-binary
+// smoke builds where the production main.go isn't running.
+//
+// On reject the function returns a wrapped api.ErrConflict so the
+// caller (executePlanAction) transitions the action to "rejected"
+// with no side effects. Gate Warnings flow into the returned
+// []string for the trade row to carry forward — matching the
+// broker simulator's gateWarnings accumulation.
+//
+// Verdict ordering = simulator's gate chain:
+//   1. market-status (halted symbol, calendar, circuit breaker)
+//   2. lockup        (T+1 / post-IPO lock, broker-side reinforcement)
+//   3. borrow        (short-sell locate / inventory)
+//   4. price-collar  (fat-finger / limit too far from reference)
+//
+// The same precedence rule applies to the rejection reason: a
+// halted-symbol reject wins over a lockup reject, etc., so an
+// operator reading the error message sees the "harder" reason
+// first (mirrors broker simulator behaviour).
+func (e *runtimeTradingEngine) pmPathPreTradeGateChain(
+	ctx context.Context,
+	fund *repository.Fund,
+	action repository.PlanAction,
+	side string,
+	quantity int,
+	orderPrice float64,
+	clientOrderID string,
+) ([]string, error) {
+	if e == nil {
+		return nil, nil
+	}
+	var warnings []string
+	qty := float64(quantity)
+	sideStr := strings.ToLower(strings.TrimSpace(side))
+	instrumentKey := action.InstrumentKey
+	if instrumentKey == "" {
+		instrumentKey = buildInstrumentKey(action.Exchange.String, action.Symbol)
+	}
+
+	if e.marketStatusGate != nil {
+		v := e.marketStatusGate.CheckOrder(ctx, broker.MarketStatusProbe{
+			FundID:        fund.ID,
+			InstrumentKey: instrumentKey,
+			Symbol:        action.Symbol,
+			Market:        action.Market.String,
+			AssetClass:    action.AssetClass.String,
+			Side:          sideStr,
+			Quantity:      qty,
+			IntendedPrice: orderPrice,
+			ClientOrderID: clientOrderID,
+		})
+		if v.Rejected {
+			e.recordPMPathGateReject("market_status")
+			reason := v.RejectReason
+			if reason == "" {
+				reason = "rejected by market-status gate"
+			}
+			return warnings, fmt.Errorf("%w: market-status: %s", api.ErrConflict, reason)
+		}
+		warnings = append(warnings, v.Warnings...)
+	}
+
+	if e.lockupGate != nil {
+		v := e.lockupGate.CheckOrder(ctx, broker.LockupProbe{
+			FundID:        fund.ID,
+			InstrumentKey: instrumentKey,
+			Symbol:        action.Symbol,
+			AssetClass:    action.AssetClass.String,
+			Side:          sideStr,
+			Quantity:      qty,
+			IntendedPrice: orderPrice,
+			ClientOrderID: clientOrderID,
+		})
+		if v.Rejected {
+			e.recordPMPathGateReject("lockup")
+			reason := v.RejectReason
+			if reason == "" {
+				reason = "rejected by lockup gate"
+			}
+			return warnings, fmt.Errorf("%w: lockup: %s", api.ErrConflict, reason)
+		}
+		warnings = append(warnings, v.Warnings...)
+	}
+
+	if e.borrowGate != nil {
+		v := e.borrowGate.CheckOrder(ctx, broker.BorrowProbe{
+			FundID:        fund.ID,
+			InstrumentKey: instrumentKey,
+			Symbol:        action.Symbol,
+			AssetClass:    action.AssetClass.String,
+			Side:          sideStr,
+			Quantity:      qty,
+			IntendedPrice: orderPrice,
+			ClientOrderID: clientOrderID,
+		})
+		if v.Rejected {
+			e.recordPMPathGateReject("borrow")
+			reason := v.RejectReason
+			if reason == "" {
+				reason = "rejected by borrow gate"
+			}
+			return warnings, fmt.Errorf("%w: borrow: %s", api.ErrConflict, reason)
+		}
+		warnings = append(warnings, v.Warnings...)
+	}
+
+	if e.priceCollarGate != nil {
+		v := e.priceCollarGate.CheckOrder(ctx, broker.PriceCollarProbe{
+			FundID:        fund.ID,
+			InstrumentKey: instrumentKey,
+			Symbol:        action.Symbol,
+			Market:        action.Market.String,
+			AssetClass:    action.AssetClass.String,
+			Side:          sideStr,
+			Quantity:      qty,
+			IntendedPrice: orderPrice,
+			ClientOrderID: clientOrderID,
+		})
+		if v.Rejected {
+			e.recordPMPathGateReject("price_collar")
+			reason := v.RejectReason
+			if reason == "" {
+				reason = "rejected by price-collar gate"
+			}
+			return warnings, fmt.Errorf("%w: price-collar: %s", api.ErrConflict, reason)
+		}
+		warnings = append(warnings, v.Warnings...)
+	}
+
+	return warnings, nil
+}
+
+// recordPMPathGateReject increments the per-gate event counter
+// using the same metric series each broker-side gate already
+// emits, with a `pmpath_reject` event so the dashboard can
+// distinguish PM-direct-fill rejects from broker-path rejects.
+func (e *runtimeTradingEngine) recordPMPathGateReject(gate string) {
+	if e == nil || e.metrics == nil {
+		return
+	}
+	switch gate {
+	case "market_status":
+		e.metrics.RecordMarketStatusEvent("pmpath_reject")
+	case "lockup":
+		e.metrics.RecordLockupEvent("pmpath_reject")
+	case "borrow":
+		e.metrics.RecordBorrowEvent("pmpath_reject")
+	case "price_collar":
+		e.metrics.RecordPriceCollarEvent("pmpath_reject")
+	}
 }
 
 func (e *runtimeTradingEngine) tradeRepoCreateAndFill(

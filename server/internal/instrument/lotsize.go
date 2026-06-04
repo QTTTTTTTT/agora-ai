@@ -24,6 +24,7 @@
 package instrument
 
 import (
+	"math"
 	"strings"
 	"unicode"
 )
@@ -213,6 +214,91 @@ func NormalizeSellQty(symbol string, hint Hint, rawQty, holdingQty float64) floa
 	}
 
 	return float64(sell)
+}
+
+// TickSizeFor returns the minimum legal price increment ("tick")
+// for symbol+hint at the given price, in the symbol's quote
+// currency. Returns 0 when the package has no deterministic
+// per-symbol-prefix rule and the caller should defer to a
+// metadata-backed resolver (HK banded ticks, crypto step_size).
+//
+// Deterministic rules covered here:
+//
+//   A-share (all boards)     0.01 CNY              (沪深主板 / 创业板 / 科创板 / 北交所 全部 0.01)
+//   US equity, price ≥ $1.00 0.01 USD              (Reg NMS Rule 612 ≥$1 tier)
+//   US equity, price <  $1.00 0.0001 USD           (sub-dollar tier)
+//
+// Hints with explicit non-equity asset classes (crypto / futures)
+// always return 0 — the lot-size engine's step_size / contract
+// multiplier already constrains those venues, so an additional
+// tick check would double-count.
+//
+// price is consulted only for the US sub-dollar rule; pass 0 to
+// get the ≥$1 tick (the common case for plan-time pre-checks
+// where the live price isn't loaded yet).
+func TickSizeFor(symbol string, hint Hint, price float64) float64 {
+	ac := strings.ToLower(strings.TrimSpace(hint.AssetClass))
+	switch ac {
+	case "crypto", "futures", "future", "option", "options":
+		return 0
+	}
+	if SpecFor(Classify(symbol, hint)).IsAShare() {
+		return 0.01
+	}
+	market := strings.ToLower(strings.TrimSpace(hint.Market))
+	switch market {
+	case "us_stock", "us_equity", "us", "usequity":
+		if price > 0 && price < 1.0 {
+			return 0.0001
+		}
+		return 0.01
+	}
+	return 0
+}
+
+// IsTickAligned reports whether price aligns to the per-venue
+// tick size for symbol+hint. Returns true when no deterministic
+// tick is known (the caller should fall back to a metadata-backed
+// gate for those venues — for HK banded ticks and crypto step we
+// rely on broker-side LotSizeGate which queries
+// instrument_metadata).
+//
+// price ≤ 0 is treated as aligned (market orders carry no price,
+// the broker price will be re-checked downstream).
+func IsTickAligned(symbol string, hint Hint, price float64) bool {
+	if price <= 0 {
+		return true
+	}
+	tick := TickSizeFor(symbol, hint, price)
+	if tick <= 0 {
+		return true
+	}
+	// Scale to integer space to avoid float fuzz: e.g. price=0.30
+	// / tick=0.01 = 30.0 in scaled space; round and require the
+	// round-trip to recover within 1e-6 of the input.
+	scale := 1.0 / tick
+	scaled := price * scale
+	rounded := math.Round(scaled)
+	return math.Abs(scaled-rounded) < 1e-6
+}
+
+// FloorToTick returns the largest legal price ≤ price for the
+// given symbol+hint. Useful when a fat-finger limit needs to be
+// nudged down to the nearest tick before re-submission. Returns
+// price unchanged when no deterministic tick applies.
+func FloorToTick(symbol string, hint Hint, price float64) float64 {
+	if price <= 0 {
+		return price
+	}
+	tick := TickSizeFor(symbol, hint, price)
+	if tick <= 0 {
+		return price
+	}
+	scale := 1.0 / tick
+	// Add a tiny epsilon so prices that are exact tick multiples
+	// (e.g. 239.35 / 0.01 = 23935) don't get floored to 23934
+	// because of double-precision drift on the multiply.
+	return math.Floor(price*scale+1e-9) / scale
 }
 
 // IsAligned reports whether qty satisfies the lot-size constraint for
