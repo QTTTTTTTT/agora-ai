@@ -19076,12 +19076,30 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	normalizedStrategy := normalizePMPathStrategy(strategy)
 	// B-step2: if the per-fund flag is on AND the splitter says
 	// this (qty, strategy) pair warrants more than one child AND
-	// the side is buy (sell / futures-close not yet wired in this
-	// commit — see docs/TRADER_AGENT_INTEGRATION.md "step 2: buy
-	// path only"), fan out into a parent + N children. The flag
-	// defaults to false so non-opted-in funds keep the legacy
-	// single-row path on this same call.
-	if strings.EqualFold(side, "buy") &&
+	// the splitter is wired for this side+position, fan out into
+	// a parent + N children. The flag defaults to false so
+	// non-opted-in funds keep the legacy single-row path on this
+	// same call.
+	//
+	// Splitter wiring matrix:
+	//
+	//   side  | position_side | enabled
+	//   ------+---------------+--------
+	//   buy   | (any non-short) | YES (T1-step2-buy commit)
+	//   sell  | long / unset    | YES (this commit)
+	//   sell  | short           | NO  (futures short open semantics
+	//                                  flip the lot ledger — recorded
+	//                                  by recordLotFill as a no-op
+	//                                  today. The cash_ledger sell
+	//                                  legs would still write, but
+	//                                  the lot ledger drift across
+	//                                  multiple children needs a
+	//                                  parallel short-lot model.)
+	//   buy   | short           | NO  (closes a short — symmetric
+	//                                  blocker to the above.)
+	//
+	// See docs/TRADER_AGENT_INTEGRATION.md "step 2 status".
+	if splitterEnabledForSide(side, action) &&
 		pmPathChildSplittingEnabled(fund.Config) &&
 		shouldSplitParent(quantity, normalizedStrategy) {
 		return e.tradeRepoCreateAndFillSplit(

@@ -217,14 +217,82 @@ func TestTradeRepoCreateAndFill_FlagOffStaysSingleRow(t *testing.T) {
 	assertMockExpectations(t, mock)
 }
 
-// TestTradeRepoCreateAndFill_FlagOnButSellStaysSingleRow guards the
-// "buy only" gate: with the flag on AND qty=4000 AND strategy=twap,
-// a SELL must still be the legacy single-row path because the
-// sell-side splitter wiring is deferred (B-step2 in-progress, see
-// docs/TRADER_AGENT_INTEGRATION.md). A regression that fanned out
-// sells too early would write per-child position_lots CLOSE rows
-// against the wrong FIFO ordering.
-func TestTradeRepoCreateAndFill_FlagOnButSellStaysSingleRow(t *testing.T) {
+// TestTradeRepoCreateAndFillSplit_SellTWAPHappyPath drives the
+// splitter on a 4000-share TWAP SELL. lotledger.recordSell handles
+// FIFO close-ordering across multiple open lots already, so a
+// per-child sell is just a smaller recordSell call — the ledger
+// service auto-consumes lots in the right order. This test pins
+// the trade_executions layer only (cashLedger / lotLedger nil so
+// the per-child ledger writes early-return); FIFO correctness is
+// covered by lotledger's own test suite.
+func TestTradeRepoCreateAndFillSplit_SellTWAPHappyPath(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	insertSQL := regexp.MustCompile(`INSERT INTO trade_executions`)
+
+	// Parent (qty=4000, fees=10/0/0, side=sell). Note the
+	// slippage_pct argument is NULL because computeSlippagePct
+	// returns NULL for sells (see column comment on
+	// trade_executions.slippage_pct).
+	mock.ExpectQuery(insertSQL.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("trade-parent-sell"))
+	mock.ExpectExec("UPDATE trade_executions").
+		WithArgs("filled", 4000.0, sql.NullFloat64{Float64: 100, Valid: true},
+			10.0, 0.0, 0.0, sql.NullFloat64{}, "trade-parent-sell").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	for i := 0; i < 5; i++ {
+		childID := "trade-child-sell-" + string(rune('0'+i))
+		mock.ExpectQuery(insertSQL.String()).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(childID))
+		mock.ExpectExec("UPDATE trade_executions").
+			WithArgs("filled", 800.0, sql.NullFloat64{Float64: 100, Valid: true},
+				2.0, 0.0, 0.0, sql.NullFloat64{}, childID).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+
+	engine := &runtimeTradingEngine{tradeRepo: repository.NewTradeRepo(db)}
+
+	fund := &repository.Fund{
+		ID:          "fund-1",
+		TradingMode: "simulation",
+		Config:      json.RawMessage(`{"pm_path_child_splitting": true}`),
+	}
+	plan := &repository.InvestmentPlan{ID: "plan-1"}
+	action := repository.PlanAction{
+		ID:            "action-1",
+		InstrumentKey: "NVDA",
+		Symbol:        "NVDA",
+		Price:         sql.NullFloat64{Float64: 100, Valid: true},
+		// PositionSide left unset — equity sells almost always
+		// leave it NULL in production and the gate maps that to
+		// "long" (see splitterEnabledForSide).
+	}
+	filledPrice := sql.NullFloat64{Float64: 100, Valid: true}
+
+	err := engine.tradeRepoCreateAndFill(
+		context.Background(),
+		fund, plan, action,
+		"sell", 4000, 100, 400000, "filled",
+		filledPrice, 10.0, 0.0, 0.0,
+		"twap",
+	)
+	if err != nil {
+		t.Fatalf("tradeRepoCreateAndFill sell split: %v", err)
+	}
+	assertMockExpectations(t, mock)
+}
+
+// TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow guards
+// the "non-short only" gate: with the flag on AND qty=4000 AND
+// strategy=twap, a SELL on a SHORT position must still be the
+// legacy single-row path because the lot-ledger short-side branch
+// is a no-op pending the parallel short-lot model. A regression
+// that fanned out short-side operations would write 5 children
+// whose lot writes are all no-ops, leaving holding_positions out
+// of sync with trade_executions.
+func TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
 
@@ -242,21 +310,22 @@ func TestTradeRepoCreateAndFill_FlagOnButSellStaysSingleRow(t *testing.T) {
 	}
 	plan := &repository.InvestmentPlan{ID: "plan-1"}
 	action := repository.PlanAction{
-		ID:     "action-1",
-		Symbol: "NVDA",
-		Price:  sql.NullFloat64{Float64: 100, Valid: true},
+		ID:           "action-1",
+		Symbol:       "ESU2026",
+		Price:        sql.NullFloat64{Float64: 100, Valid: true},
+		PositionSide: sql.NullString{String: "short", Valid: true},
 	}
 
 	err := engine.tradeRepoCreateAndFill(
 		context.Background(),
 		fund, plan, action,
-		"sell", 4000, 100, 400000, "filled", // sell side: gate forces single row
+		"sell", 4000, 100, 400000, "filled", // sell + short → gate forces single row
 		sql.NullFloat64{Float64: 100, Valid: true},
 		10.0, 0.0, 0.0,
 		"twap",
 	)
 	if err != nil {
-		t.Fatalf("flag-on-but-sell path: %v", err)
+		t.Fatalf("flag-on-but-short path: %v", err)
 	}
 	assertMockExpectations(t, mock)
 }

@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done, step 2 buy-path landed; sell + futures pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + equity long-side sell landed; futures + short-side pending**
 
 ## Why this doc exists
 
@@ -103,7 +103,7 @@ orders actually produce distinct strategy values per row.
   tests cover the quantity-gate dominance, plan-price branch, and
   normaliser edge cases (case, whitespace, unknown values).
 
-### B-step 2 — real child-order splitting (**IN-PROGRESS: buy path landed; sell + futures pending**)
+### B-step 2 — real child-order splitting (**IN-PROGRESS: equity buy + equity long-side sell landed; futures / short-side pending**)
 
 When this fully lands, the picture becomes:
 
@@ -173,26 +173,50 @@ runtimeTradingEngine.executePlanAction (PER action)
       `pm_path_split_executor_test.go` (a 4000-share TWAP buy
       produces 6 INSERTs + 6 UPDATEs in the right order, with the
       flag off the legacy single-row path is preserved, with the
-      flag on but side=sell the legacy single-row path is
+      flag on but a short position the legacy single-row path is
       preserved, and `proRataFeeSplit` sums exactly to the parent
       total).
+- [x] **Long-side sell splitter (T2 follow-up commit).**
+      Investigation surfaced that `lotledger.recordSell` already
+      FIFO-consumes `min(lot.QuantityRemaining, remaining)`
+      across multiple open lots until the fill quantity is
+      exhausted (see
+      `server/internal/lotledger/lotledger.go:262`). N sequential
+      child sells therefore produce the same FIFO close ordering
+      as one big sell — the closed_lots rows differ in
+      `trade_execution_id` but the per-lot consumed quantity and
+      pro-rata fee allocation stay correct. No new
+      `splitSellAgainstLots` helper was needed. The gate is now
+      `splitterEnabledForSide(side, action)`
+      (see `pm_path_splitter_gate.go`); short positions AND
+      futures stay on the legacy single-row path.
+- [x] Splitter-gate (side, position_side, asset_class) matrix
+      (`pm_path_splitter_gate_test.go`) — 17-cell exhaustive
+      table: buy/sell × long/short × equity/futures with case +
+      whitespace normalisation. Safety-critical cells (any
+      "short" → false, any "futures" → false) covered
+      explicitly so a regression there is caught at unit-test
+      time.
 
 **Deferred to follow-up PRs (still TODO):**
 
-- [ ] Wire the splitter on the **sell** path
-      (`tradeRepoCreateAndFill` with side=sell). The blocker is
-      lot-ledger ordering: a 4000-share TWAP sell against existing
-      FIFO opens has to deterministically pick which open lots to
-      close per child, and `lotledger.ClassifyFuturesSide` +
-      `recordLotFill` currently assume the caller closes the
-      whole parent qty in one shot. Need a `splitSellAgainstLots`
-      pass before the executor can be enabled for sells.
-- [ ] Wire futures `open` (long buy / short sell open) — the
-      current splitter only emits `[qty]` for non-long sides
-      (`recordLotFill` short branch is a no-op). Needs the
-      parallel short-lot ledger landing first.
-- [ ] Wire futures `close` — same FIFO ordering question as
-      equity sell, plus margin-release timing per child.
+- [ ] Wire **futures long open / close** through the splitter
+      (today the gate excludes asset_class=futures across the
+      board). The blocker is `recordCashLedgerForFill`: it
+      writes one SellNotional cash row for any sell-side fill
+      regardless of asset_class. For equity that's correct
+      (proceeds hit cash); for a futures close it's a
+      simplification — the real entries should be per-child
+      margin release + a single realized PnL booking. The
+      legacy single-row path has the same simplification, but
+      the splitter must not amplify it 5× across children until
+      `recordCashLedgerForFill` learns the asset_class=futures
+      branch. Touches the cash ledger, not the splitter itself.
+- [ ] Wire **futures short / equity short** (the symmetric
+      blocker on the position_side axis) — needs the parallel
+      short-lot ledger to land before the splitter can fan out
+      a short open/close without the lot writes turning into
+      silent no-ops.
 - [ ] Per-child fill PRICE (not just qty). The current splitter
       shares the parent's `executionPrice` across every child
       because `broker.Simulator` returns a single fill; once the
