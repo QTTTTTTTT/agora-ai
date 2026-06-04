@@ -64,6 +64,19 @@ interface Trade {
   contractMultiplier?: number;
   expiryDate?: string;
   reduceOnly?: boolean;
+  // Execution strategy ("twap" / "vwap" / "limit" / ...) on rows
+  // that went through the PM-direct-fill splitter (T1+ commits).
+  // Empty/undefined on legacy rows. We surface it on the parent
+  // row as a chip so operators see the intent at a glance.
+  strategy?: string;
+  // When set, this row is a child slice of a TWAP / VWAP / iceberg
+  // parent; backend ?exclude_child_slices=true filters these out
+  // of the list response, so any row we render here in the main
+  // table is either a parent (children expandable via drilldown)
+  // or a legacy non-split row. We still defensively check this
+  // field so a stale cache or future regression can't sneak a
+  // child into the main table.
+  strategyParentTradeId?: string;
   createdAt: string;
 }
 
@@ -93,6 +106,18 @@ function dateInputValue(daysAgo: number): string {
 
 function metaItems(...values: Array<string | undefined>): string[] {
   return values.filter((value): value is string => Boolean(value?.trim()));
+}
+
+// isMultiSliceStrategy reports whether the trade row's execution
+// strategy is one that the PM-direct-fill splitter may have
+// expanded into multiple child slices. We use this to decide
+// whether to show the "show slices" drilldown chip — single-row
+// strategies (immediate / limit) never have children so adding
+// a button there would be noise. Defensive: an unknown / empty
+// strategy returns false so legacy rows render the legacy way.
+function isMultiSliceStrategy(strategy?: string): boolean {
+  const normalized = (strategy ?? "").trim().toLowerCase();
+  return normalized === "twap" || normalized === "vwap" || normalized === "iceberg" || normalized === "pov";
 }
 
 function quoteLookupKey(value?: string): string {
@@ -141,6 +166,17 @@ const TradeHistory: React.FC = () => {
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [replaceTarget, setReplaceTarget] = useState<Trade | null>(null);
+  // Drilldown state for the PM-path child-splitting feature.
+  // expandedParents tracks which parent rows the operator has
+  // toggled open; childrenByParent caches the per-parent slice
+  // response so toggling the same row twice doesn't refetch.
+  // childrenLoadingByParent / childrenErrorByParent are per-row
+  // statuses so a single failed drilldown doesn't break the
+  // surrounding table.
+  const [expandedParents, setExpandedParents] = useState<Record<string, boolean>>({});
+  const [childrenByParent, setChildrenByParent] = useState<Record<string, Trade[]>>({});
+  const [childrenLoadingByParent, setChildrenLoadingByParent] = useState<Record<string, boolean>>({});
+  const [childrenErrorByParent, setChildrenErrorByParent] = useState<Record<string, string | null>>({});
 
   const copy = useMemo(
     () =>
@@ -261,6 +297,16 @@ const TradeHistory: React.FC = () => {
             unknownStatus: "Unknown status",
             spotLong: "Spot / long",
             unset: "Unset",
+            splitter: {
+              expand: "Show slices",
+              collapse: "Hide slices",
+              loading: "Loading slices…",
+              empty: "No child slices for this order.",
+              error: "Failed to load slices",
+              strategyLabel: "Strategy",
+              sliceIndex: "Slice",
+              parentBadge: "TWAP parent",
+            },
           }
         : {
             missingFundId: "缺少 fundId",
@@ -378,6 +424,16 @@ const TradeHistory: React.FC = () => {
             unknownStatus: "未知状态",
             spotLong: "现货 / 多头",
             unset: "未设置",
+            splitter: {
+              expand: "展开分笔",
+              collapse: "收起分笔",
+              loading: "正在加载分笔…",
+              empty: "该订单无子分笔",
+              error: "加载分笔失败",
+              strategyLabel: "策略",
+              sliceIndex: "分笔",
+              parentBadge: "TWAP 父单",
+            },
           },
     [language],
   );
@@ -453,6 +509,13 @@ const TradeHistory: React.FC = () => {
       const params = new URLSearchParams();
       params.set("limit", "200");
       params.set("offset", "0");
+      // PM-path child-splitting (T1+ commits) generates 1 parent
+      // + N child trade rows per plan_action. The list view stays
+      // at "one row per plan_action" by asking the backend to
+      // filter out child slices; the operator drills into per-
+      // slice detail via the expandable "+N slices" button on the
+      // parent row.
+      params.set("exclude_child_slices", "true");
       if (range !== "all") {
         if (fromDate) {
           params.set("from", isoStartOfDay(fromDate));
@@ -463,12 +526,26 @@ const TradeHistory: React.FC = () => {
       }
       const path = `/api/funds/${fundId}/trades?${params.toString()}`;
       const response = await apiGet<Trade[]>(path);
-      const sorted = (response ?? []).slice().sort((a, b) => {
-        const left = a.executedAt ?? a.createdAt;
-        const right = b.executedAt ?? b.createdAt;
-        return right.localeCompare(left);
-      });
+      // Defensive filter: even though we asked the backend to
+      // exclude children, drop anything that DID slip through
+      // (stale caches, future regression) so the main table is
+      // 100% guaranteed parent-or-standalone only.
+      const sorted = (response ?? [])
+        .filter((trade) => !trade.strategyParentTradeId)
+        .slice()
+        .sort((a, b) => {
+          const left = a.executedAt ?? a.createdAt;
+          const right = b.executedAt ?? b.createdAt;
+          return right.localeCompare(left);
+        });
       setTrades(sorted);
+      // Reset drilldown state on every reload — the cached
+      // child rows would otherwise drift out of sync with the
+      // freshly-loaded parents.
+      setExpandedParents({});
+      setChildrenByParent({});
+      setChildrenLoadingByParent({});
+      setChildrenErrorByParent({});
 
       const quoteSymbols = Array.from(new Set(sorted.map((trade) => trade.symbol.trim()).filter(Boolean)));
       if (quoteSymbols.length === 0) {
@@ -497,6 +574,39 @@ const TradeHistory: React.FC = () => {
   useEffect(() => {
     void loadTrades();
   }, [loadTrades]);
+
+  // toggleParentExpand opens / closes the drilldown panel on a
+  // parent trade row. First open triggers a lazy fetch of the
+  // per-slice children; subsequent toggles reuse the cached
+  // response. Errors are kept per-row so a single failed
+  // drilldown can't poison the surrounding table.
+  const toggleParentExpand = useCallback(
+    async (parent: Trade) => {
+      const parentId = parent.id;
+      const isOpen = expandedParents[parentId] ?? false;
+      // Always flip the open state first so the user gets
+      // immediate feedback even if the fetch is slow.
+      setExpandedParents((prev) => ({ ...prev, [parentId]: !isOpen }));
+      // Only fetch on first-open — if we already have data
+      // (or a sticky error) just toggle visibility.
+      if (isOpen || childrenByParent[parentId] !== undefined || childrenLoadingByParent[parentId]) {
+        return;
+      }
+      if (!fundId) return;
+      setChildrenLoadingByParent((prev) => ({ ...prev, [parentId]: true }));
+      setChildrenErrorByParent((prev) => ({ ...prev, [parentId]: null }));
+      try {
+        const path = `/api/funds/${fundId}/trades/${encodeURIComponent(parentId)}/children`;
+        const rows = await apiGet<Trade[]>(path);
+        setChildrenByParent((prev) => ({ ...prev, [parentId]: rows ?? [] }));
+      } catch (err) {
+        setChildrenErrorByParent((prev) => ({ ...prev, [parentId]: formatApiError(err, copy.loadError) }));
+      } finally {
+        setChildrenLoadingByParent((prev) => ({ ...prev, [parentId]: false }));
+      }
+    },
+    [childrenByParent, childrenLoadingByParent, copy.loadError, expandedParents, fundId],
+  );
 
   // applyOrderUpdate patches a single trade in local state with the
   // post-action snapshot returned by the server. Avoids a full
@@ -763,8 +873,14 @@ const TradeHistory: React.FC = () => {
                   const amountCurrency = trade.settlementCurrency || trade.quoteCurrency || "USD";
                   const liveQuote = marketQuotes[quoteLookupKey(trade.symbol)] ?? marketQuotes[quoteLookupKey(trade.instrumentKey)] ?? null;
                   const quoteGap = liveQuote && effectivePrice > 0 ? ((liveQuote.price - effectivePrice) / effectivePrice) * 100 : null;
+                  const hasSlices = isMultiSliceStrategy(trade.strategy);
+                  const isExpanded = expandedParents[trade.id] ?? false;
+                  const children = childrenByParent[trade.id];
+                  const childrenLoading = childrenLoadingByParent[trade.id] ?? false;
+                  const childrenError = childrenErrorByParent[trade.id];
                   return (
-                    <tr key={trade.id} className="border-t border-gray-100 align-top">
+                    <React.Fragment key={trade.id}>
+                    <tr className="border-t border-gray-100 align-top">
                       <td className="px-4 py-4 text-gray-600">{formatDateTimeForLanguage(trade.executedAt ?? trade.createdAt, language)}</td>
                       <td className="px-4 py-4">
                         <div>
@@ -831,7 +947,24 @@ const TradeHistory: React.FC = () => {
                       <td className="px-4 py-4 text-right text-gray-600">{formatMoneyForDisplay(feeTotal, amountCurrency, displayCurrency, language)}</td>
                       <td className="px-4 py-4 text-gray-600">{tradingModeLabel(trade.tradingMode)}</td>
                       <td className="px-4 py-4">
-                        <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${status.badge}`}>{status.label}</span>
+                        <div className="flex flex-col items-start gap-1.5">
+                          <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${status.badge}`}>{status.label}</span>
+                          {trade.strategy ? (
+                            <span className="inline-flex rounded-full border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-indigo-600">
+                              {copy.splitter.strategyLabel}: {trade.strategy}
+                            </span>
+                          ) : null}
+                          {hasSlices ? (
+                            <button
+                              type="button"
+                              onClick={() => void toggleParentExpand(trade)}
+                              className="rounded-md border border-indigo-200 bg-white px-2 py-1 text-[11px] font-medium text-indigo-700 hover:bg-indigo-50"
+                            >
+                              {isExpanded ? copy.splitter.collapse : copy.splitter.expand}
+                              {children ? ` (${children.length})` : ""}
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="px-4 py-4 text-right">
                         {isOpenOrderStatus(trade.status) ? (
@@ -858,6 +991,64 @@ const TradeHistory: React.FC = () => {
                         )}
                       </td>
                     </tr>
+                    {hasSlices && isExpanded ? (
+                      <tr key={`${trade.id}-children`} className="border-t border-indigo-50 bg-indigo-50/30">
+                        <td colSpan={10} className="px-6 py-4">
+                          {childrenLoading ? (
+                            <span className="text-xs text-gray-500">{copy.splitter.loading}</span>
+                          ) : childrenError ? (
+                            <span className="text-xs text-red-600">
+                              {copy.splitter.error}: {childrenError}
+                            </span>
+                          ) : children && children.length === 0 ? (
+                            <span className="text-xs text-gray-500">{copy.splitter.empty}</span>
+                          ) : children ? (
+                            <div className="overflow-x-auto">
+                              <table className="min-w-full text-xs">
+                                <thead>
+                                  <tr className="text-left text-[11px] uppercase tracking-wider text-indigo-700">
+                                    <th className="py-2 pr-4 font-medium">#</th>
+                                    <th className="py-2 pr-4 font-medium">{copy.columns.time}</th>
+                                    <th className="py-2 pr-4 text-right font-medium">{copy.columns.quantity}</th>
+                                    <th className="py-2 pr-4 text-right font-medium">{copy.columns.price}</th>
+                                    <th className="py-2 pr-4 text-right font-medium">{copy.columns.amount}</th>
+                                    <th className="py-2 pr-4 text-right font-medium">{copy.columns.fee}</th>
+                                    <th className="py-2 pr-4 font-medium">{copy.columns.status}</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {children.map((child, idx) => {
+                                    const childStatus = statusMeta(child.status);
+                                    const childQty = child.filledQty || child.quantity;
+                                    const childPrice = child.filledPrice || child.price;
+                                    const childAmount = child.amount || childQty * childPrice;
+                                    const childFee = (child.feeCommission ?? 0) + (child.feeStampTax ?? 0) + (child.feeTransfer ?? 0);
+                                    const childPriceCurrency = child.quoteCurrency || priceCurrency;
+                                    const childAmountCurrency = child.settlementCurrency || child.quoteCurrency || amountCurrency;
+                                    return (
+                                      <tr key={child.id} className="border-t border-indigo-100/60">
+                                        <td className="py-2 pr-4 text-gray-500">
+                                          {copy.splitter.sliceIndex} {idx + 1}
+                                        </td>
+                                        <td className="py-2 pr-4 text-gray-600">{formatDateTimeForLanguage(child.executedAt ?? child.createdAt, language)}</td>
+                                        <td className="py-2 pr-4 text-right text-gray-700">{formatQuantity(childQty)}</td>
+                                        <td className="py-2 pr-4 text-right text-gray-700">{formatMoneyForDisplay(childPrice, childPriceCurrency, displayCurrency, language)}</td>
+                                        <td className="py-2 pr-4 text-right text-gray-900">{formatMoneyForDisplay(childAmount, childAmountCurrency, displayCurrency, language)}</td>
+                                        <td className="py-2 pr-4 text-right text-gray-600">{formatMoneyForDisplay(childFee, childAmountCurrency, displayCurrency, language)}</td>
+                                        <td className="py-2 pr-4">
+                                          <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-medium ${childStatus.badge}`}>{childStatus.label}</span>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ) : null}
+                    </React.Fragment>
                   );
                 })}
               </tbody>

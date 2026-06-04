@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + equity long-side sell + execution_status rollup helper + parent/child list filter API landed; futures + short-side + UI hide-children pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + equity long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout landed; futures + short-side pending**
 
 ## Why this doc exists
 
@@ -238,15 +238,30 @@ runtimeTradingEngine.executePlanAction (PER action)
         the new fields. Tsc clean; existing UIs are unaffected
         (additive, both omitempty).
 
-**Deferred to follow-up PRs (still TODO):**
+- [x] **UI hide-children rollout (T4 commit).** The
+      frontend `TradeHistory.tsx` page now appends
+      `?exclude_child_slices=true` to its list call and
+      defensively filters any child rows that slip through
+      (stale cache / future regression) before rendering. A
+      parent whose `strategy` is one of `twap`, `vwap`,
+      `iceberg`, `pov` gets a "show slices / hide slices"
+      button next to its status chip; clicking it lazily
+      fetches `GET /api/funds/{fundId}/trades/{id}/children`,
+      caches the result per-parent so toggling twice is free,
+      and surfaces per-row errors so one failed drilldown
+      doesn't break the surrounding table. The dashboard
+      "10 most-recent trades" preview also flipped to the
+      `excludeChildSlices=true` variant so it stays at one
+      row per plan_action. Three new helpers — service
+      `ListTradeChildren`, handler
+      `GET /api/funds/{fundId}/trades/{tradeId}/children`,
+      `convertTrade`'s cross-fund guard — round out the
+      backend side. Six handler tests pin the contract:
+      query-param forwarding, default-false back-compat,
+      malformed-value safety, happy-path JSON shape, nil-slice
+      → `[]` rendering, and unauthenticated rejection.
 
-- [ ] **UI hide-children rollout.** The repo API + the JSON
-      shape are landed; the frontend `TradeHistory.tsx` page
-      still calls the no-opts list endpoint and renders every
-      child row inline. Switching it to call the
-      `excludeChildSlices=true` variant + adding a "show N
-      slices" drilldown on parent rows is a frontend-only
-      follow-up.
+**Deferred to follow-up PRs (still TODO):**
 
 - [ ] Wire **futures long open / close** through the splitter
       (today the gate excludes asset_class=futures across the

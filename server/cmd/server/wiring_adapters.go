@@ -4906,7 +4906,7 @@ func convertTrade(trade *repository.TradeExecution) api.Trade {
 	return result
 }
 
-func (s *tradeServiceAdapter) ListTrades(userID, fundID string, from, to *time.Time, limit, offset int) ([]api.Trade, error) {
+func (s *tradeServiceAdapter) ListTrades(userID, fundID string, from, to *time.Time, limit, offset int, excludeChildSlices bool) ([]api.Trade, error) {
 	if _, err := authorizeFundAccess(context.Background(), s.fundRepo, s.companyRepo, userID, fundID); err != nil {
 		return nil, err
 	}
@@ -4928,7 +4928,14 @@ func (s *tradeServiceAdapter) ListTrades(userID, fundID string, from, to *time.T
 	if offset < 0 {
 		offset = 0
 	}
-	trades, err := s.tradeRepo.ListByFundPage(context.Background(), fundID, start, end, limit, offset)
+	// Forward the UI's hide-children intent to the repo so the
+	// underlying SQL applies the strategy_parent_trade_id IS NULL
+	// filter. We always route through the *Opts variant; the
+	// zero-value opts case is byte-identical to the legacy
+	// ListByFundPage path so nothing observable changes for
+	// callers that pass false.
+	trades, err := s.tradeRepo.ListByFundPageOpts(context.Background(), fundID, start, end, limit, offset,
+		repository.TradeListOpts{ExcludeChildSlices: excludeChildSlices})
 	if err != nil {
 		return nil, mapRepositoryError(err)
 	}
@@ -4936,6 +4943,41 @@ func (s *tradeServiceAdapter) ListTrades(userID, fundID string, from, to *time.T
 	result := make([]api.Trade, 0, len(trades))
 	for i := range trades {
 		result = append(result, convertTrade(&trades[i]))
+	}
+	return result, nil
+}
+
+// ListTradeChildren returns the per-slice children of a TWAP /
+// VWAP / iceberg / POV parent trade. Authz uses the same
+// fund-access check as ListTrades. The fund_id on each returned
+// row is verified to match `fundID` so a malicious / stale
+// `tradeID` from another fund can't be enumerated via this
+// endpoint (defense-in-depth — the underlying SQL already
+// excludes other funds because children always carry the same
+// fund_id as the parent that the splitter inserted, but we
+// re-check here to be explicit).
+func (s *tradeServiceAdapter) ListTradeChildren(userID, fundID, parentTradeID string) ([]api.Trade, error) {
+	if _, err := authorizeFundAccess(context.Background(), s.fundRepo, s.companyRepo, userID, fundID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(parentTradeID) == "" {
+		return []api.Trade{}, nil
+	}
+	rows, err := s.tradeRepo.ListChildrenByStrategyParent(context.Background(), parentTradeID)
+	if err != nil {
+		return nil, mapRepositoryError(err)
+	}
+	result := make([]api.Trade, 0, len(rows))
+	for i := range rows {
+		// Cross-fund guard: skip any row that belongs to a
+		// different fund. In production this never fires (the
+		// splitter copies fund_id from the parent) but the
+		// check makes the endpoint safe under repo-level
+		// corruption / future refactors.
+		if rows[i].FundID != fundID {
+			continue
+		}
+		result = append(result, convertTrade(&rows[i]))
 	}
 	return result, nil
 }

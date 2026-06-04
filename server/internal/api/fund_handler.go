@@ -1350,7 +1350,22 @@ type PlanService interface {
 }
 
 type TradeService interface {
-	ListTrades(userID, fundID string, from, to *time.Time, limit, offset int) ([]Trade, error)
+	// ListTrades returns the paged trade window for a fund.
+	// excludeChildSlices=true filters out rows that are children
+	// of a multi-slice parent (i.e. strategy_parent_trade_id IS
+	// NOT NULL), so the UI list view shows one aggregated parent
+	// per plan_action; the per-slice drilldown is served by
+	// ListTradeChildren below. excludeChildSlices=false preserves
+	// pre-T4 behaviour (every row, including children, in
+	// created_at DESC).
+	ListTrades(userID, fundID string, from, to *time.Time, limit, offset int, excludeChildSlices bool) ([]Trade, error)
+	// ListTradeChildren returns every child slice of the given
+	// parent trade ID — ordered created_at ASC so the operator
+	// reads TWAP slices in the natural "first to last" order on
+	// the drilldown panel. Returns empty slice (no error) when
+	// the parent has no children (legacy / non-split rows). Authz
+	// rules match ListTrades.
+	ListTradeChildren(userID, fundID, parentTradeID string) ([]Trade, error)
 	GetPortfolio(userID, fundID string) ([]Position, error)
 	GetNAVHistory(userID, fundID string, from, to *time.Time) ([]NAVPoint, error)
 	GetPnLAttribution(userID, fundID string, from, to *time.Time) (*PnLAttribution, error)
@@ -1998,6 +2013,7 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/plans/{planId}/refresh-quote", h.RefreshPlanQuote)
 
 	mux.HandleFunc("GET /api/funds/{fundId}/trades", h.ListTrades)
+	mux.HandleFunc("GET /api/funds/{fundId}/trades/{tradeId}/children", h.ListTradeChildren)
 	mux.HandleFunc("GET /api/funds/{fundId}/portfolio", h.GetPortfolio)
 	mux.HandleFunc("GET /api/funds/{fundId}/quotes/stream", h.StreamPortfolioQuotes)
 	mux.HandleFunc("GET /api/funds/{fundId}/nav", h.GetNAVHistory)
@@ -2598,7 +2614,11 @@ func (h *FundHandler) GetDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	trades, err := h.trades.ListTrades(userID, fundID, nil, nil, 10, 0)
+	// Dashboard "10 most-recent trades" preview: hide child
+	// slices so the preview shows one parent row per
+	// plan_action when child-splitting is on. The drilldown
+	// lives on the dedicated Trade History page.
+	trades, err := h.trades.ListTrades(userID, fundID, nil, nil, 10, 0, true)
 	if err != nil {
 		handleServiceError(w, err, "trades")
 		return
@@ -3562,12 +3582,59 @@ func (h *FundHandler) ListTrades(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit, offset := parseListLimitOffset(r, 100, 1000)
-	trades, err := h.trades.ListTrades(userID, fundID, from, to, limit, offset)
+	// exclude_child_slices=true asks the service to hide rows
+	// that are children of a multi-slice parent so the UI list
+	// view stays at "one row per plan_action" when child-splitting
+	// is on. Defaults to false to preserve the pre-T4 contract for
+	// any legacy client that doesn't pass the flag (analytics
+	// dumps, backups, etc.). Accepted truthy values follow Go's
+	// strconv.ParseBool ("1", "true", "t", "TRUE", ...).
+	excludeChildSlices := false
+	if raw := r.URL.Query().Get("exclude_child_slices"); raw != "" {
+		if parsed, perr := strconv.ParseBool(raw); perr == nil {
+			excludeChildSlices = parsed
+		}
+	}
+	trades, err := h.trades.ListTrades(userID, fundID, from, to, limit, offset, excludeChildSlices)
 	if err != nil {
 		handleServiceError(w, err, "trade")
 		return
 	}
 	writeJSON(w, http.StatusOK, trades)
+}
+
+// ListTradeChildren serves the drilldown panel: given a parent
+// trade ID, return its child slices in created_at ASC order so
+// the operator reads TWAP slices in chronological execution
+// order. Authz is enforced by the underlying service via the
+// same fund-access rules as ListTrades. A parent with no
+// children (legacy / non-split row) returns 200 OK with an
+// empty array.
+func (h *FundHandler) ListTradeChildren(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireAuthenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+	fundID := pathValue(r, "fundId")
+	if !requireNonEmpty(w, fundID, "fundId") {
+		return
+	}
+	tradeID := pathValue(r, "tradeId")
+	if !requireNonEmpty(w, tradeID, "tradeId") {
+		return
+	}
+
+	children, err := h.trades.ListTradeChildren(userID, fundID, tradeID)
+	if err != nil {
+		handleServiceError(w, err, "trade children")
+		return
+	}
+	if children == nil {
+		// Avoid leaking the Go nil → "null" JSON ambiguity. The
+		// frontend renders [].length so this matters.
+		children = []Trade{}
+	}
+	writeJSON(w, http.StatusOK, children)
 }
 
 func (h *FundHandler) GetPortfolio(w http.ResponseWriter, r *http.Request) {

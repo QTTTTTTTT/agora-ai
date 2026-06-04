@@ -256,7 +256,8 @@ func (stubPlanService) RefreshPlanQuote(context.Context, string, string) (*Plan,
 }
 
 type stubTradeService struct {
-	listTradesFn         func(string, string, *time.Time, *time.Time, int, int) ([]Trade, error)
+	listTradesFn         func(string, string, *time.Time, *time.Time, int, int, bool) ([]Trade, error)
+	listChildrenFn       func(string, string, string) ([]Trade, error)
 	getPortfolioFn       func(string, string) ([]Position, error)
 	getPortfolioQuotesFn func(string, string) ([]PortfolioQuote, error)
 	getNAVHistoryFn      func(string, string, *time.Time, *time.Time) ([]NAVPoint, error)
@@ -264,11 +265,18 @@ type stubTradeService struct {
 	getTodayPnLFn        func(string, string) (*TodayPnL, error)
 }
 
-func (s stubTradeService) ListTrades(userID, fundID string, from, to *time.Time, limit, offset int) ([]Trade, error) {
+func (s stubTradeService) ListTrades(userID, fundID string, from, to *time.Time, limit, offset int, excludeChildSlices bool) ([]Trade, error) {
 	if s.listTradesFn != nil {
-		return s.listTradesFn(userID, fundID, from, to, limit, offset)
+		return s.listTradesFn(userID, fundID, from, to, limit, offset, excludeChildSlices)
 	}
 	return nil, errors.New("unexpected ListTrades call")
+}
+
+func (s stubTradeService) ListTradeChildren(userID, fundID, parentTradeID string) ([]Trade, error) {
+	if s.listChildrenFn != nil {
+		return s.listChildrenFn(userID, fundID, parentTradeID)
+	}
+	return nil, errors.New("unexpected ListTradeChildren call")
 }
 
 func (s stubTradeService) GetPortfolio(userID, fundID string) ([]Position, error) {
@@ -722,7 +730,7 @@ func TestFundHandlerGetDashboardRoute(t *testing.T) {
 				}
 				return []Position{{Symbol: "AAPL", Quantity: 10}}, nil
 			},
-			listTradesFn: func(userID, fundID string, _ *time.Time, _ *time.Time, limit, offset int) ([]Trade, error) {
+			listTradesFn: func(userID, fundID string, _ *time.Time, _ *time.Time, limit, offset int, _ bool) ([]Trade, error) {
 				if userID != "user-1" || fundID != "fund-1" {
 					t.Fatalf("unexpected trade access user=%q fund=%q", userID, fundID)
 				}
