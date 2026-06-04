@@ -418,11 +418,14 @@ const CreateTestModal: React.FC<{
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl">
-        <div className="flex items-start justify-between gap-4">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl">
+        {/* Sticky header keeps the close button reachable while the
+            body scrolls; the form below owns its own scroll surface
+            so a tall page doesn't push the buttons offscreen. */}
+        <div className="flex items-start justify-between gap-4 border-b border-gray-100 px-6 pt-5 pb-4">
           <div>
-            <h2 className="text-xl font-bold text-gray-900">{copy.title}</h2>
-            <p className="mt-2 text-sm text-gray-500">{copy.subtitle}</p>
+            <h2 className="text-lg font-semibold text-gray-900">{copy.title}</h2>
+            <p className="mt-1 text-xs text-gray-500">{copy.subtitle}</p>
           </div>
           <button type="button" onClick={onClose} className="text-2xl leading-none text-gray-400 hover:text-gray-700">
             ×
@@ -430,15 +433,16 @@ const CreateTestModal: React.FC<{
         </div>
 
         <form
-          className="mt-6 space-y-4"
+          className="flex flex-1 flex-col overflow-hidden"
           onSubmit={(event) => {
             event.preventDefault();
             void onCreate(form);
           }}
         >
-          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
-            <p>{copy.controlFund}</p>
-            <p className="mt-1 break-all font-mono text-xs text-gray-800">{fundId}</p>
+          <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            <span className="font-medium text-gray-500">{copy.controlFund}</span>
+            <span className="break-all font-mono text-gray-700">{fundId}</span>
           </div>
 
           {/* Mode toggle: strategy vs model. We render it as two
@@ -448,86 +452,88 @@ const CreateTestModal: React.FC<{
               hint text below changes per mode so the operator
               understands what each mode submits. */}
           <div>
-            <label className="mb-2 block text-sm font-medium text-gray-700">{copy.modeLabel}</label>
+            <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.modeLabel}</label>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => update("mode", "strategy")}
-                className={`rounded-xl border px-4 py-2.5 text-sm font-medium transition ${form.mode === "strategy" ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"}`}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${form.mode === "strategy" ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"}`}
               >
                 {copy.modeStrategy}
               </button>
               <button
                 type="button"
                 onClick={() => update("mode", "model")}
-                className={`rounded-xl border px-4 py-2.5 text-sm font-medium transition ${form.mode === "model" ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"}`}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${form.mode === "model" ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-gray-300 bg-white text-gray-700 hover:border-gray-400"}`}
               >
                 {copy.modeModel}
               </button>
             </div>
-            <p className="mt-1.5 text-xs text-gray-500">
+            <p className="mt-1 text-xs text-gray-500">
               {form.mode === "strategy" ? copy.modeStrategyHint : copy.modeModelHint}
             </p>
           </div>
 
           <div>
-            <label className="mb-2 block text-sm font-medium text-gray-700">{copy.name}</label>
+            <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.name}</label>
             <input
               required
               value={form.name}
               onChange={(event) => update("name", event.target.value)}
-              className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
               placeholder={copy.namePlaceholder}
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div>
-              <label className="mb-2 block text-sm font-medium text-gray-700">{copy.variantA}</label>
+              <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.variantA}</label>
               <input
                 required
                 value={form.variantAName}
                 onChange={(event) => update("variantAName", event.target.value)}
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
                 placeholder={copy.variantAPlaceholder}
               />
             </div>
             <div>
-              <label className="mb-2 block text-sm font-medium text-gray-700">{copy.variantB}</label>
+              <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.variantB}</label>
               <input
                 required
                 value={form.variantBName}
                 onChange={(event) => update("variantBName", event.target.value)}
-                className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
                 placeholder={copy.variantBPlaceholder}
               />
             </div>
           </div>
 
           <div>
-            <label className="mb-2 block text-sm font-medium text-gray-700">{copy.strategySummary}</label>
+            <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.strategySummary}</label>
             <textarea
               required
               value={form.strategySummary}
               onChange={(event) => update("strategySummary", event.target.value)}
-              className="min-h-24 w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+              className="min-h-16 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
               placeholder={copy.strategySummaryPlaceholder}
             />
           </div>
 
-          {/* LLM picker block. In "strategy" mode it's optional and
-              renders as a collapsible-feeling section; in "model"
-              mode it's the headline of the experiment so we mark
-              both A/B providers as required. The catalog query is
-              auth-scoped to the fund so an empty list = "platform
+          {/* LLM picker block. In "strategy" mode it's optional; in
+              "model" mode it's the headline of the experiment so we
+              mark both A/B providers as required. The catalog query
+              is auth-scoped to the fund so an empty list = "platform
               hasn't enabled any provider for you", which we surface
-              explicitly rather than just hiding the dropdown. */}
-          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-            <div className="flex items-baseline justify-between">
-              <h3 className="text-sm font-semibold text-gray-800">
+              explicitly rather than just hiding the dropdown.
+              Layout: each side gets ONE row with provider + model
+              side-by-side, so the whole block is only ~6 lines tall
+              instead of the previous 10+. */}
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="text-xs font-semibold text-gray-700">
                 {form.mode === "model" ? copy.llmSectionRequired : copy.llmSection}
               </h3>
-              <span className="text-xs text-gray-500">
+              <span className="text-[11px] text-gray-500">
                 {catalogStatus === "loading"
                   ? copy.llmCatalogLoading
                   : catalogStatus === "empty"
@@ -537,7 +543,7 @@ const CreateTestModal: React.FC<{
                       : copy.llmHint}
               </span>
             </div>
-            <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="mt-2 space-y-2">
               {(["A", "B"] as const).map((side) => {
                 const providerKey = side === "A" ? "variantAProvider" : "variantBProvider";
                 const modelKey = side === "A" ? "variantAModelName" : "variantBModelName";
@@ -547,9 +553,8 @@ const CreateTestModal: React.FC<{
                 const sideLabel = side === "A" ? copy.variantAGroup : copy.variantBGroup;
                 const modelOptions = modelsForProvider(providerVal);
                 return (
-                  <div key={side}>
-                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">{sideLabel}</p>
-                    <label className="mb-1 block text-xs text-gray-600">{copy.providerLabel}</label>
+                  <div key={side} className="grid grid-cols-[5rem_1fr_1fr] items-center gap-2">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-gray-500">{sideLabel}</span>
                     {providerOptions.length > 0 ? (
                       <select
                         required={isModelRequired}
@@ -565,9 +570,9 @@ const CreateTestModal: React.FC<{
                             if (!stillValid) update(modelKey, "");
                           }
                         }}
-                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-indigo-500"
                       >
-                        <option value="">{form.mode === "model" ? "—" : `(${copy.llmHint.split("。")[0]})`}</option>
+                        <option value="">{isModelRequired ? "—" : copy.providerLabel}</option>
                         {providerOptions.map((p) => (
                           <option key={p} value={p}>
                             {p}
@@ -579,11 +584,10 @@ const CreateTestModal: React.FC<{
                         required={isModelRequired}
                         value={providerVal}
                         onChange={(event) => update(providerKey, event.target.value)}
-                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-indigo-500"
                         placeholder={copy.providerPlaceholder}
                       />
                     )}
-                    <label className="mb-1 mt-2 block text-xs text-gray-600">{copy.modelLabel}</label>
                     {modelOptions.length > 0 ? (
                       <select
                         required={isModelRequired}
@@ -600,9 +604,9 @@ const CreateTestModal: React.FC<{
                             if (inferred) update(providerKey, inferred.provider);
                           }
                         }}
-                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-indigo-500"
                       >
-                        <option value="">—</option>
+                        <option value="">{isModelRequired ? "—" : copy.modelLabel}</option>
                         {modelOptions.map((row, idx) => (
                           <option
                             key={`${row.provider}-${row.label ?? ""}-${row.model_name}-${idx}`}
@@ -619,7 +623,7 @@ const CreateTestModal: React.FC<{
                         required={isModelRequired}
                         value={modelVal}
                         onChange={(event) => update(modelKey, event.target.value)}
-                        className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                        className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-indigo-500"
                         placeholder={copy.modelPlaceholder}
                       />
                     )}
@@ -630,13 +634,13 @@ const CreateTestModal: React.FC<{
           </div>
 
           {form.mode === "strategy" ? (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div>
-                <label className="mb-2 block text-sm font-medium text-gray-700">{copy.pmStyle}</label>
+                <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.pmStyle}</label>
                 <select
                   value={form.pmStyle}
                   onChange={(event) => update("pmStyle", event.target.value)}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
                 >
                   <option value="conservative">conservative</option>
                   <option value="balanced">balanced</option>
@@ -646,7 +650,7 @@ const CreateTestModal: React.FC<{
                 </select>
               </div>
               <div>
-                <label className="mb-2 block text-sm font-medium text-gray-700">{copy.maxSinglePosition}</label>
+                <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.maxSinglePosition}</label>
                 <input
                   required
                   min={1}
@@ -654,14 +658,14 @@ const CreateTestModal: React.FC<{
                   type="number"
                   value={form.maxSinglePosition}
                   onChange={(event) => update("maxSinglePosition", Number(event.target.value))}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
                 />
               </div>
             </div>
           ) : null}
 
           <div>
-            <label className="mb-2 block text-sm font-medium text-gray-700">{copy.duration}</label>
+            <label className="mb-1.5 block text-xs font-medium text-gray-700">{copy.duration}</label>
             <input
               required
               min={1}
@@ -669,25 +673,26 @@ const CreateTestModal: React.FC<{
               type="number"
               value={form.durationDays}
               onChange={(event) => update("durationDays", Number(event.target.value))}
-              className="w-full rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none transition focus:border-indigo-500"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none transition focus:border-indigo-500"
             />
           </div>
 
           {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
+          </div>
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <div className="flex flex-col gap-3 border-t border-gray-100 px-6 py-3 sm:flex-row sm:justify-end">
             <button
               type="button"
               onClick={onClose}
               disabled={saving}
-              className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {copy.cancel}
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {saving ? copy.creating : copy.create}
             </button>
