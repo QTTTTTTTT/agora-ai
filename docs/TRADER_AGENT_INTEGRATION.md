@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + equity long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout landed; futures + short-side pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix landed; futures + short-side + execution_status async wire pending**
 
 ## Why this doc exists
 
@@ -301,10 +301,25 @@ runtimeTradingEngine.executePlanAction (PER action)
       paths land. The current synchronous-fill world already
       collapses to "filled" on every code path so flipping
       the wire today would be a no-op with extra moving parts.
-- [ ] Daily-review LLM context builder: surface "TWAP intent on
-      N shares, M% filled by close" as a Trader-role learning
-      signal (the structured rows are already on disk now;
-      `buildAgentLearning` just needs to query them).
+- [x] **Daily-review LLM TWAP-aware signals (T5 commit).**
+      Pre-T5 `summarizeTrades` treated every trade row as an
+      independent fill, so a single TWAP plan_action that
+      split into 1 parent + 5 children DOUBLED the daily
+      counters: total=6 not 1, fillRatio double-counted child
+      fills against the same plan quantity. This silently
+      inflated trader-role hits/misses and confused the LLM
+      prompt's "how many fills did we do today?" anchor.
+      Post-T5 the helper skips rows whose
+      `strategy_parent_trade_id` is set when computing
+      total / filled / partial / rejected, but still feeds
+      the children's filled_qty into the fillRatio numerator
+      (parent.filled_qty equals the sum of child fills so
+      we'd double-count otherwise) and exposes new
+      `twapSliceCount` / `twapParentCount` fields that the
+      trader-role prompt uses to surface "N parents went
+      TWAP, avg M slices each". 7-case matrix test pins
+      legacy / split / partial-fill / mixed-standalone /
+      rejection / empty corner cases.
 - [ ] Defer-add a `FOREIGN KEY (strategy_parent_trade_id)
       REFERENCES trade_executions(id) ON DELETE SET NULL` once
       we have production evidence that the buy-path splitter

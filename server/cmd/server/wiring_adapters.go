@@ -21588,6 +21588,21 @@ func (m *runtimeMemorySystem) buildAgentLearning(ctx context.Context, member rep
 		if dailyReturn > 0 && tradeStats.filled > 0 {
 			hits = append(hits, "执行结果与收益方向一致，说明下单节奏基本有效。")
 		}
+		// Splitter-aware: if at least one parent was sliced
+		// today, surface the average slice count so the LLM
+		// can speak to slice sizing rather than only treating
+		// the parent as a black-box "1 trade". The threshold
+		// ">= 1 parent" intentionally fires even on a single
+		// TWAP because that's the canonical "did the strategy
+		// engine actually engage?" signal.
+		if tradeStats.twapParentCount > 0 {
+			avgSlices := float64(tradeStats.twapSliceCount) / float64(tradeStats.twapParentCount)
+			hits = append(hits, fmt.Sprintf("%d 个父订单走了 TWAP/VWAP 等多笔策略，共拆出 %d 个子分笔，平均 %.1f 笔/父单。",
+				tradeStats.twapParentCount, tradeStats.twapSliceCount, avgSlices))
+			lessons = append(lessons,
+				"对走多笔策略的父订单，应回看每个子分笔的成交价散布，发现尾盘集中拖累整体均价的模式。",
+			)
+		}
 		lessons = append(lessons,
 			"交易员应优先复用高成交率的下单节奏，并减少对低流动性窗口的暴露。",
 			"当部分成交增加时，应缩小单笔规模并提高价格容忍度的一致性。",
@@ -22700,10 +22715,37 @@ type tradeSummary struct {
 	partial   int
 	rejected  int
 	fillRatio float64
+	// twapSliceCount is the number of CHILD trade rows seen
+	// across all parents — i.e. the count of TWAP/VWAP/iceberg
+	// slices the splitter materialised this period. Zero when
+	// the splitter wasn't engaged (everything was a single-row
+	// trade). Surfaces into the trader-role learning prompt so
+	// the LLM can speak to slice-level execution quality.
+	twapSliceCount int
+	// twapParentCount is the number of distinct parents that
+	// had at least one child slice (== number of plan_actions
+	// that went through the splitter). Combined with
+	// twapSliceCount the LLM can compute average slices/parent.
+	twapParentCount int
 }
 
+// summarizeTrades aggregates per-action counters across the
+// day's trade rows. It is splitter-aware: child rows (rows with
+// strategy_parent_trade_id NOT NULL) are NOT counted toward
+// "total" / "filled" / "partial" / "rejected" — those slices
+// are already represented by their parent row, and counting
+// both would double-count the plan_action. Children DO feed
+// twapSliceCount / twapParentCount so the LLM can still see
+// "this day had 5 TWAP intents that landed in 25 slices".
+//
+// fillRatio is computed against the requested quantity from
+// plan actions and the sum of CHILD fills (children carry the
+// actual per-slice filled_qty in the splitter world). When the
+// splitter is off, child rows == 0 and the function degrades
+// to the parent's filled_qty — identical to the pre-splitter
+// behaviour for legacy single-row trades.
 func summarizeTrades(actions []repository.PlanAction, trades []repository.TradeExecution) tradeSummary {
-	summary := tradeSummary{total: len(trades)}
+	summary := tradeSummary{}
 	requested := 0.0
 	filled := 0.0
 	for _, action := range actions {
@@ -22712,7 +22754,29 @@ func summarizeTrades(actions []repository.PlanAction, trades []repository.TradeE
 			requested += float64(quantity)
 		}
 	}
+	// Track which parents we've seen at least one child for so
+	// the LLM-side twapParentCount only counts distinct parents.
+	parentIDsWithChildren := make(map[string]struct{}, len(trades))
 	for _, trade := range trades {
+		// Splitter shape: trade rows where
+		// strategy_parent_trade_id is set are children of a
+		// parent row that's ALSO in this slice. The parent is
+		// the canonical plan_action accounting record (its
+		// quantity == sum of children); treating the child
+		// rows as independent "trades" would double-count
+		// everything from total to fillRatio. So we skip them
+		// for the per-plan-action counters and only collect
+		// slice-level metadata for the trader prompt.
+		if trade.StrategyParentTradeID.Valid && strings.TrimSpace(trade.StrategyParentTradeID.String) != "" {
+			summary.twapSliceCount++
+			parentIDsWithChildren[trade.StrategyParentTradeID.String] = struct{}{}
+			// Children carry the per-slice fill quantity; the
+			// parent row's filled_qty mirrors the sum so we
+			// count children here and skip the parent below.
+			filled += trade.FilledQty
+			continue
+		}
+		summary.total++
 		switch strings.ToLower(strings.TrimSpace(trade.Status)) {
 		case "filled":
 			summary.filled++
@@ -22721,8 +22785,20 @@ func summarizeTrades(actions []repository.PlanAction, trades []repository.TradeE
 		case "rejected", "failed", "cancelled":
 			summary.rejected++
 		}
+	}
+	// Non-split (standalone) parents: their filled_qty is the
+	// actual fill. Split parents: skip — children already
+	// contributed above so we'd double-count.
+	for _, trade := range trades {
+		if trade.StrategyParentTradeID.Valid && strings.TrimSpace(trade.StrategyParentTradeID.String) != "" {
+			continue
+		}
+		if _, hasChildren := parentIDsWithChildren[trade.ID]; hasChildren {
+			continue
+		}
 		filled += trade.FilledQty
 	}
+	summary.twapParentCount = len(parentIDsWithChildren)
 	if requested <= 0 {
 		requested = filled
 	}
