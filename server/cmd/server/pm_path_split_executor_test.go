@@ -162,7 +162,7 @@ func TestTradeRepoCreateAndFillSplit_BuyTWAPHappyPath(t *testing.T) {
 	}
 	filledPrice := sql.NullFloat64{Float64: 100, Valid: true}
 
-	err := engine.tradeRepoCreateAndFill(
+	rolledStatus, err := engine.tradeRepoCreateAndFill(
 		context.Background(),
 		fund, plan, action,
 		"buy", 4000, 100, 400000, "filled",
@@ -171,6 +171,16 @@ func TestTradeRepoCreateAndFillSplit_BuyTWAPHappyPath(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("tradeRepoCreateAndFill: %v", err)
+	}
+	// T6 wire: splitter path must return a non-empty rolled
+	// status so the caller (executePlanAction) overrides its
+	// local status var with the aggregated label. With the
+	// synchronous broker.Simulator all children are filled, so
+	// aggregateChildrenStatus returns "filled". A regression
+	// that dropped the return would cause caller to silently
+	// keep writing the parent's intent status only.
+	if rolledStatus != "filled" {
+		t.Fatalf("rolledStatus: want %q got %q", "filled", rolledStatus)
 	}
 	assertMockExpectations(t, mock)
 }
@@ -203,7 +213,7 @@ func TestTradeRepoCreateAndFill_FlagOffStaysSingleRow(t *testing.T) {
 		Price:  sql.NullFloat64{Float64: 100, Valid: true},
 	}
 
-	err := engine.tradeRepoCreateAndFill(
+	rolledStatus, err := engine.tradeRepoCreateAndFill(
 		context.Background(),
 		fund, plan, action,
 		"buy", 4000, 100, 400000, "filled",
@@ -211,6 +221,15 @@ func TestTradeRepoCreateAndFill_FlagOffStaysSingleRow(t *testing.T) {
 		10.0, 0.0, 0.0,
 		"twap",
 	)
+	if err == nil {
+		// Single-row path: rolledStatus must be "" so the
+		// caller (executePlanAction) falls back to its own
+		// status decision. A non-empty value here would
+		// indicate the splitter ran when it shouldn't have.
+		if rolledStatus != "" {
+			t.Fatalf("flag-off single-row path leaked rolledStatus=%q (want \"\")", rolledStatus)
+		}
+	}
 	if err != nil {
 		t.Fatalf("flag-off path: %v", err)
 	}
@@ -271,7 +290,7 @@ func TestTradeRepoCreateAndFillSplit_SellTWAPHappyPath(t *testing.T) {
 	}
 	filledPrice := sql.NullFloat64{Float64: 100, Valid: true}
 
-	err := engine.tradeRepoCreateAndFill(
+	_, err := engine.tradeRepoCreateAndFill(
 		context.Background(),
 		fund, plan, action,
 		"sell", 4000, 100, 400000, "filled",
@@ -316,7 +335,7 @@ func TestTradeRepoCreateAndFill_FlagOnButShortStaysSingleRow(t *testing.T) {
 		PositionSide: sql.NullString{String: "short", Valid: true},
 	}
 
-	err := engine.tradeRepoCreateAndFill(
+	_, err := engine.tradeRepoCreateAndFill(
 		context.Background(),
 		fund, plan, action,
 		"sell", 4000, 100, 400000, "filled", // sell + short → gate forces single row

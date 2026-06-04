@@ -1,7 +1,7 @@
 # Trader Agent Integration — Status & Roadmap
 
 > Doc owner: trading runtime / Tracking issue: B-step2 (TBD)
-> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix landed; futures + short-side + execution_status async wire pending**
+> Status as of 2026-06-04: **step 1 done; step 2 equity buy + long-side sell + execution_status rollup helper + parent/child list filter API + UI hide-children rollout + summarizeTrades splitter-aware fix + plan_actions.execution_status wire landed; futures + short-side pending**
 
 ## Why this doc exists
 
@@ -290,17 +290,22 @@ runtimeTradingEngine.executePlanAction (PER action)
 - [ ] Aggregate slippage across distinct-price children for the
       parent row (today every child + parent carry the same
       slippage because the price is shared).
-- [ ] `plan_action.execution_status` async wiring: the
-      `aggregateChildrenStatus` helper + the splitter's
-      `rolled_status` log line are in place (T3 commit). What's
-      left is the live-broker integration that switches
-      `executePlanAction` to drive
-      `plan_actions.execution_status` off the rollup helper
-      when (and only when) child statuses can genuinely
-      disagree — i.e. once Alpaca / IBKR's async partial-fill
-      paths land. The current synchronous-fill world already
-      collapses to "filled" on every code path so flipping
-      the wire today would be a no-op with extra moving parts.
+- [x] **`plan_action.execution_status` wiring landed (T6
+      commit).** `tradeRepoCreateAndFill` now returns
+      `(rolledStatus string, err error)`. The non-split path
+      returns `""` (caller falls back to its own status
+      decision); the split path returns the
+      `aggregateChildrenStatus` result. Caller helpers
+      (`executePlanAction` equity + futures branches) prefer
+      `rolledStatus` when non-empty, so when the live-broker
+      integration eventually emits genuinely partial / rejected
+      child statuses the splitter's roll-up flows straight
+      into `plan_actions.execution_status` without any further
+      code changes. Two new test assertions pin the contract:
+      buy-TWAP split path returns `rolledStatus="filled"`, and
+      the flag-off single-row path returns `rolledStatus=""`
+      so a regression that flipped the wire's polarity would
+      light up.
 - [x] **Daily-review LLM TWAP-aware signals (T5 commit).**
       Pre-T5 `summarizeTrades` treated every trade row as an
       independent fill, so a single TWAP plan_action that

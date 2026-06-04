@@ -18371,13 +18371,20 @@ func (e *runtimeTradingEngine) executePlanAction(
 		if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
 			return "rejected", err
 		}
-		if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
+		rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
+		if err != nil {
 			return "rejected", err
 		}
 		position = mergeBoughtPosition(position, fund.ID, action, quantity, orderPrice)
 		positionsByKey[positionKey] = position
 		*availableCash = roundCurrency(*availableCash - totalDebit)
 		recordHardRiskTrade(hardRisk, action, side, quantity, orderPrice, amount, status)
+		// rolledStatus is non-empty only when the splitter path
+		// produced an aggregated label for this plan_action. Surface
+		// it so the caller writes the aggregate, not the parent intent.
+		if rolledStatus != "" {
+			return rolledStatus, nil
+		}
 		return status, nil
 	}
 
@@ -18388,7 +18395,8 @@ func (e *runtimeTradingEngine) executePlanAction(
 	if err := e.pmPathLotSizeGuard(side, action, quantity, orderPrice, position); err != nil {
 		return "rejected", err
 	}
-	if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
+	rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, side, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
+	if err != nil {
 		return "rejected", err
 	}
 	remainingQty := position.Quantity - float64(quantity)
@@ -18404,6 +18412,9 @@ func (e *runtimeTradingEngine) executePlanAction(
 	netCredit := amount - feeCommission - feeTransfer - feeStampTax
 	*availableCash = roundCurrency(*availableCash + netCredit)
 	recordHardRiskTrade(hardRisk, action, side, quantity, orderPrice, amount, status)
+	if rolledStatus != "" {
+		return rolledStatus, nil
+	}
 	return status, nil
 }
 
@@ -19106,7 +19117,29 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 	// even before the splitter actually carves a parent into children
 	// (B-step2 follow-up).
 	strategy string,
-) error {
+) (rolledStatus string, err error) {
+	// rolledStatus return:
+	//
+	//   "" — non-split path; caller should fall back to its own
+	//        status decision (status arg, broker.Simulator return).
+	//   "filled" / "partial:NN" / "pending" / "rejected" — split
+	//        path; aggregateChildrenStatus over the children's
+	//        actual statuses. Caller writes this into the
+	//        plan_actions.execution_status sync map so the per-
+	//        plan_action status reflects the aggregate of N
+	//        slices (not just the parent's intent).
+	//
+	// Today every code path that reaches the splitter is the
+	// synchronous broker.Simulator, which fills every child at
+	// the same status string passed in (`status` arg). So
+	// rolledStatus == "filled" 100% of the time on this path,
+	// and the wire below is technically a no-op refactor for
+	// "filled". When live brokers (Alpaca / IBKR) replace the
+	// simulator and start emitting genuinely partial / mixed
+	// child statuses, this wire surfaces the right roll-up
+	// without further code changes — the splitter and the
+	// status helper already agree on the partial:NN format
+	// (see pm_path_children_status.go's matrix tests).
 	// price (the column) holds the plan reference price the user
 	// approved at. filled_price holds the actual execution price.
 	// slippage_pct denormalises the drift for analytics; it's only
@@ -19163,6 +19196,13 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		)
 	}
 
+	// Non-split path: caller already decided the status string
+	// (broker.Simulator return / local var), so we have nothing
+	// to roll up. Returning empty rolledStatus tells the caller
+	// "use your own status, the engine didn't override it" —
+	// a deliberate signal so an empty string never gets mistaken
+	// for a valid execution_status value.
+
 	clientIdempotencyKey := mintTradeIdempotencyKey(action.ID, side, quantity)
 	trade := &repository.TradeExecution{
 		FundID:               fund.ID,
@@ -19216,12 +19256,12 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		"status", status,
 		"path", "single",
 	)
-	tradeID, err := e.tradeRepo.Create(ctx, trade)
-	if err != nil {
-		return mapRepositoryError(err)
+	tradeID, createErr := e.tradeRepo.Create(ctx, trade)
+	if createErr != nil {
+		return "", mapRepositoryError(createErr)
 	}
-	if err := e.tradeRepo.UpdateStatus(ctx, tradeID, status, float64(quantity), filledPrice, feeCommission, feeStampTax, feeTransfer, slippagePct); err != nil {
-		return mapRepositoryError(err)
+	if statusErr := e.tradeRepo.UpdateStatus(ctx, tradeID, status, float64(quantity), filledPrice, feeCommission, feeStampTax, feeTransfer, slippagePct); statusErr != nil {
+		return "", mapRepositoryError(statusErr)
 	}
 	// Lot ledger is a best-effort shadow update. Failures are
 	// logged + counted but never propagated — the trade itself
@@ -19240,7 +19280,9 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFill(
 		}
 		e.recordCashLedgerForFill(ctx, fund, plan, action, tradeID, side, quantity, filledExecutionPrice, amount, feeCommission, feeStampTax, feeTransfer, executedAt)
 	}
-	return nil
+	// Single-row path: caller keeps its own status — see the
+	// return-value docstring at the function head.
+	return "", nil
 }
 
 // tradeRepoCreateAndFillSplit is the B-step2 child-order splitting
@@ -19300,12 +19342,12 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 	normalizedStrategy string,
 	slippagePct sql.NullFloat64,
 	executedAt time.Time,
-) error {
+) (rolledStatus string, err error) {
 	childQtys := splitParentIntoChildren(quantity, normalizedStrategy)
 	if len(childQtys) <= 1 {
 		// Should never happen — the gate at the call site
 		// already verified shouldSplitParent. Belt + suspenders.
-		return fmt.Errorf("tradeRepoCreateAndFillSplit: splitter returned %d child(ren) for qty=%d strategy=%s",
+		return "", fmt.Errorf("tradeRepoCreateAndFillSplit: splitter returned %d child(ren) for qty=%d strategy=%s",
 			len(childQtys), quantity, normalizedStrategy)
 	}
 
@@ -19358,12 +19400,12 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 		// strategy_parent_trade_id = NULL — this IS the parent.
 		ClientIdempotencyKey: mintTradeIdempotencyKey(action.ID, side, quantity),
 	}
-	parentID, err := e.tradeRepo.Create(ctx, parentTrade)
-	if err != nil {
-		return mapRepositoryError(err)
+	parentID, createErr := e.tradeRepo.Create(ctx, parentTrade)
+	if createErr != nil {
+		return "", mapRepositoryError(createErr)
 	}
-	if err := e.tradeRepo.UpdateStatus(ctx, parentID, status, float64(quantity), filledPrice, feeCommission, feeStampTax, feeTransfer, slippagePct); err != nil {
-		return mapRepositoryError(err)
+	if statusErr := e.tradeRepo.UpdateStatus(ctx, parentID, status, float64(quantity), filledPrice, feeCommission, feeStampTax, feeTransfer, slippagePct); statusErr != nil {
+		return "", mapRepositoryError(statusErr)
 	}
 	slog.Info("pm-path execute trade",
 		"fund_id", fund.ID,
@@ -19446,14 +19488,14 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 				Valid:  action.ID != "",
 			},
 		}
-		childID, err := e.tradeRepo.Create(ctx, childTrade)
-		if err != nil {
-			return mapRepositoryError(err)
+		childID, childCreateErr := e.tradeRepo.Create(ctx, childTrade)
+		if childCreateErr != nil {
+			return "", mapRepositoryError(childCreateErr)
 		}
-		if err := e.tradeRepo.UpdateStatus(ctx, childID, status, float64(childQty), filledPrice,
+		if childStatusErr := e.tradeRepo.UpdateStatus(ctx, childID, status, float64(childQty), filledPrice,
 			commissionByChild[childIdx], stampByChild[childIdx], transferByChild[childIdx],
-			slippagePct); err != nil {
-			return mapRepositoryError(err)
+			slippagePct); childStatusErr != nil {
+			return "", mapRepositoryError(childStatusErr)
 		}
 		// Per-child lot + cash ledger. Same call signatures as the
 		// single-row path; the only difference is they're invoked
@@ -19483,14 +19525,13 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 
 	// Rollup the per-child statuses into a single parent-level
 	// label. Today this is "filled" for every code path because
-	// broker.Simulator fills synchronously; the value is logged
-	// as the parent's execution_status so any downstream consumer
-	// reading log-derived analytics sees the same string the
-	// frontend would compute after the live-broker rollup lands.
-	// The DB column plan_actions.execution_status is still
-	// populated by the caller (executePlanAction) based on the
-	// trade-engine's overall status; we don't double-write here.
-	rolledStatus := aggregateChildrenStatus(childStatuses, float64(quantity))
+	// broker.Simulator fills synchronously; tomorrow when a
+	// live-broker integration emits genuinely partial / rejected
+	// child statuses the helper will return "partial:NN" /
+	// "rejected" instead and the caller (executePlanAction)
+	// surfaces it directly into plan_actions.execution_status
+	// without any further code changes.
+	rolledStatus = aggregateChildrenStatus(childStatuses, float64(quantity))
 	slog.Info("pm-path execute trade rollup",
 		"fund_id", fund.ID,
 		"plan_id", plan.ID,
@@ -19499,7 +19540,7 @@ func (e *runtimeTradingEngine) tradeRepoCreateAndFillSplit(
 		"child_count", len(childQtys),
 		"rolled_status", rolledStatus,
 	)
-	return nil
+	return rolledStatus, nil
 }
 
 // proRataFeeSplit returns the per-child share of `total` allocated
@@ -20696,7 +20737,8 @@ func (e *runtimeTradingEngine) executeFuturesPlanAction(
 		if totalDebit > *availableCash+0.0001 {
 			return "rejected", api.ErrConflict
 		}
-		if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
+		rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
+		if err != nil {
 			return "rejected", err
 		}
 		position = applyActionMetadataToPosition(position, fund.ID, action)
@@ -20709,12 +20751,20 @@ func (e *runtimeTradingEngine) executeFuturesPlanAction(
 		applyPositionValuation(&position)
 		positionsByKey[positionKey] = position
 		*availableCash = roundCurrency(*availableCash - totalDebit)
+		// splitterEnabledForSide currently excludes futures so
+		// rolledStatus is always "" here; keep the guard for
+		// when futures splitting lands so a regression doesn't
+		// silently drop the rollup.
+		if rolledStatus != "" {
+			return rolledStatus, nil
+		}
 		return status, nil
 	}
 	if position.FundID == "" || position.Quantity < float64(quantity)-0.0001 {
 		return "rejected", api.ErrConflict
 	}
-	if err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy); err != nil {
+	rolledStatus, err := e.tradeRepoCreateAndFill(ctx, fund, plan, action, executionSide, quantity, planPrice, amount, status, filledPrice, feeCommission, feeStampTax, feeTransfer, strategy)
+	if err != nil {
 		return "rejected", err
 	}
 	releasedMargin := futuresMarginRequired(roundCurrency(position.CostPrice*float64(quantity)*contractMultiplierValue(position.ContractMultiplier)), position.Leverage)
@@ -20734,6 +20784,9 @@ func (e *runtimeTradingEngine) executeFuturesPlanAction(
 	}
 	netCredit := releasedMargin + realizedPnL - feeCommission - feeTransfer - feeStampTax
 	*availableCash = roundCurrency(*availableCash + netCredit)
+	if rolledStatus != "" {
+		return rolledStatus, nil
+	}
 	return status, nil
 }
 
