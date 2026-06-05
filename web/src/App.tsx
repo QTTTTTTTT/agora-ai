@@ -15,7 +15,7 @@ import SessionExpiryWatcher from "./components/SessionExpiryWatcher";
 import RouteFallback from "./components/RouteFallback";
 import { useAppPreferences } from "./lib/preferences";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
-import { ToastViewport } from "./lib/toast";
+import { ToastViewport, toast } from "./lib/toast";
 
 // Every page goes through `lazyWithRetry` instead of the bare React.lazy.
 // Naked `lazy(() => import(...))` has zero protection against the well-known
@@ -63,39 +63,210 @@ interface ErrorBoundaryCopy {
   backToCompanies: string;
   unknownError: string;
   loading: string;
+  retry: string;
+  copyError: string;
+  copied: string;
+  copyFailed: string;
+  showDetails: string;
+  hideDetails: string;
 }
+
+// buildErrorReport emits a single multi-line string the user copies
+// to a support channel / bug tracker. The shape is intentionally
+// stable so an operator can paste a chunk of these into a tool and
+// regex out fields if needed:
+//
+//   FundAI error report
+//   url: https://fund.ai/funds/abc/decisions
+//   when: 2026-06-05T07:14:22.491Z
+//   message: Cannot read properties of undefined (reading 'plan')
+//   stack:
+//     <error.stack>
+//   componentStack:
+//     <react info.componentStack>
+//
+// We do NOT include localStorage / sessionStorage / cookies — those
+// often carry tokens. requestId / fundId / userId are NOT included
+// either; the request_id is already on the server logs and pairing
+// the report by timestamp+url is enough. If we ever decide to
+// embed user_id we should mask it before copying.
+function buildErrorReport(error: Error | null, componentStack: string | null): string {
+  const url = typeof window !== "undefined" ? window.location.href : "";
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const lines = [
+    "FundAI error report",
+    `url: ${url}`,
+    `when: ${new Date().toISOString()}`,
+    `userAgent: ${ua}`,
+    `message: ${error?.message ?? "(none)"}`,
+  ];
+  if (error?.stack) {
+    lines.push("stack:");
+    lines.push(error.stack);
+  }
+  if (componentStack) {
+    lines.push("componentStack:");
+    lines.push(componentStack.trimEnd());
+  }
+  return lines.join("\n");
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  // navigator.clipboard requires HTTPS / localhost. In the rare
+  // production case where it's unavailable (older WebViews, embedded
+  // mobile contexts) we fall back to the legacy execCommand path so
+  // the user still gets a "copied" outcome instead of a silent
+  // failure.
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fall through to execCommand fallback
+    }
+  }
+  if (typeof document === "undefined") return false;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    const ok = document.execCommand("copy");
+    return ok;
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+interface ErrorPanelProps {
+  copy: ErrorBoundaryCopy;
+  title: string;
+  message: string;
+  error: Error | null;
+  componentStack: string | null;
+  onRetry?: () => void;
+}
+
+const ErrorPanel: React.FC<ErrorPanelProps> = ({
+  copy,
+  title,
+  message,
+  error,
+  componentStack,
+  onRetry,
+}) => {
+  const [showDetails, setShowDetails] = React.useState(false);
+  const handleCopy = React.useCallback(async () => {
+    const report = buildErrorReport(error, componentStack);
+    const ok = await copyToClipboard(report);
+    if (ok) {
+      toast.success(copy.copied);
+    } else {
+      toast.error(copy.copyFailed);
+    }
+  }, [error, componentStack, copy.copied, copy.copyFailed]);
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-gray-50 p-8">
+      <div className="w-full max-w-md rounded-lg bg-white p-8 shadow-lg">
+        <h1 className="mb-2 text-center text-xl font-bold text-red-600">{title}</h1>
+        <p className="mb-5 break-words text-center text-sm text-gray-500">{message}</p>
+        <div className="flex flex-col gap-2">
+          {onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              {copy.retry}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            {copy.copyError}
+          </button>
+          <Link
+            to="/companies"
+            className="rounded-md border border-gray-300 bg-white px-4 py-2 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            {copy.backToCompanies}
+          </Link>
+        </div>
+        {error?.stack || componentStack ? (
+          <div className="mt-5 border-t border-gray-200 pt-3">
+            <button
+              type="button"
+              onClick={() => setShowDetails((v) => !v)}
+              className="text-xs font-medium text-gray-500 hover:text-gray-700"
+              aria-expanded={showDetails}
+            >
+              {showDetails ? copy.hideDetails : copy.showDetails}
+            </button>
+            {showDetails ? (
+              <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md bg-gray-50 p-3 text-[11px] leading-snug text-gray-600">
+                {buildErrorReport(error, componentStack)}
+              </pre>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+};
 
 interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
+  componentStack: string | null;
 }
 
 class ErrorBoundary extends Component<
   { children: ReactNode; copy: ErrorBoundaryCopy },
   ErrorBoundaryState
 > {
-  state: ErrorBoundaryState = { hasError: false, error: null };
+  state: ErrorBoundaryState = { hasError: false, error: null, componentStack: null };
 
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+  static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
     return { hasError: true, error };
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     console.error("[ErrorBoundary]", error, info.componentStack);
+    // Capture the React component stack so the "Copy error" button
+    // can include it. info.componentStack is a string (or null);
+    // setState here is safe because getDerivedStateFromError already
+    // flipped hasError synchronously, so this is just an enrichment.
+    this.setState({ componentStack: info.componentStack ?? null });
   }
+
+  // reset is invoked by the "Retry" button. Returning to a clean
+  // state lets <Suspense> re-mount the route's children, which is
+  // enough to recover from transient render errors (a stale chunk,
+  // an over-eager useMemo, a one-off network glitch). For
+  // persistent errors the user can still fall back to "Back to
+  // companies".
+  reset = () => {
+    this.setState({ hasError: false, error: null, componentStack: null });
+  };
 
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex min-h-screen items-center justify-center bg-gray-50 p-8">
-          <div className="max-w-md rounded-lg bg-white p-8 text-center shadow-lg">
-            <h1 className="mb-2 text-xl font-bold text-red-600">{this.props.copy.pageError}</h1>
-            <p className="mb-4 text-sm text-gray-500">{this.state.error?.message ?? this.props.copy.unexpectedError}</p>
-            <Link to="/companies" className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
-              {this.props.copy.backToCompanies}
-            </Link>
-          </div>
-        </div>
+        <ErrorPanel
+          copy={this.props.copy}
+          title={this.props.copy.pageError}
+          message={this.state.error?.message ?? this.props.copy.unexpectedError}
+          error={this.state.error}
+          componentStack={this.state.componentStack}
+          onRetry={this.reset}
+        />
       );
     }
     return this.props.children;
@@ -109,17 +280,19 @@ const RouteErrorElement: React.FC<{ copy: ErrorBoundaryCopy }> = ({ copy }) => {
     : error instanceof Error
       ? error.message
       : copy.unknownError;
-
+  const errObj = error instanceof Error ? error : null;
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gray-50 p-8">
-      <div className="max-w-md rounded-lg bg-white p-8 text-center shadow-lg">
-        <h1 className="mb-2 text-xl font-bold text-red-600">{copy.routeError}</h1>
-        <p className="mb-4 text-sm text-gray-500">{message}</p>
-        <Link to="/companies" className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
-          {copy.backToCompanies}
-        </Link>
-      </div>
-    </div>
+    <ErrorPanel
+      copy={copy}
+      title={copy.routeError}
+      message={message}
+      error={errObj}
+      componentStack={null}
+      // No onRetry: the route's loader / data error is owned by
+      // react-router, which already exposes its own
+      // useRouteError() reset semantics outside this component
+      // tree. Adding a no-op retry button would mislead the user.
+    />
   );
 };
 
@@ -135,6 +308,12 @@ const AppRoutes: React.FC = () => {
             backToCompanies: "Back to companies",
             unknownError: "Unknown error",
             loading: "Loading…",
+            retry: "Retry",
+            copyError: "Copy error report",
+            copied: "Error report copied",
+            copyFailed: "Could not access clipboard",
+            showDetails: "Show details",
+            hideDetails: "Hide details",
           }
         : {
             unexpectedError: "发生了未预期的异常。",
@@ -143,6 +322,12 @@ const AppRoutes: React.FC = () => {
             backToCompanies: "返回公司列表",
             unknownError: "未知错误",
             loading: "正在加载…",
+            retry: "重试",
+            copyError: "复制错误报告",
+            copied: "错误报告已复制",
+            copyFailed: "无法访问剪贴板",
+            showDetails: "查看详情",
+            hideDetails: "收起详情",
           },
     [language],
   );
