@@ -14,6 +14,7 @@ import PreferenceDock from "./components/PreferenceDock";
 import SessionExpiryWatcher from "./components/SessionExpiryWatcher";
 import { useAppPreferences } from "./lib/preferences";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
+import { ToastViewport } from "./lib/toast";
 
 // Every page goes through `lazyWithRetry` instead of the bare React.lazy.
 // Naked `lazy(() => import(...))` has zero protection against the well-known
@@ -161,6 +162,13 @@ const AppRoutes: React.FC = () => {
           rationale. Rendered as a portal-style toast, no layout impact
           when idle. */}
       <SessionExpiryWatcher />
+      {/* Global toast viewport. Subscribes to the queue in lib/toast.tsx
+          and renders a stack of dismissable toasts top-right. Mounted
+          here so non-React modules (lib/api.ts, error boundaries) can
+          emit via the imperative `toast.error(...)` facade without
+          holding a hook reference. Stays just under SessionExpiryWatcher
+          in z-index so the auth toast sits on top during a 401. */}
+      <ToastViewport />
       <ErrorBoundary copy={copy}>
         <Suspense fallback={<RouteFallback copy={copy} />}>
           <Routes>

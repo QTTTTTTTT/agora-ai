@@ -48,6 +48,7 @@ import type {
   ABTestOperationalAttribution as SharedABTestOperationalAttribution,
 } from "@fundai/api-client";
 import { dispatchSessionExpired } from "./sessionExpiryEvent";
+import { toast } from "./toast";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const PRIMARY_TOKEN_STORAGE_KEY = "fundai.jwt";
@@ -249,11 +250,28 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(buildUrl(path), {
-    ...init,
-    credentials: init.credentials ?? "include",
-    headers,
-  });
+  // Network-failure path: fetch() rejects on DNS, CORS, offline, TLS,
+  // or a hard browser abort. None of those produce a Response object
+  // so the !response.ok branch below can't see them. We toast a
+  // localised "network error" before rethrowing so every caller of
+  // apiRequest gets a uniform user-facing notification without each
+  // page having to wrap its own try/catch. The original error is
+  // rethrown unchanged so existing inline handlers still get the
+  // TypeError they already know how to deal with.
+  let response: Response;
+  try {
+    response = await fetch(buildUrl(path), {
+      ...init,
+      credentials: init.credentials ?? "include",
+      headers,
+    });
+  } catch (err) {
+    toast.error(
+      { zh: "网络异常", en: "Network error" },
+      { zh: "请检查网络连接后重试。", en: "Check your network connection and try again." },
+    );
+    throw err;
+  }
 
   const responseRequestId = response.headers.get("X-Request-ID") ?? requestId;
   const contentType = response.headers.get("content-type") ?? "";
@@ -276,6 +294,20 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
         reason: "api_request_401",
       });
       throw new ApiError("登录状态已失效，请重新登录后再试。", response.status, normalized.detail, responseRequestId, payload);
+    }
+    // Server errors (5xx) are infrastructure failures, not business
+    // outcomes — every caller benefits from a uniform toast rather
+    // than each page re-rendering "请求失败，状态码 502" inline. 4xx
+    // (except 401) is intentionally left to the calling page because
+    // those typically encode validation / permission feedback the
+    // page wants to render against a specific form field.
+    if (response.status >= 500) {
+      toast.error(
+        { zh: "服务暂时不可用", en: "Service temporarily unavailable" },
+        normalized.message
+          ? normalized.message
+          : { zh: `状态码 ${response.status}`, en: `Status ${response.status}` },
+      );
     }
     throw new ApiError(normalized.message, response.status, normalized.detail, responseRequestId, payload);
   }
