@@ -13,6 +13,7 @@ import FundLayout from "./components/FundLayout";
 import PreferenceDock from "./components/PreferenceDock";
 import SessionExpiryWatcher from "./components/SessionExpiryWatcher";
 import RouteFallback from "./components/RouteFallback";
+import CommandPalette from "./components/CommandPalette";
 import { useAppPreferences } from "./lib/preferences";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { ToastViewport, toast } from "./lib/toast";
@@ -343,6 +344,13 @@ const AppRoutes: React.FC = () => {
           rationale. Rendered as a portal-style toast, no layout impact
           when idle. */}
       <SessionExpiryWatcher />
+      {/* Global Cmd+K / Ctrl+K command palette. Lives inside
+          <BrowserRouter> so its action handlers can call
+          useNavigate(). The palette is rendered unconditionally
+          but invisible until triggered — open is internal state.
+          See components/CommandPalette.tsx for the command list
+          and extension points. */}
+      <CommandPalette />
       {/* Global toast viewport. Subscribes to the queue in lib/toast.tsx
           and renders a stack of dismissable toasts top-right. Mounted
           here so non-React modules (lib/api.ts, error boundaries) can
