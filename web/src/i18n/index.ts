@@ -47,15 +47,19 @@ import { initReactI18next } from "react-i18next";
 
 import forgotPasswordEn from "./locales/en-US/forgotPassword";
 import forgotPasswordZh from "./locales/zh-CN/forgotPassword";
+import validationEn from "./locales/en-US/validation";
+import validationZh from "./locales/zh-CN/validation";
 
 export type SupportedLanguage = "zh-CN" | "en-US";
 
 const RESOURCES = {
   "zh-CN": {
     forgotPassword: forgotPasswordZh,
+    validation: validationZh,
   },
   "en-US": {
     forgotPassword: forgotPasswordEn,
+    validation: validationEn,
   },
 } as const;
 

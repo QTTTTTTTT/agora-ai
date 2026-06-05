@@ -2,39 +2,60 @@ import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { ApiError, formatApiError, requestPasswordReset } from "../lib/api";
+import {
+  composeValidators,
+  useFieldValidation,
+  validators,
+} from "../lib/useFieldValidation";
 
 // U6 reference migration — the first page on the codebase to use the
 // `react-i18next` `useTranslation` hook instead of the legacy hand-rolled
 // `const copy = useMemo(() => language === 'en-US' ? {...} : {...}, [language])`
 // pattern. See web/src/i18n/index.ts for the bootstrap and the
 // "MIGRATION GUIDANCE" comment for the recipe to migrate other pages.
+//
+// Also the reference page for the `useFieldValidation` hook
+// (web/src/lib/useFieldValidation.ts) — onBlur-aware field validation
+// instead of "wait for submit, then yell". When the user types a typo
+// email and tabs away, the inline error appears immediately; on submit,
+// the handler asks the field to mark itself touched so any unblurred
+// errors surface before the API call runs.
 
 const ForgotPassword: React.FC = () => {
   const { t } = useTranslation("forgotPassword");
+  const { t: tValidation } = useTranslation("validation");
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [devLink, setDevLink] = useState<string | null>(null);
 
+  const emailField = useFieldValidation(
+    email,
+    composeValidators(
+      validators.required(tValidation),
+      validators.email(tValidation),
+    ),
+  );
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
+    setSubmitError(null);
 
-    const trimmed = email.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-      setError(t("errors.invalidEmail"));
-      return;
-    }
+    // Surface any pending field errors (the user might submit without ever
+    // blurring the field — e.g. hits Enter while still focused).
+    emailField.markTouched();
+    if (emailField.error) return;
+
     setSubmitting(true);
     try {
-      const response = await requestPasswordReset(trimmed);
+      const response = await requestPasswordReset(email.trim());
       setSubmitted(true);
       setDevLink(response.dev_reset_link ?? null);
     } catch (err) {
       const fallback = t("errors.failed");
       const message = err instanceof ApiError ? formatApiError(err, fallback) : fallback;
-      setError(message);
+      setSubmitError(message);
     } finally {
       setSubmitting(false);
     }
@@ -63,21 +84,33 @@ const ForgotPassword: React.FC = () => {
             ) : null}
           </div>
         ) : (
-          <form className="space-y-5" onSubmit={handleSubmit}>
+          <form className="space-y-5" onSubmit={handleSubmit} noValidate>
             <label className="block text-sm font-medium text-slate-200">
               {t("labels.email")}
               <input
                 type="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
+                onBlur={emailField.onBlur}
                 placeholder={t("placeholders.email")}
                 autoComplete="email"
-                className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                aria-invalid={Boolean(emailField.showError)}
+                aria-describedby={emailField.showError ? "email-error" : undefined}
+                className={`mt-2 w-full rounded-2xl border bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:ring-2 ${
+                  emailField.showError
+                    ? "border-red-500/60 focus:border-red-400 focus:ring-red-500/30"
+                    : "border-white/10 focus:border-indigo-400 focus:ring-indigo-500/40"
+                }`}
               />
+              {emailField.showError ? (
+                <p id="email-error" className="mt-2 text-xs text-red-300">
+                  {emailField.showError}
+                </p>
+              ) : null}
             </label>
 
-            {error ? (
-              <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>
+            {submitError ? (
+              <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{submitError}</div>
             ) : null}
 
             <button
