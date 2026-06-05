@@ -8,13 +8,20 @@ import React, {
   useState,
 } from "react";
 import i18n from "../i18n";
+import { useBroadcastChannel } from "./useBroadcastChannel";
 
 export type AppLanguage = "zh-CN" | "en-US";
 export type DisplayCurrency = "USD" | "CNY";
 
 const LANGUAGE_STORAGE_KEY = "fundai.language";
 const DISPLAY_CURRENCY_STORAGE_KEY = "fundai.display_currency";
+const PREFERENCES_BROADCAST_CHANNEL = "fundai.preferences";
 const USD_TO_CNY_RATE = 7.2;
+
+interface PreferencesBroadcast {
+  language?: AppLanguage;
+  displayCurrency?: DisplayCurrency;
+}
 
 interface PreferencesContextValue {
   language: AppLanguage;
@@ -63,19 +70,39 @@ export const PreferencesProvider: React.FC<{ children: ReactNode }> = ({ childre
     }
   }, [languageState]);
 
+  // Multi-window state sync — when tab A flips language or currency,
+  // tabs B+ pick it up immediately via BroadcastChannel (or storage
+  // events on browsers without BroadcastChannel). Reference usage of
+  // useBroadcastChannel for other multi-window-affected state to follow:
+  // active fund selection, "approved decision" badges, draft inputs.
+  const { post: postPreferences } = useBroadcastChannel<PreferencesBroadcast>(
+    PREFERENCES_BROADCAST_CHANNEL,
+    (msg) => {
+      if (msg.language && (msg.language === "zh-CN" || msg.language === "en-US")) {
+        // Update local state without re-broadcasting (would loop).
+        setLanguageState(msg.language);
+      }
+      if (msg.displayCurrency && (msg.displayCurrency === "USD" || msg.displayCurrency === "CNY")) {
+        setDisplayCurrencyState(msg.displayCurrency);
+      }
+    },
+  );
+
   const setLanguage = useCallback((value: AppLanguage) => {
     setLanguageState(value);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(LANGUAGE_STORAGE_KEY, value);
     }
-  }, []);
+    postPreferences({ language: value });
+  }, [postPreferences]);
 
   const setDisplayCurrency = useCallback((value: DisplayCurrency) => {
     setDisplayCurrencyState(value);
     if (typeof window !== "undefined") {
       window.localStorage.setItem(DISPLAY_CURRENCY_STORAGE_KEY, value);
     }
-  }, []);
+    postPreferences({ displayCurrency: value });
+  }, [postPreferences]);
 
   const contextValue = useMemo(
     () => ({
