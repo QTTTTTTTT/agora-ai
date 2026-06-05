@@ -228,11 +228,23 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	spa := spaHandler(cfg.StaticFilesPath)
 	mux.Handle("/", spa)
 
-	// Wrap with middleware.
+	// Wrap with middleware. Order from innermost (closest to mux) to
+	// outermost (closest to client):
+	//   pathAlias  → rewrite kebab-case URLs to camelCase
+	//   auth       → resolve session cookie → user / role on ctx
+	//   cors       → preflight + Origin allow-list
+	//   gzip       → compress JSON / text responses (NOT SSE)
+	//   logger     → record method/path/status/bytes/duration
+	//   recoverer  → catch panics, return 500
+	// gzip is between cors and logger so logger.bytesWritten reflects
+	// actual on-the-wire size, and so SSE handlers (which set
+	// Content-Type=text/event-stream before WriteHeader) can opt out
+	// via gzip's Content-Type sniff.
 	var handler http.Handler = mux
 	handler = pathAliasMiddleware(handler)
 	handler = authMiddlewareWithKeyring(svc.DB, cfg.effectiveJWTKeyring())(handler)
 	handler = corsMiddleware(cfg.CORSOrigins)(handler)
+	handler = gzipMiddleware(handler)
 	handler = requestLogger(svc.Metrics, handler)
 	handler = recoverer(svc.Metrics, handler)
 
