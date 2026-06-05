@@ -10,6 +10,12 @@ import {
   formatNumberForLanguage,
   useAppPreferences,
 } from "../lib/preferences";
+import {
+  formatPValue,
+  proportionZTest,
+  significanceLevel,
+  welchTTest,
+} from "../lib/stats/significance";
 
 type TestStatus = "draft" | "running" | "completed" | "analyzed" | string;
 type VariableType = "model_change" | "strategy_compare" | string;
@@ -770,6 +776,19 @@ const ABTestCompare: React.FC = () => {
             confidenceLow: "Low",
             confidenceMedium: "Medium",
             confidenceHigh: "High",
+            significanceTitle: "Statistical significance",
+            significanceSubtitle: "Computed client-side from per-trade realized PnL and win/loss counts. Uses Welch's t-test and a two-proportion z-test.",
+            significanceMeanReturn: "Mean trade return diff (B − A)",
+            significanceWinRate: "Win-rate diff (B − A)",
+            significancePValue: "p-value",
+            significanceCI: "95% CI",
+            significanceTStat: "t-statistic",
+            significanceZStat: "z-statistic",
+            significanceDof: "degrees of freedom",
+            significanceSignificant: "Statistically significant",
+            significanceNotSignificant: "Not statistically significant at α=0.05",
+            significanceSmallSample: "Small sample size — interpret with caution",
+            significanceInsufficient: "Need at least 2 trades per variant to compute significance.",
             decisionDiffTitle: "Decision differences",
             tradeDetailTitle: "Shadow trade details",
             date: "Date",
@@ -898,6 +917,19 @@ const ABTestCompare: React.FC = () => {
             confidenceLow: "低",
             confidenceMedium: "中",
             confidenceHigh: "高",
+            significanceTitle: "统计显著性",
+            significanceSubtitle: "基于每笔交易的已实现盈亏和胜负样本，在前端使用 Welch t 检验和两比例 z 检验计算。",
+            significanceMeanReturn: "单笔平均收益差（B − A）",
+            significanceWinRate: "胜率差（B − A）",
+            significancePValue: "p 值",
+            significanceCI: "95% 置信区间",
+            significanceTStat: "t 统计量",
+            significanceZStat: "z 统计量",
+            significanceDof: "自由度",
+            significanceSignificant: "统计上显著",
+            significanceNotSignificant: "在 α=0.05 水平下不显著",
+            significanceSmallSample: "样本量较小，结论请谨慎参考",
+            significanceInsufficient: "每个变体至少需要 2 笔交易才能计算显著性。",
             decisionDiffTitle: "决策差异",
             tradeDetailTitle: "影子交易明细",
             date: "日期",
@@ -1118,6 +1150,30 @@ const ABTestCompare: React.FC = () => {
   const shadowTrades = useMemo(() => [...(selected?.results?.variantATrades ?? []), ...(selected?.results?.variantBTrades ?? [])], [selected]);
   const confidence = selected?.results?.confidence;
   const scorecard = selected?.results?.scorecard;
+
+  // Statistical-significance memos. We compute Welch's t-test on
+  // per-trade realized PnL between variant A and B, and a
+  // two-proportion z-test on win-rate (fraction of trades with
+  // realizedPnL > 0). Both run pure client-side from the trades
+  // already returned in selected.results — no extra API call.
+  // See lib/stats/significance.ts for implementation notes.
+  const significance = useMemo(() => {
+    const tradesA = selected?.results?.variantATrades ?? [];
+    const tradesB = selected?.results?.variantBTrades ?? [];
+    if (tradesA.length < 2 || tradesB.length < 2) {
+      return null;
+    }
+    const pnlA = tradesA.map((t) => Number(t.realizedPnL ?? 0));
+    const pnlB = tradesB.map((t) => Number(t.realizedPnL ?? 0));
+    const winsA = pnlA.filter((v) => v > 0).length;
+    const winsB = pnlB.filter((v) => v > 0).length;
+    return {
+      welch: welchTTest(pnlA, pnlB),
+      proportion: proportionZTest(winsA, pnlA.length, winsB, pnlB.length),
+      nA: pnlA.length,
+      nB: pnlB.length,
+    };
+  }, [selected]);
   const latestSeriesPoint = navSeries.length > 0 ? navSeries[navSeries.length - 1] : null;
   const latestExcessReturn = latestSeriesPoint?.excessReturn;
 
@@ -1568,6 +1624,72 @@ const ABTestCompare: React.FC = () => {
                             {confidence.warnings.map((warning) => <li key={warning}>{warning}</li>)}
                           </ul>
                         ) : null}
+                      </div>
+                    ) : null}
+
+                    {significance ? (
+                      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <h3 className="text-sm font-semibold uppercase tracking-wider text-gray-500">{copy.significanceTitle}</h3>
+                            <p className="mt-1 text-xs text-gray-500">{copy.significanceSubtitle}</p>
+                          </div>
+                        </div>
+                        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                          {significance.welch ? (
+                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-4">
+                              <p className="text-xs font-semibold text-gray-500">{copy.significanceMeanReturn}</p>
+                              <p className="mt-1 text-xl font-bold text-gray-900">
+                                {significance.welch.diff >= 0 ? "+" : ""}
+                                {formatNumberForLanguage(significance.welch.diff, language, { maximumFractionDigits: 2 })}
+                              </p>
+                              <p className="mt-1 text-xs text-gray-500">
+                                {copy.significanceCI}: [{formatNumberForLanguage(significance.welch.ci95[0], language, { maximumFractionDigits: 2 })}, {formatNumberForLanguage(significance.welch.ci95[1], language, { maximumFractionDigits: 2 })}]
+                              </p>
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${significanceLevel(significance.welch.pValue) ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-600"}`}>
+                                  {formatPValue(significance.welch.pValue)}
+                                </span>
+                                <span className="text-xs text-gray-500">
+                                  {copy.significanceTStat}={formatNumberForLanguage(significance.welch.tStatistic, language, { maximumFractionDigits: 2 })} · {copy.significanceDof}={formatNumberForLanguage(significance.welch.df, language, { maximumFractionDigits: 1 })}
+                                </span>
+                              </div>
+                              <p className={`mt-2 text-xs font-medium ${significanceLevel(significance.welch.pValue) ? "text-emerald-700" : "text-gray-600"}`}>
+                                {significanceLevel(significance.welch.pValue) ? copy.significanceSignificant : copy.significanceNotSignificant}
+                              </p>
+                              {significance.welch.dfWarning ? (
+                                <p className="mt-1 text-xs text-amber-700">{copy.significanceSmallSample}</p>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          {significance.proportion ? (
+                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-4">
+                              <p className="text-xs font-semibold text-gray-500">{copy.significanceWinRate}</p>
+                              <p className="mt-1 text-xl font-bold text-gray-900">
+                                {significance.proportion.diff >= 0 ? "+" : ""}
+                                {formatNumberForLanguage(significance.proportion.diff * 100, language, { maximumFractionDigits: 2 })}%
+                              </p>
+                              <p className="mt-1 text-xs text-gray-500">
+                                {copy.significanceCI}: [
+                                {formatNumberForLanguage(significance.proportion.ci95[0] * 100, language, { maximumFractionDigits: 2 })}%,
+                                {" "}
+                                {formatNumberForLanguage(significance.proportion.ci95[1] * 100, language, { maximumFractionDigits: 2 })}%
+                                ]
+                              </p>
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${significanceLevel(significance.proportion.pValue) ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-600"}`}>
+                                  {formatPValue(significance.proportion.pValue)}
+                                </span>
+                                <span className="text-xs text-gray-500">
+                                  {copy.significanceZStat}={formatNumberForLanguage(significance.proportion.zStatistic, language, { maximumFractionDigits: 2 })} · n={significance.proportion.nA} / {significance.proportion.nB}
+                                </span>
+                              </div>
+                              <p className={`mt-2 text-xs font-medium ${significanceLevel(significance.proportion.pValue) ? "text-emerald-700" : "text-gray-600"}`}>
+                                {significanceLevel(significance.proportion.pValue) ? copy.significanceSignificant : copy.significanceNotSignificant}
+                              </p>
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
                     ) : null}
 
