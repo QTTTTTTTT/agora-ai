@@ -27,6 +27,7 @@ import { ToastViewport, toast } from "./lib/toast";
 // picks up the fresh `index.html` (and its updated chunk hash map). See
 // the file header in `./lib/lazyWithRetry.ts` for the full rationale.
 const Companies = lazyWithRetry(() => import("./pages/Companies"));
+const MultiFundOverview = lazyWithRetry(() => import("./pages/MultiFundOverview"));
 const Login = lazyWithRetry(() => import("./pages/Login"));
 const ForgotPassword = lazyWithRetry(() => import("./pages/ForgotPassword"));
 const ResetPassword = lazyWithRetry(() => import("./pages/ResetPassword"));
@@ -368,6 +369,7 @@ const AppRoutes: React.FC = () => {
             <Route path="/verify-email" element={<AuthGate><VerifyEmail /></AuthGate>} />
             <Route path="/account/security" element={<AuthGate><AccountSecurity /></AuthGate>} />
             <Route path="/companies" element={<AuthGate><Companies /></AuthGate>} />
+            <Route path="/portfolio-overview" element={<AuthGate><MultiFundOverview /></AuthGate>} />
             <Route path="/wallet" element={<AuthGate><Wallet /></AuthGate>} />
             <Route path="/kyc" element={<AuthGate><KYC /></AuthGate>} />
             <Route path="/marketplace" element={<AuthGate><Marketplace /></AuthGate>} />

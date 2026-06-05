@@ -68,6 +68,12 @@ const STATIC_COMMANDS: CommandEntry[] = [
     action: { type: "nav", to: "/companies" },
   },
   {
+    id: "go-portfolio-overview",
+    label: { zh: "多基金总览", en: "Multi-fund overview" },
+    hint: { zh: "聚合所有基金状态", en: "Aggregate state across funds" },
+    action: { type: "nav", to: "/portfolio-overview" },
+  },
+  {
     id: "go-marketplace",
     label: { zh: "市场广场", en: "Marketplace" },
     action: { type: "nav", to: "/marketplace" },
