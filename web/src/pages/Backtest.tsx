@@ -24,6 +24,7 @@ import {
 } from "../lib/api";
 import { useNavigate } from "react-router-dom";
 import { formatDateForLanguage, formatDateTimeForLanguage, formatNumberForLanguage, useAppPreferences, type AppLanguage } from "../lib/preferences";
+import { computeDeepBacktestMetrics } from "../lib/stats/backtestMetrics";
 
 // Default form values are intentionally conservative: 6-month
 // window, $100k starting cash, fallback engine. Operators in
@@ -1357,6 +1358,10 @@ const Backtest: React.FC = () => {
               ) : selected.result ? (
                 <div className="space-y-4">
                   <MetricsGrid copy={copy} metrics={selected.result.metrics} initial={selected.result.initialCash} final={selected.result.finalNav} language={language} />
+                  <DeepMetricsPanel
+                    navCurve={selected.result.navCurve}
+                    language={language}
+                  />
                   <div>
                     <h3 className="mb-2 text-sm font-semibold text-gray-700">{copy.navCurve}</h3>
                     <NavChart
@@ -1528,6 +1533,141 @@ const MetricsGrid: React.FC<{
     </div>
   );
 };
+
+// DeepMetricsPanel — collapsible "extra metrics" computed
+// client-side from the NAV curve (Sortino, Calmar, VaR/ES,
+// best/worst day, skewness, kurtosis, drawdown recovery time).
+// See lib/stats/backtestMetrics.ts for definitions; we render
+// these on demand under the headline grid so PMs see the
+// classic metrics by default and quants drop down for the rest.
+const DeepMetricsPanel: React.FC<{
+  navCurve: ReadonlyArray<{ date: string; nav: number }>;
+  language: AppLanguage;
+}> = ({ navCurve, language }) => {
+  const isEnglish = language === "en-US";
+  const [open, setOpen] = useState(false);
+  const metrics = useMemo(
+    () => (open ? computeDeepBacktestMetrics({ navCurve }) : null),
+    [open, navCurve],
+  );
+  const pct = (v: number | null) =>
+    v === null ? "—" : `${formatNumberForLanguage(v * 100, language, { maximumFractionDigits: 2 })}%`;
+  const num = (v: number | null) =>
+    v === null ? "—" : formatNumberForLanguage(v, language, { maximumFractionDigits: 2 });
+  const days = (v: number | null) => (v === null ? "—" : `${v}`);
+
+  const labels = isEnglish
+    ? {
+        toggle: "Deep metrics",
+        toggleClose: "Hide deep metrics",
+        sortino: "Sortino",
+        calmar: "Calmar",
+        bestDay: "Best day",
+        worstDay: "Worst day",
+        upDown: "Up / down days",
+        meanUp: "Avg up day",
+        meanDown: "Avg down day",
+        skewness: "Skewness",
+        kurtosis: "Excess kurtosis",
+        var95: "VaR 95%",
+        var99: "VaR 99%",
+        cvar95: "CVaR 95%",
+        cvar99: "CVaR 99%",
+        peakToTrough: "Peak → trough",
+        recovery: "Recovery",
+        recoveryNotYet: "not yet",
+        lowSample: "Less than 30 obs — interpret with care.",
+        none: "Insufficient NAV data to compute deep metrics.",
+        obsCount: "obs",
+      }
+    : {
+        toggle: "深度指标",
+        toggleClose: "收起深度指标",
+        sortino: "Sortino",
+        calmar: "Calmar",
+        bestDay: "最佳日收益",
+        worstDay: "最差日收益",
+        upDown: "上涨 / 下跌天数",
+        meanUp: "平均上涨日收益",
+        meanDown: "平均下跌日收益",
+        skewness: "偏度",
+        kurtosis: "超额峰度",
+        var95: "VaR 95%",
+        var99: "VaR 99%",
+        cvar95: "CVaR 95%",
+        cvar99: "CVaR 99%",
+        peakToTrough: "峰值到谷底",
+        recovery: "回血用时",
+        recoveryNotYet: "尚未恢复",
+        lowSample: "样本不足 30 个，结论请谨慎参考。",
+        none: "净值数据不足，无法计算深度指标。",
+        obsCount: "条观测",
+      };
+
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-xs font-medium text-indigo-600 hover:text-indigo-500"
+      >
+        {open ? `▾ ${labels.toggleClose}` : `▸ ${labels.toggle}`}
+      </button>
+      {open ? (
+        <div className="mt-3 rounded-lg border border-gray-200 bg-white p-3">
+          {metrics === null ? (
+            <p className="text-xs text-gray-500">{labels.none}</p>
+          ) : (
+            <>
+              <p className="mb-3 text-[11px] uppercase tracking-wide text-gray-500">
+                {metrics.obsCount} {labels.obsCount}
+                {metrics.lowSampleWarning ? (
+                  <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                    {labels.lowSample}
+                  </span>
+                ) : null}
+              </p>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                <DeepCard label={labels.sortino} value={num(metrics.sortino)} />
+                <DeepCard label={labels.calmar} value={num(metrics.calmar)} />
+                <DeepCard label={labels.bestDay} value={pct(metrics.bestDayReturn)} tone="text-emerald-700" />
+                <DeepCard label={labels.worstDay} value={pct(metrics.worstDayReturn)} tone="text-red-700" />
+                <DeepCard
+                  label={labels.upDown}
+                  value={`${metrics.upDays} / ${metrics.downDays}`}
+                />
+                <DeepCard label={labels.meanUp} value={pct(metrics.meanUpDay)} tone="text-emerald-700" />
+                <DeepCard label={labels.meanDown} value={pct(metrics.meanDownDay)} tone="text-red-700" />
+                <DeepCard label={labels.skewness} value={num(metrics.skewness)} />
+                <DeepCard label={labels.kurtosis} value={num(metrics.excessKurtosis)} />
+                <DeepCard label={labels.var95} value={pct(metrics.var95)} tone="text-amber-700" />
+                <DeepCard label={labels.var99} value={pct(metrics.var99)} tone="text-red-700" />
+                <DeepCard label={labels.cvar95} value={pct(metrics.cvar95)} tone="text-amber-700" />
+                <DeepCard label={labels.cvar99} value={pct(metrics.cvar99)} tone="text-red-700" />
+                <DeepCard label={labels.peakToTrough} value={days(metrics.ddPeakToTroughDays)} />
+                <DeepCard
+                  label={labels.recovery}
+                  value={
+                    metrics.ddRecoveryDays === null
+                      ? labels.recoveryNotYet
+                      : days(metrics.ddRecoveryDays)
+                  }
+                />
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const DeepCard: React.FC<{ label: string; value: string; tone?: string }> = ({ label, value, tone }) => (
+  <div className="rounded border border-gray-100 bg-gray-50 px-3 py-2">
+    <div className="text-[11px] uppercase tracking-wide text-gray-500">{label}</div>
+    <div className={`text-sm font-semibold ${tone ?? "text-gray-900"}`}>{value}</div>
+  </div>
+);
 
 // WalkForwardView renders the per-fold breakdown for runs that
 // used the walkForward sub-spec: an OOS summary row + a per-fold
