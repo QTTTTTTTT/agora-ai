@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { apiGet, formatApiError } from "../lib/api";
 import { formatDateForLanguage, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
 import { renderLesson } from "../lib/lessonRenderer";
+import { highlightTokens, rankMemoryEntries, type ScoredMemoryEntry } from "../lib/memorySearch";
 
 import type { MemoryLayer as SharedMemoryLayer } from "@fundai/api-client";
 
@@ -543,6 +544,23 @@ const MemoryCenter: React.FC = () => {
     [activeLayer, entriesByLayer, focus],
   );
   const searchResults = useMemo(() => searchEntries(scopedEntries, query, displayTitle), [displayTitle, query, scopedEntries]);
+
+  // Smart-search mode — token-based BM25-lite ranking across
+  // ALL layers (the substring search above only sees the current
+  // focus). Set to true via the toggle in the search panel; we
+  // keep the substring search as the default so existing
+  // muscle-memory behaviour (cmd-F-style "find this exact phrase")
+  // doesn't change. See lib/memorySearch.ts for the scoring
+  // formula. This is the "starter" version; an embeddings-based
+  // semantic search will replace the ranker (same return shape)
+  // once the server-side vector index ships.
+  const [smartSearch, setSmartSearch] = useState(false);
+  const smartSearchResults = useMemo<ScoredMemoryEntry<MemoryEntry>[]>(() => {
+    if (!smartSearch || !query.trim()) return [];
+    return rankMemoryEntries(allEntries, query, {
+      metaFor: (entry) => ({ layer: entry.layer }),
+    });
+  }, [allEntries, query, smartSearch]);
   const timelineEntries = useMemo(
     () => (focus === "market" ? entriesByLayer.daily.filter((entry) => isMarketMemoryEntry(entry)) : entriesByLayer.daily),
     [entriesByLayer.daily, focus],
@@ -714,6 +732,38 @@ const MemoryCenter: React.FC = () => {
 
       {viewMode === "search" ? (
         <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {/* Search-mode toggle. Substring is "exact phrase",
+                same behaviour the page has had forever. Smart
+                ranks token-by-token across ALL layers using BM25-
+                lite — the eventual home for embeddings-based
+                semantic search once the server-side vector index
+                ships (lib/memorySearch.ts has the contract). */}
+            <div className="flex rounded-lg bg-gray-100 p-1">
+              <button
+                type="button"
+                onClick={() => setSmartSearch(false)}
+                className={`rounded px-3 py-1 text-xs font-medium transition ${!smartSearch ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-900"}`}
+              >
+                {language === "en-US" ? "Exact phrase" : "精确匹配"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSmartSearch(true)}
+                className={`rounded px-3 py-1 text-xs font-medium transition ${smartSearch ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-900"}`}
+                title={language === "en-US" ? "Token-based BM25 ranking across all layers" : "基于词的 BM25 排序，跨所有层级"}
+              >
+                {language === "en-US" ? "Smart search" : "智能搜索"}
+              </button>
+            </div>
+            {smartSearch ? (
+              <span className="text-[11px] text-gray-500">
+                {language === "en-US"
+                  ? "Ranks by relevance · matches across all layers"
+                  : "按相关性排序 · 跨所有记忆层级"}
+              </span>
+            ) : null}
+          </div>
           <div className="relative mb-4">
             <input
               type="text"
@@ -729,35 +779,75 @@ const MemoryCenter: React.FC = () => {
 
           {query.trim() ? (
             <p className="mb-3 text-xs text-gray-500">
-              {formatNumberForLanguage(searchResults.length, language)} {copy.foundResults}
+              {formatNumberForLanguage(smartSearch ? smartSearchResults.length : searchResults.length, language)} {copy.foundResults}
             </p>
           ) : null}
 
-          <div className="space-y-2">
-            {searchResults.map((result) => (
-              <button
-                key={result.entry.id}
-                onClick={() => {
-                  setSelectedEntry(result.entry);
-                  setActiveLayer(result.entry.layer);
-                  setViewMode("content");
-                }}
-                className="w-full rounded-lg border border-gray-200 p-3 text-left transition hover:border-indigo-300 hover:bg-gray-50"
-              >
-                <div className="mb-1 flex items-center gap-2">
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${layerMeta[result.entry.layer].badgeClass}`}>
-                    {layerMeta[result.entry.layer].icon} {layerMeta[result.entry.layer].label}
-                  </span>
-                  <span className="text-xs text-gray-400">{displayDate(result.entry)}</span>
-                  {result.entry.agentId ? <span className="text-xs text-gray-400">{displayAgentName(result.entry.agentId)}</span> : null}
-                </div>
-                <p className="text-sm font-semibold text-gray-800">{displayTitle(result.entry)}</p>
-                <p className="mt-1 text-xs leading-relaxed text-gray-500">{highlightMatch(result.matchedSnippet, query)}</p>
-              </button>
-            ))}
-          </div>
+          {smartSearch ? (
+            <div className="space-y-2">
+              {smartSearchResults.map((result) => (
+                <button
+                  key={result.entry.id}
+                  onClick={() => {
+                    setSelectedEntry(result.entry);
+                    setActiveLayer(result.entry.layer);
+                    setSmartSearch(false);
+                    setViewMode("content");
+                  }}
+                  className="w-full rounded-lg border border-gray-200 p-3 text-left transition hover:border-indigo-300 hover:bg-gray-50"
+                >
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${layerMeta[result.entry.layer].badgeClass}`}>
+                      {layerMeta[result.entry.layer].icon} {layerMeta[result.entry.layer].label}
+                    </span>
+                    <span className="text-xs text-gray-400">{displayDate(result.entry)}</span>
+                    {result.entry.agentId ? <span className="text-xs text-gray-400">{displayAgentName(result.entry.agentId)}</span> : null}
+                    <span className="ml-auto rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
+                      {result.score.toFixed(1)}
+                    </span>
+                  </div>
+                  <p className="text-sm font-semibold text-gray-800">{displayTitle(result.entry)}</p>
+                  {/* Snippet pre-rendered with <mark> tags by
+                      highlightTokens — entry content is shown
+                      everywhere else in the page already, so
+                      injecting it here is consistent with existing
+                      trust boundaries. */}
+                  <p
+                    className="mt-1 text-xs leading-relaxed text-gray-500 [&_mark]:rounded [&_mark]:bg-yellow-200 [&_mark]:px-0.5"
+                    dangerouslySetInnerHTML={{
+                      __html: highlightTokens(result.snippet, result.matchedTokens),
+                    }}
+                  />
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {searchResults.map((result) => (
+                <button
+                  key={result.entry.id}
+                  onClick={() => {
+                    setSelectedEntry(result.entry);
+                    setActiveLayer(result.entry.layer);
+                    setViewMode("content");
+                  }}
+                  className="w-full rounded-lg border border-gray-200 p-3 text-left transition hover:border-indigo-300 hover:bg-gray-50"
+                >
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${layerMeta[result.entry.layer].badgeClass}`}>
+                      {layerMeta[result.entry.layer].icon} {layerMeta[result.entry.layer].label}
+                    </span>
+                    <span className="text-xs text-gray-400">{displayDate(result.entry)}</span>
+                    {result.entry.agentId ? <span className="text-xs text-gray-400">{displayAgentName(result.entry.agentId)}</span> : null}
+                  </div>
+                  <p className="text-sm font-semibold text-gray-800">{displayTitle(result.entry)}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-gray-500">{highlightMatch(result.matchedSnippet, query)}</p>
+                </button>
+              ))}
+            </div>
+          )}
 
-          {query.trim() && searchResults.length === 0 ? (
+          {query.trim() && (smartSearch ? smartSearchResults.length : searchResults.length) === 0 ? (
             <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-10 text-center text-sm text-gray-400">
               {copy.noSearchResults}
             </div>
