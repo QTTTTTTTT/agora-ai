@@ -1,4 +1,13 @@
-import React, { ReactNode, createContext, useCallback, useContext, useMemo, useState } from "react";
+import React, {
+  ReactNode,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import i18n from "../i18n";
 
 export type AppLanguage = "zh-CN" | "en-US";
 export type DisplayCurrency = "USD" | "CNY";
@@ -41,6 +50,18 @@ function detectDisplayCurrency(): DisplayCurrency {
 export const PreferencesProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [languageState, setLanguageState] = useState<AppLanguage>(detectLanguage);
   const [displayCurrencyState, setDisplayCurrencyState] = useState<DisplayCurrency>(detectDisplayCurrency);
+
+  // U6 — Keep i18next in lockstep with the language preference so pages
+  // that have been migrated to react-i18next see the same language flips
+  // that hand-rolled `copy` blocks see. The two co-exist deliberately
+  // during the incremental migration; once every page is migrated this
+  // sync hook becomes the only writer of i18next's language and the
+  // hand-rolled blocks (and `language` field) can be retired.
+  useEffect(() => {
+    if (i18n.language !== languageState) {
+      void i18n.changeLanguage(languageState);
+    }
+  }, [languageState]);
 
   const setLanguage = useCallback((value: AppLanguage) => {
     setLanguageState(value);
