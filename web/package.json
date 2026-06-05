@@ -11,7 +11,9 @@
     "test:i18n": "node --experimental-strip-types --no-warnings test/lessonRenderer.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "test:e2e:install": "playwright install chromium"
+    "test:e2e:install": "playwright install chromium",
+    "test:e2e:visual": "playwright test e2e/visual-baseline.spec.ts",
+    "test:e2e:visual:update": "playwright test e2e/visual-baseline.spec.ts --update-snapshots"
   },
   "dependencies": {
     "@fundai/api-client": "*",

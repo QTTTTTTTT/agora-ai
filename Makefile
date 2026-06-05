@@ -1,4 +1,4 @@
-.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline ha-failover-smoke
+.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline ha-failover-smoke test-visual-baseline test-visual-baseline-update
 
 # Default target prints help so a fresh clone explorer learns the toolbox.
 help:
@@ -24,6 +24,10 @@ help:
 	@echo ""
 	@echo "Reliability:"
 	@echo "  make ha-failover-smoke  Kill app + bounce postgres, verify recovery within 60s"
+	@echo ""
+	@echo "Visual regression (Playwright):"
+	@echo "  make test-visual-baseline         Compare auth-front routes against committed screenshots"
+	@echo "  make test-visual-baseline-update  Refresh baselines after an intended visual change"
 
 start:
 	scripts/start.sh
@@ -77,3 +81,18 @@ perf-load-baseline:
 # for the full caveat list).
 ha-failover-smoke:
 	bash scripts/ha-failover-smoke.sh
+
+# U8 visual regression. Compares pixel screenshots of the
+# unauthenticated auth/landing routes (login, register tab,
+# forgot-password, reset-password) against committed baselines.
+# Catches stray padding regressions / accidental Tailwind purges
+# / dropped marketing copy that unit tests miss. First run on a
+# new machine creates the baselines automatically — review the
+# generated PNGs and `git add` them to commit. After an
+# intended visual change, run `make test-visual-baseline-update`
+# to refresh.
+test-visual-baseline:
+	cd web && npm run test:e2e:visual
+
+test-visual-baseline-update:
+	cd web && npm run test:e2e:visual:update
