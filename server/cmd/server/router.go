@@ -33,6 +33,15 @@ import (
 
 func buildRouter(svc *Services, cfg *Config) http.Handler {
 	mux := http.NewServeMux()
+
+	// Runtime profiling endpoints (/debug/pprof/*). Off by default;
+	// enabled when PPROF_ENABLED=1. See pprof.go for the rationale
+	// and access patterns. Logged at startup so an SRE can confirm
+	// from the boot logs whether they've got pprof on.
+	if registerPprof(mux) {
+		slog.Info("pprof endpoints enabled", "prefix", "/debug/pprof/")
+	}
+
 	adminHandler := newAdminHandler(svc)
 	// S13 — attach the LLM router + reloader onto the admin
 	// handler now that both halves of the service graph exist.
