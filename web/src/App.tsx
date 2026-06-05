@@ -12,6 +12,7 @@ import AuthGate, { AdminGate } from "./components/AuthGate";
 import FundLayout from "./components/FundLayout";
 import PreferenceDock from "./components/PreferenceDock";
 import SessionExpiryWatcher from "./components/SessionExpiryWatcher";
+import RouteFallback from "./components/RouteFallback";
 import { useAppPreferences } from "./lib/preferences";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { ToastViewport } from "./lib/toast";
@@ -122,12 +123,6 @@ const RouteErrorElement: React.FC<{ copy: ErrorBoundaryCopy }> = ({ copy }) => {
   );
 };
 
-const RouteFallback: React.FC<{ copy: ErrorBoundaryCopy }> = ({ copy }) => (
-  <div className="flex min-h-screen items-center justify-center bg-gray-50 p-8 text-sm text-gray-500">
-    {copy.loading}
-  </div>
-);
-
 const AppRoutes: React.FC = () => {
   const { language } = useAppPreferences();
   const copy = useMemo<ErrorBoundaryCopy>(
@@ -170,7 +165,7 @@ const AppRoutes: React.FC = () => {
           in z-index so the auth toast sits on top during a 401. */}
       <ToastViewport />
       <ErrorBoundary copy={copy}>
-        <Suspense fallback={<RouteFallback copy={copy} />}>
+        <Suspense fallback={<RouteFallback loadingText={copy.loading} />}>
           <Routes>
             <Route path="/" element={<Navigate to="/companies" replace />} />
             <Route path="/login" element={<Login />} />
