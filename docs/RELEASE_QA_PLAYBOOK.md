@@ -21,7 +21,8 @@ bash scripts/verify.sh
 cd server
 go test ./... -count=1 -race
 go vet ./...
-go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+# govulncheck pinned — bumping requires the SLA in §0.1 below.
+go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
 
 # 3. Shared client + web + android typecheck
 cd ..
@@ -38,6 +39,62 @@ docker compose down -v
 ```
 
 CI mirrors all of the above and gates merges; this is the local rehearsal.
+
+---
+
+## 0.1. govulncheck pinning + bump SLA
+
+The pre-flight gate above runs `govulncheck@v1.3.0`. It is **pinned, not
+`@latest`**, in three places that must stay in lockstep:
+
+  - `.github/workflows/ci.yml` (the CI gate)
+  - `scripts/verify.sh` (the local repro runner)
+  - `docs/RELEASE_QA_PLAYBOOK.md` §0 step 2 (this very playbook)
+
+**Why pin.** `@latest` re-resolves on every CI run; a fresh govulncheck
+release that adds a new vulnerability rule (or an over-eager false
+positive) can turn a previously-green main red without any code change
+in this repo. We've also seen weeks where the upstream module had
+build errors against newer Go toolchains. Pinning lets every CI run
+of the same commit produce the same scan output, which is the only
+way "scan was clean on this commit" is a meaningful claim.
+
+**Bump SLA.** Refresh the pin **monthly**, on the first business day,
+and **immediately** if a CVE in the Go ecosystem is publicly disclosed
+between scheduled bumps. Procedure:
+
+  1. Pick the new version: visit
+     https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck and use the
+     latest **`v1.x.x`** stable (skip `vN.M.0-DATE-HASH` pre-release
+     pseudo-versions; we want only tagged releases).
+  2. Run a dry scan against the current `main`:
+     ```bash
+     cd server
+     go run golang.org/x/vuln/cmd/govulncheck@<NEW_VERSION> ./...
+     ```
+     If it reports new findings that the pinned version didn't, treat
+     each as a normal vulnerability response (open an issue, decide:
+     fix, accept-risk-with-expiry, or upstream-already-mitigated).
+     Do not proceed to the bump until the scan is clean OR every new
+     finding has an explicit triage decision recorded.
+  3. Update the version string in **all three** files in one PR.
+     A grep helper:
+     ```bash
+     git grep -n 'govulncheck@'
+     ```
+     The PR title format is `chore(deps): bump govulncheck pin to <NEW_VERSION>`
+     and the description must list every CVE the new version's
+     database picked up against `main` (zero is fine — record that
+     too).
+  4. Land the PR through the normal review path. The CI run on the
+     PR is itself the proof that the new version is build-clean
+     against our codebase.
+
+**Owner.** Backend on-call rotates the bump as part of the Monday
+triage routine (see `docs/MONDAY_TRIAGE_PLAYBOOK.md`). If a CVE drops
+mid-week and the rotating on-call is unavailable, any backend
+maintainer may land the bump out-of-cycle following the same
+procedure.
 
 ---
 

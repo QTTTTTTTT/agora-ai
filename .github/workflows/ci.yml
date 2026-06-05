@@ -86,7 +86,13 @@ jobs:
         run: go vet ./...
 
       - name: Run govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        # Pinned, not @latest. Refresh per the bump SLA in
+        # docs/RELEASE_QA_PLAYBOOK.md §0.1 — monthly, plus
+        # out-of-cycle on a fresh disclosed Go-ecosystem CVE.
+        # Update this string in lockstep with scripts/verify.sh
+        # and the playbook (`git grep govulncheck@` finds all
+        # three call sites).
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
 
   frontend:
     name: Frontend audit, build, lint
