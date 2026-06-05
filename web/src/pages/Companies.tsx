@@ -4,6 +4,7 @@ import { apiGet, apiPost, formatApiError, getStoredSession, logoutSession } from
 import { formatMoneyForDisplay, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
 import { AutoExecuteInlineToggle, type AutoExecuteConfig } from "../components/AutoExecuteControls";
 import { FundAssistDialog } from "../components/FundAssistDialog";
+import { EmptyState } from "../components/EmptyState";
 
 interface Company {
   id: string;
@@ -881,6 +882,7 @@ const Companies: React.FC = () => {
             retry: "Retry",
             emptyTitle: "No companies yet",
             emptyDescription: "New accounts need a company first, then a first fund, before entering the full workspace.",
+            emptyOnboardingHint: "Step 1 of 2 — Create a company. After this you'll create your first fund (Step 2), and from there land directly in the trading workspace.",
             createFirstCompany: "Create first company",
             noDescription: "No company description yet.",
             fundCountSuffix: " funds",
@@ -922,6 +924,7 @@ const Companies: React.FC = () => {
             retry: "重试",
             emptyTitle: "还没有可用公司",
             emptyDescription: "新账号需要先创建一家公司，再创建首只基金，之后就可以进入完整的基金工作台继续使用。",
+            emptyOnboardingHint: "第 1/2 步 — 先创建一家公司。完成后会引导你创建首只基金（第 2 步），随后直接进入交易工作台。",
             createFirstCompany: "创建第一家公司",
             noDescription: "暂无公司描述。",
             fundCountSuffix: " 只基金",
@@ -1226,15 +1229,13 @@ const Companies: React.FC = () => {
           ) : null}
 
           {!loading && !error && companies.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-gray-200 bg-white p-10 text-center shadow-sm">
-              <p className="text-lg font-semibold text-gray-900">{copy.emptyTitle}</p>
-              <p className="mx-auto mt-3 max-w-2xl text-sm leading-6 text-gray-500">{copy.emptyDescription}</p>
-              <div className="mt-6 flex items-center justify-center gap-3">
-                <button onClick={openCreateCompanyModal} className="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-700">
-                  {copy.createFirstCompany}
-                </button>
-              </div>
-            </div>
+            <EmptyState
+              kind="people"
+              title={copy.emptyTitle}
+              description={copy.emptyDescription}
+              actions={[{ label: copy.createFirstCompany, onClick: openCreateCompanyModal }]}
+              hint={copy.emptyOnboardingHint}
+            />
           ) : null}
 
           {!loading && !error && companies.length > 0 ? (

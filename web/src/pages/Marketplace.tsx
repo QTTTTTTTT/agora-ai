@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiDelete, apiGet, apiPost, formatApiError } from "../lib/api";
 import { formatDateTimeForLanguage, formatMoneyMinorForDisplay, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
+import { EmptyState } from "../components/EmptyState";
 
 interface CompanyOverview {
   id: string;
@@ -214,8 +215,10 @@ const Marketplace: React.FC = () => {
             createSubtitle: "Choose one of your funds and team members to publish a public marketplace listing.",
             marketTab: "Market listings",
             myTab: "My listings",
-            marketEmpty: "There are no public listings yet.",
-            myEmpty: "You have not published any listings yet.",
+            marketEmpty: "No public listings yet",
+            marketEmptyDescription: "Once other strategy owners list a member here, this is where you'll discover, bid and recruit them. Switch to your fund's Team Management to package one of your own members for sale.",
+            myEmpty: "You haven't published any listings",
+            myEmptyDescription: "List a fund member with a public summary so other strategy owners can review their track record and recruit them. You'll keep ownership until a buyer's bid is accepted.",
             directPrice: "Buy now",
             listingCreated: "Listing published successfully.",
             listingCancelled: "Listing cancelled.",
@@ -292,8 +295,10 @@ const Marketplace: React.FC = () => {
             createSubtitle: "选择自己的基金和团队成员，生成一个对全体用户可见的挂牌。",
             marketTab: "市场挂牌",
             myTab: "我的挂牌",
-            marketEmpty: "当前还没有公开挂牌。",
-            myEmpty: "你还没有发布过挂牌。",
+            marketEmpty: "暂时没有公开挂牌",
+            marketEmptyDescription: "当其他策略主理人把成员公开挂牌后，你可以在此查看历史业绩、出价并吸纳。也可以前往团队管理把自家成员打包上架。",
+            myEmpty: "你还没有发布过挂牌",
+            myEmptyDescription: "把自家成员打包公开挂牌，附带可见摘要以供其他策略方了解业绩。在买家出价被接受前，你保留成员的所有权与决策权。",
             directPrice: "一口价",
             listingCreated: "成员已上架到交易市场。",
             listingCancelled: "挂牌已取消。",
@@ -739,9 +744,11 @@ const Marketplace: React.FC = () => {
           </div>
 
           {visibleListings.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-gray-200 bg-white p-8 text-center text-sm text-gray-500 shadow-sm">
-              {selectedTab === "market" ? copy.marketEmpty : copy.myEmpty}
-            </div>
+            <EmptyState
+              kind="marketplace"
+              title={selectedTab === "market" ? copy.marketEmpty : copy.myEmpty}
+              description={selectedTab === "market" ? copy.marketEmptyDescription : copy.myEmptyDescription}
+            />
           ) : (
             <div className="space-y-4">
               {visibleListings.map((listing) => {

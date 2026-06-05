@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { EmptyState } from "../components/EmptyState";
 import {
   apiGet,
   ApiError,
@@ -50,7 +51,9 @@ const COPY = {
     subtitle: "英式递增 + anti-sniping + 钱包冻结。卖方设定起拍价 / 保留价 / 最小递增 / 反狙击窗口，竞拍者出价时钱包资金被冻结，被超出后自动退款，最高价在截止时间结算并克隆 agent。",
     refresh: "刷新",
     listLoading: "正在加载拍卖…",
-    listEmpty: "暂无进行中的拍卖。点击右上角发起一场。",
+    listEmpty: "暂无进行中的拍卖",
+    listEmptyDescription: "目前还没有正在进行的拍卖。你可以打开右侧面板，把基金内的成员发起一场新拍卖；起拍价 / 保留价 / 反狙击窗口都可自定义。",
+    listEmptyAction: "去右侧发起一场",
     createTab: "发起拍卖",
     listTab: "进行中",
     fund: "基金",
@@ -91,7 +94,9 @@ const COPY = {
     subtitle: "English-ascending auctions with wallet-hold escrow and anti-sniping. Sellers set a starting price, optional reserve, minimum increment and anti-snipe window; bidders' wallets are held on each top bid and refunded automatically when outbid.",
     refresh: "Refresh",
     listLoading: "Loading auctions…",
-    listEmpty: "No live auctions yet. Open one from the right panel.",
+    listEmpty: "No live auctions yet",
+    listEmptyDescription: "Nobody has put a member up for auction yet. Open the panel on the right to launch one — pick start / reserve / minimum increment, and an anti-sniping window.",
+    listEmptyAction: "Open the create panel",
     createTab: "Create",
     listTab: "Live",
     fund: "Fund",
@@ -366,7 +371,13 @@ export default function Auctions() {
           {loading ? (
             <div className="py-12 text-center text-sm text-slate-500">{copy.listLoading}</div>
           ) : auctions.length === 0 ? (
-            <div className="py-12 text-center text-sm text-slate-500">{copy.listEmpty}</div>
+            <EmptyState
+              kind="alarm"
+              title={copy.listEmpty}
+              description={copy.listEmptyDescription}
+              bare
+              className="py-8"
+            />
           ) : (
             <ul className="space-y-2">
               {auctions.map((auction) => (
