@@ -10,8 +10,45 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <!--
+      Pre-React theme bootstrap.
+      Reads the persisted theme preference (web/src/lib/theme.tsx
+      writes to localStorage('fundai.theme')) and applies the
+      `.dark` class on <html> BEFORE React mounts. Without this
+      step a user with mode='dark' sees a bright flash for ~50ms
+      while the JS bundle parses, then the page snaps to dark —
+      the canonical "FOIT" of dark-mode implementations. Tiny
+      synchronous script + try/catch on every storage access so
+      nothing here can prevent the page from loading.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("fundai.theme");
+          var systemDark =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var resolved =
+            stored === "dark"
+              ? "dark"
+              : stored === "light"
+                ? "light"
+                : systemDark
+                  ? "dark"
+                  : "light";
+          if (resolved === "dark") {
+            document.documentElement.classList.add("dark");
+            document.documentElement.style.colorScheme = "dark";
+          } else {
+            document.documentElement.style.colorScheme = "light";
+          }
+        } catch (e) {
+          /* localStorage unavailable — fall through to default light */
+        }
+      })();
+    </script>
   </head>
-  <body class="antialiased">
+  <body class="antialiased bg-white text-gray-900 dark:bg-slate-900 dark:text-slate-100">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -4,6 +4,16 @@ export default {
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
+  // Class-based dark mode: Tailwind's `dark:` variant matches when
+  // a `dark` class is present on a parent (we apply it to <html>
+  // from the ThemeProvider). The alternative `media` strategy
+  // would only follow `prefers-color-scheme` system-wide, which
+  // doesn't let users pick "force light" or "force dark"
+  // independent of OS — and that's a feature most users want,
+  // especially investors who run alongside a chart-tool that
+  // disagrees with their OS setting. The `system` mode in our
+  // own ThemeProvider falls back to `prefers-color-scheme`.
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {

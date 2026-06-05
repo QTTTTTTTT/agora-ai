@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import './index.css'
 import { PreferencesProvider } from './lib/preferences'
+import { ThemeProvider } from './lib/theme'
 
 // Vite emits a `vite:preloadError` window event when a chunk referenced
 // from a `<link rel="modulepreload">` tag (i.e. the entry-time preloads,
@@ -38,8 +39,10 @@ window.addEventListener('vite:preloadError', (event) => {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <PreferencesProvider>
-      <App />
-    </PreferencesProvider>
+    <ThemeProvider>
+      <PreferencesProvider>
+        <App />
+      </PreferencesProvider>
+    </ThemeProvider>
   </React.StrictMode>,
 )
