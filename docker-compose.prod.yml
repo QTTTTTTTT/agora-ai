@@ -17,7 +17,15 @@ services:
     environment:
       APP_ENV: production
       DATABASE_URL: ${APP_DATABASE_URL:-postgres://${POSTGRES_USER:-fundai}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-fundai}?sslmode=${APP_DATABASE_SSLMODE:-disable}}
-      ALLOW_INTERNAL_COMPOSE_DB: ${ALLOW_INTERNAL_COMPOSE_DB:-1}
+      # ALLOW_INTERNAL_COMPOSE_DB: secure-by-default. When 0 (the default
+      # here) the app refuses to boot in production if DATABASE_URL has
+      # sslmode=disable (see server/cmd/server/main.go validateConfig).
+      # Operators running same-host Compose where the postgres service is
+      # private to the bridge network can set ALLOW_INTERNAL_COMPOSE_DB=1
+      # in their .env to opt back into plaintext for that single legitimate
+      # case. Off-host RDS / Aurora / managed Postgres MUST keep this 0
+      # and use sslmode=require/verify-full in DATABASE_URL.
+      ALLOW_INTERNAL_COMPOSE_DB: ${ALLOW_INTERNAL_COMPOSE_DB:-0}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET to a strong production secret}
       MODEL_CONFIG_API_KEY_SECRET: ${MODEL_CONFIG_API_KEY_SECRET:?set MODEL_CONFIG_API_KEY_SECRET to a strong independent production secret}
       CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS to your production frontend origin list}
