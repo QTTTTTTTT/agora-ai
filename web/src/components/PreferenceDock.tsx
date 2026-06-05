@@ -86,8 +86,16 @@ const PreferenceDock: React.FC = () => {
           type="button"
           onClick={() => setOpen((value) => !value)}
           className="rounded-full border border-gray-200 bg-white/90 px-3 py-2 text-xs font-medium text-gray-600 shadow-md backdrop-blur transition hover:bg-white hover:text-gray-900 dark:border-slate-700 dark:bg-slate-800/90 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+          aria-label={copy.toggle}
         >
-          {copy.toggle} · {language === "en-US" ? "EN" : "中"} · {displayCurrency} · {themeLabel}
+          {/* Compact label on mobile (icon only — language /
+              currency / theme are already viewable inside the
+              expanded panel anyway). The full chip with the
+              current preferences renders at sm+. */}
+          <span className="hidden sm:inline">
+            {copy.toggle} · {language === "en-US" ? "EN" : "中"} · {displayCurrency} · {themeLabel}
+          </span>
+          <span aria-hidden="true" className="sm:hidden">⚙</span>
         </button>
       </div>
     </div>
