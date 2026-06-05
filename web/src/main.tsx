@@ -4,6 +4,7 @@ import App from './App'
 import './index.css'
 import { PreferencesProvider } from './lib/preferences'
 import { ThemeProvider } from './lib/theme'
+import { NotificationProvider, NotificationBridge } from './lib/notificationCenter'
 
 // Vite emits a `vite:preloadError` window event when a chunk referenced
 // from a `<link rel="modulepreload">` tag (i.e. the entry-time preloads,
@@ -41,7 +42,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ThemeProvider>
       <PreferencesProvider>
-        <App />
+        <NotificationProvider>
+          {/* Bridges the imperative notifyPush() facade in
+              notificationCenter.tsx onto the live React provider
+              so non-React modules (api.ts, SSE handlers) can
+              create notifications without holding a hook
+              reference. Mirrors the ToastViewport pattern. */}
+          <NotificationBridge />
+          <App />
+        </NotificationProvider>
       </PreferencesProvider>
     </ThemeProvider>
   </React.StrictMode>,
