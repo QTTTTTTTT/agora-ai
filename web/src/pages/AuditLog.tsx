@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { exportFundAuditLogsCSV, fetchFundAuditLogs, formatApiError, type AuditLogEntry } from "../lib/api";
 import { formatDateTimeForLanguage, useAppPreferences } from "../lib/preferences";
+import { VirtualList } from "../components/VirtualList";
 
 function humanize(value?: string): string {
   if (!value) return "-";
@@ -53,7 +54,11 @@ const AuditLog: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetchFundAuditLogs(fundId, 100);
+      // 500 row cap (was 100) — the table is now virtualized via
+      // <VirtualList>, so DOM cost stays O(visible-rows) regardless
+      // of total entries returned. Server-side cap on this endpoint
+      // is enforced separately and remains the authoritative ceiling.
+      const response = await fetchFundAuditLogs(fundId, 500);
       setEntries(response.entries ?? []);
     } catch (err) {
       setError(formatApiError(err, copy.loadError));
@@ -123,34 +128,40 @@ const AuditLog: React.FC = () => {
           <p className="mt-2 text-sm text-gray-500">{copy.emptyDescription}</p>
         </div>
       ) : (
+        // Virtualized via <VirtualList>: only ~12 rows are mounted at
+        // any time regardless of how many entries the API returned.
+        // Header is rendered as a sibling div (CSS Grid columns
+        // matching the row layout) so it sticks above the scroll
+        // viewport — react-window doesn't compose with <thead>/<tbody>
+        // because rows must be absolutely positioned.
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
-            <thead className="bg-gray-50 text-xs uppercase tracking-wider text-gray-500">
-              <tr>
-                <th className="px-4 py-3 text-left">{copy.columns.time}</th>
-                <th className="px-4 py-3 text-left">{copy.columns.action}</th>
-                <th className="px-4 py-3 text-left">{copy.columns.resource}</th>
-                <th className="px-4 py-3 text-left">{copy.columns.details}</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {entries.map((entry) => (
-                <tr key={entry.id} className="align-top hover:bg-gray-50">
-                  <td className="whitespace-nowrap px-4 py-3 text-gray-500">{formatDateTimeForLanguage(entry.createdAt, language)}</td>
-                  <td className="px-4 py-3">
-                    <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">{humanize(entry.action)}</span>
-                  </td>
-                  <td className="px-4 py-3 text-gray-700">
-                    <div className="font-medium">{humanize(entry.resourceType)}</div>
-                    <div className="mt-1 max-w-[220px] truncate font-mono text-[11px] text-gray-400">{entry.resourceId}</div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <pre className="max-w-xl overflow-x-auto rounded-lg bg-gray-50 p-3 text-[11px] leading-relaxed text-gray-600">{JSON.stringify(entry.details ?? {}, null, 2)}</pre>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="grid grid-cols-[180px_140px_minmax(180px,1fr)_minmax(280px,2fr)] bg-gray-50 px-4 py-3 text-xs uppercase tracking-wider text-gray-500">
+            <div>{copy.columns.time}</div>
+            <div>{copy.columns.action}</div>
+            <div>{copy.columns.resource}</div>
+            <div>{copy.columns.details}</div>
+          </div>
+          <VirtualList
+            items={entries}
+            itemHeight={120}
+            height={Math.min(720, entries.length * 120 + 8)}
+            itemKey={(_, item) => item.id}
+            renderRow={(entry) => (
+              <div className="grid grid-cols-[180px_140px_minmax(180px,1fr)_minmax(280px,2fr)] items-start gap-x-4 border-b border-gray-100 bg-white px-4 py-3 hover:bg-gray-50">
+                <div className="whitespace-nowrap text-sm text-gray-500">{formatDateTimeForLanguage(entry.createdAt, language)}</div>
+                <div>
+                  <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">{humanize(entry.action)}</span>
+                </div>
+                <div className="text-sm text-gray-700">
+                  <div className="font-medium">{humanize(entry.resourceType)}</div>
+                  <div className="mt-1 max-w-[220px] truncate font-mono text-[11px] text-gray-400">{entry.resourceId}</div>
+                </div>
+                <div>
+                  <pre className="max-h-[88px] max-w-xl overflow-hidden rounded-lg bg-gray-50 p-3 text-[11px] leading-relaxed text-gray-600">{JSON.stringify(entry.details ?? {}, null, 2)}</pre>
+                </div>
+              </div>
+            )}
+          />
         </div>
       )}
     </div>
