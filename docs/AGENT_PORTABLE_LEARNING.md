@@ -366,26 +366,37 @@ Logs to grep for:
 
 ## Future work
 
-1. **Wire `TeamProvider` in `attachAlphaContext`.** Today
-   `BuildContext` is called without a provider so the
-   cross-fund branch is dormant. Plumbing requires:
-   - FundRepo or a thin query helper for `fund_team_members`.
-   - The regime classifier output for the fund's primary
-     instrument (already produced by the regime package for
-     other consumers).
-   - `fund.config.allow_agent_portable_imports` parser.
-2. **Per-row export opt-out.** Currently only
+1. ~~**Wire `TeamProvider` in `attachAlphaContext`.**~~ ✅
+   Closed by AP10 (`<this commit>`). The
+   `agentPortableTeamProvider` closure in
+   `cmd/server/agent_portable_team_provider.go` now resolves
+   active team agents + per-fund opt-out at render time.
+   `buildAgentTrackRecord` plumbs it into `BuildContext`.
+2. **Per-fund regime selection.** AP10 wired everything
+   except the `currentRegime` value (still empty pending a
+   product decision). The regime gate (AP5) is a no-op as
+   long as the writer side isn't stamping regimes — which
+   it isn't today. When a writer (S9.1 backfill driver,
+   realtime sink) starts passing `WriteOptions.RegimeStamp`,
+   the read path will need a fund-level regime resolver:
+   primary sleeve regime? NAV-weighted aggregate? a
+   per-fund `fund.config.regime_override` pin? This is a
+   product call, not a wiring call. Until then, all
+   inherited lessons are treated as regime-agnostic
+   (the conservative default that lets pre-AP5 backlog
+   rows pass).
+3. **Per-row export opt-out.** Currently only
    `sensitivity = 'secret'` blocks a row. A future shape
    could be a per-row `cross_fund_disabled` boolean on
    `memories` that the writer sets when the PM clicks a
    "don't share this" toggle. The `IsCrossFundEligible`
    helper would extend; the SQL gate would gain one more
    AND.
-3. **Marketplace ↔ agent_portable bridge.** If an agent's
+4. **Marketplace ↔ agent_portable bridge.** If an agent's
    lessons become valuable to funds that DON'T have that
    agent on their team, the right UX is "buy this agent's
    notebook" via the marketplace flow — a separate ADR.
-4. **React LessonList surface.** If operators want to
+5. **React LessonList surface.** If operators want to
    audit / filter / curate the lessons backlog, we'll
    eventually need a dedicated UI page. AP8 made the
    `InheritedFromOtherFund` flag available via the LessonRow
@@ -401,7 +412,11 @@ Logs to grep for:
 | `server/internal/alphalesson/repo_test.go`             | AP2 / AP4 / AP5 / AP7 |
 | `server/internal/alphalesson/context.go`               | AP8 |
 | `server/internal/alphalesson/context_test.go`          | AP3 (row-shape update) / AP8 |
-| `docs/AGENT_PORTABLE_LEARNING.md`                      | AP9 (this doc) |
+| `server/cmd/server/pm_path_feature_flag.go`            | AP10 (allow_agent_portable_imports resolver) |
+| `server/cmd/server/agent_portable_team_provider.go`    | AP10 (production wiring) |
+| `server/cmd/server/agent_portable_team_provider_test.go` | AP10 |
+| `server/cmd/server/wiring_adapters.go`                 | AP10 (TeamProvider plumbed into BuildContext) |
+| `docs/AGENT_PORTABLE_LEARNING.md`                      | AP9 (this doc) / AP10 (status update) |
 
 ## Commit ledger
 
@@ -414,4 +429,5 @@ Logs to grep for:
 | `066b896` | AP6   | migration 092 backfill historical alpha lessons |
 | `30caa36` | AP7   | secret-sensitivity gate + IsCrossFundEligible  |
 | `b2c37e1` | AP8   | inheritance label + TeamProvider hook          |
-| (this commit) | AP9 | ADR                                          |
+| `cd236d9` | AP9   | this ADR (initial publish)                     |
+| (this commit) | AP10 | TeamProvider wired in production; feature LIVE |

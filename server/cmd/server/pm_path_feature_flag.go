@@ -50,6 +50,26 @@ type pmPathFeatureFlagEnvelope struct {
 	// of the flip need a separate reconciliation pass, not a
 	// silent flag flip mid-day.
 	FuturesCashLedgerV2 bool `json:"futures_cash_ledger_v2"`
+	// AllowAgentPortableImports (AP10) mirrors the per-fund
+	// opt-OUT lever for cross-fund agent-portable lessons
+	// (docs/AGENT_PORTABLE_LEARNING.md).
+	//
+	// Polarity is INVERTED from the other flags here: this one
+	// defaults to TRUE (the feature is on; the flag is the
+	// off-switch), whereas every other flag in this envelope
+	// defaults to FALSE (opt-in features). The default is
+	// modelled by *bool — pre-AP10 funds have no key set, the
+	// pointer is nil, the resolver treats that as "opt-in"
+	// (allow imports). An explicit `false` is the only way to
+	// hard-disable. See agentPortableImportsOptOut().
+	//
+	// Why a pointer rather than the omitempty + bool trick:
+	// JSON's omitempty makes the absent and "false" cases
+	// indistinguishable, which would force us to choose ONE
+	// default at the type level. *bool keeps the absent case
+	// observable so the resolver can default to "import on"
+	// while still letting an operator explicitly write false.
+	AllowAgentPortableImports *bool `json:"allow_agent_portable_imports,omitempty"`
 }
 
 // pmPathChildSplittingEnabled returns true iff the fund's persisted
@@ -93,4 +113,55 @@ func futuresCashLedgerV2Enabled(raw json.RawMessage) bool {
 		return false
 	}
 	return env.FuturesCashLedgerV2
+}
+
+// agentPortableImportsOptOut reports whether the fund has
+// EXPLICITLY opted out of receiving cross-fund agent-portable
+// lessons (AP10 wiring of docs/AGENT_PORTABLE_LEARNING.md).
+//
+// Polarity is the inverse of the splitter / v2 resolvers above:
+// the agent-portable feature DEFAULTS TO ON, so this resolver
+// returns true only when the operator has explicitly written
+// `"allow_agent_portable_imports": false` into fund.config.
+//
+// Truth table:
+//
+//	raw bytes shape                          → optedOut
+//	-------------------------------------     --------
+//	nil / empty                               false (= imports allowed)
+//	malformed JSON                            true  (= imports BLOCKED)
+//	{} / key absent                           false (= imports allowed)
+//	{ allow_agent_portable_imports: true  }   false (= imports allowed)
+//	{ allow_agent_portable_imports: false }   true  (= imports blocked)
+//
+// The malformed-JSON case is deliberately FAIL-SAFE here:
+// every other resolver in this file falls back to "feature
+// off" when the bytes don't parse, but the symmetric
+// fail-safe for an opt-out feature is "block the feature"
+// because that's the conservative answer for a regulated /
+// multi-LP fund whose config might be in flux. A noisy
+// false-positive on the import block is recoverable; a silent
+// import leak through a corrupted config blob is not.
+//
+// Caller is the AP10 TeamProvider in agentPortableTeamProvider
+// (wiring_adapters.go); the value is passed straight into
+// alphalesson.ListLessonsParams.ExplicitlyOptedOut.
+func agentPortableImportsOptOut(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		// Pre-AP10 funds have no key. The new feature
+		// applies — they're opt-IN by default.
+		return false
+	}
+	var env pmPathFeatureFlagEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		// Fail-safe in the BLOCK direction. See doc above.
+		return true
+	}
+	if env.AllowAgentPortableImports == nil {
+		// Key absent inside an otherwise-valid blob → keep
+		// default (allow imports).
+		return false
+	}
+	// Key present + explicit boolean → opt-out iff false.
+	return !*env.AllowAgentPortableImports
 }

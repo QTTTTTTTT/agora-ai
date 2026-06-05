@@ -16965,11 +16965,38 @@ func (a *runtimePMAgent) buildLessonReplay(ctx context.Context, fundID string) s
 // Both repos are nil-safe — the renderer returns "" when neither
 // side has data, which matches the legacy behaviour for brand-new
 // funds without a reputation history.
+//
+// AP10 added the TeamProvider plumbing so the cross-fund
+// agent_portable retrieval branch in alphalesson.ListLessons
+// actually fires in production. Pre-AP10 the call passed an
+// empty ContextOptions{} and the cross-fund branch was dormant
+// regardless of how many agent_portable rows were sitting in
+// the memories table. Now we resolve the team agent UUIDs
+// (active rows of fund_team_members) and the per-fund opt-out
+// flag (fund.config.allow_agent_portable_imports) at render
+// time, both nil-safe so legacy / smoke deployments keep their
+// pre-AP10 markdown shape.
+//
+// regime: NOT yet wired. The regime gate (AP5) takes a single
+// "current regime" string for the fund, but regime.Service
+// classifies per-instrument and a fund typically has many
+// positions — picking a fund-level regime is a product
+// decision (primary sleeve? NAV-weighted aggregate?
+// fund.config-pinned override?) that's out of scope for the
+// AP10 wiring. Until that decision is made, CurrentRegime
+// stays empty and the regime gate is a no-op (every lesson
+// passes the regime-agnostic fallback). This is correct in
+// the current state of the world because no writer is
+// stamping RegimeStamp yet — a regime gate that filters on
+// "" would produce empty result sets for every cross-fund
+// retrieval and silently break the feature.
 func (a *runtimePMAgent) buildAgentTrackRecord(ctx context.Context, fundID string) string {
 	if a == nil || a.agentReputationRepo == nil || a.alphaLessonRepo == nil {
 		return ""
 	}
-	block, err := alphalesson.BuildContext(ctx, a.agentReputationRepo, a.alphaLessonRepo, fundID, alphalesson.ContextOptions{})
+	block, err := alphalesson.BuildContext(ctx, a.agentReputationRepo, a.alphaLessonRepo, fundID, alphalesson.ContextOptions{
+		TeamProvider: agentPortableTeamProvider(a.fundRepo, a.teamRepo),
+	})
 	if err != nil {
 		slog.Debug("decision prompt: agent track record unavailable",
 			"fund_id", fundID,
