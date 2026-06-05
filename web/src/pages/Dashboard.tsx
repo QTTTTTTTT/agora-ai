@@ -39,6 +39,7 @@ import {
 import { CorpActionTimeline } from "../components/CorpActionTimeline";
 import { BenchmarkChart } from "../components/BenchmarkChart";
 import { HoldingsTrendsGrid } from "../components/HoldingsTrendsGrid";
+import { SkeletonCard } from "../components/Skeleton";
 
 interface FundUniverse {
   mode: string;
@@ -1204,11 +1205,25 @@ export default function Dashboard() {
   }, []);
 
   if (loading) {
+    // Component-level skeletons reserve the cards' shape so the
+    // dashboard doesn't visually jump when data arrives. The
+    // SR-only `copy.loading` text below preserves the spoken
+    // affordance for screen readers — the visual SkeletonCards
+    // are aria-hidden so the announcement isn't repeated thrice.
     return (
-      <div className="flex h-96 items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600" />
-          <p className="text-sm text-gray-500">{copy.loading}</p>
+      <div className="space-y-6">
+        <p role="status" aria-live="polite" className="sr-only">
+          {copy.loading}
+        </p>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <SkeletonCard rows={2} metrics />
+          <SkeletonCard rows={2} metrics />
+          <SkeletonCard rows={2} metrics />
+        </div>
+        <SkeletonCard rows={4} />
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <SkeletonCard rows={5} />
+          <SkeletonCard rows={5} />
         </div>
       </div>
     );
