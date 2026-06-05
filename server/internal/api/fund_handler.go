@@ -2028,6 +2028,11 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/funds/{fundId}/workflow/step", h.TriggerStep)
 	mux.HandleFunc("GET /api/funds/{fundId}/workflow/status", h.GetWorkflowStatus)
 	mux.HandleFunc("GET /api/funds/{fundId}/workflow/next-run", h.GetWorkflowNextRun)
+	// U4 step-1 — SSE companion to /workflow/status. Reuses the same
+	// service-side method so authorization and data shape stay
+	// identical; pushes diff-only frames on a 2s tick. Implementation
+	// lives in workflow_stream.go.
+	mux.HandleFunc("GET /api/funds/{fundId}/workflow/stream", h.StreamWorkflowStatus)
 	mux.HandleFunc("GET /api/funds/{fundId}/llm-usage", h.GetLLMUsageVisibility)
 	mux.HandleFunc("GET /api/funds/{fundId}/audit", h.ListAuditLogs)
 

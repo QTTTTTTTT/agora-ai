@@ -30,6 +30,7 @@ import {
 } from "../lib/api";
 import { useAppPreferences } from "../lib/preferences";
 import { toast } from "../lib/toast";
+import { useWorkflowStream } from "../lib/useWorkflowStream";
 
 type Language = "zh-CN" | "en-US";
 
@@ -49,6 +50,12 @@ interface Messages {
   needResumeHint: string;
   errorTitle: string;
   todayLabel: string;
+  liveBanner: string;
+  liveConnected: string;
+  liveDisconnected: string;
+  liveTerminal: string;
+  liveCurrentStep: string;
+  liveNoActiveRun: string;
 }
 
 const messages: Record<Language, Messages> = {
@@ -69,6 +76,12 @@ const messages: Record<Language, Messages> = {
     needResumeHint: "如某步骤失败需要重跑，请通过运营渠道反馈，由平台 admin 触发。",
     errorTitle: "加载失败",
     todayLabel: "今日",
+    liveBanner: "实时工作流状态",
+    liveConnected: "已连接",
+    liveDisconnected: "重连中…",
+    liveTerminal: "今日工作流已结束",
+    liveCurrentStep: "当前步骤",
+    liveNoActiveRun: "今日尚无运行中的工作流，下方为最近落库的 checkpoint。",
   },
   "en-US": {
     title: "Workflow status",
@@ -87,6 +100,12 @@ const messages: Record<Language, Messages> = {
     needResumeHint: "If a step needs to be re-fired, raise a support ticket — a platform admin will trigger the resume so the audit trail stays intact.",
     errorTitle: "Failed to load",
     todayLabel: "Today",
+    liveBanner: "Live workflow status",
+    liveConnected: "Live",
+    liveDisconnected: "Reconnecting…",
+    liveTerminal: "Today's run has finished",
+    liveCurrentStep: "Current step",
+    liveNoActiveRun: "No workflow is running right now. The table below shows the most recent checkpoints on file.",
   },
 };
 
@@ -143,6 +162,18 @@ export default function FundWorkflow(): JSX.Element {
   const [checkpoints, setCheckpoints] = useState<WorkflowCheckpoint[]>([]);
   const [loading, setLoading] = useState(false);
 
+  // U4 step-1 — subscribe to the workflow SSE stream so the banner
+  // above the checkpoint table updates without manual refresh while
+  // the run is in flight. Disabled when fundId is empty (route
+  // hasn't matched yet) or when the user is looking at a historical
+  // trading date that's clearly not today's run; for those there's
+  // nothing live to show.
+  const enableStream = fundId !== "" && date === todayISO();
+  const { status: liveStatus, connected, terminal } = useWorkflowStream({
+    fundId,
+    enabled: enableStream,
+  });
+
   const fetchData = useCallback(async () => {
     if (!fundId || !date) return;
     setLoading(true);
@@ -171,6 +202,60 @@ export default function FundWorkflow(): JSX.Element {
         <h1 className="text-2xl font-semibold text-gray-900">{t.title}</h1>
         <p className="mt-1 max-w-3xl text-sm leading-relaxed text-gray-600">{t.subtitle}</p>
       </header>
+
+      {enableStream ? (
+        <section
+          className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm"
+          aria-live="polite"
+        >
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <h2 className="text-base font-semibold text-gray-900">{t.liveBanner}</h2>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
+                terminal
+                  ? "bg-zinc-100 text-zinc-700"
+                  : connected
+                    ? "bg-emerald-100 text-emerald-700"
+                    : "bg-amber-100 text-amber-700"
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  terminal
+                    ? "bg-zinc-500"
+                    : connected
+                      ? "bg-emerald-500 animate-pulse"
+                      : "bg-amber-500"
+                }`}
+                aria-hidden="true"
+              />
+              {terminal ? t.liveTerminal : connected ? t.liveConnected : t.liveDisconnected}
+            </span>
+          </div>
+          {liveStatus ? (
+            <div className="mt-3 flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm text-gray-700">
+              <span className="font-mono">
+                {t.colStatus}:{" "}
+                <span className="font-medium text-gray-900">{liveStatus.state}</span>
+              </span>
+              {liveStatus.step ? (
+                <span className="font-mono">
+                  {t.liveCurrentStep}:{" "}
+                  <span className="font-medium text-gray-900">{liveStatus.step}</span>
+                </span>
+              ) : null}
+              {typeof liveStatus.progressPercent === "number" ? (
+                <span className="font-mono">
+                  {liveStatus.progressPercent}% (
+                  {liveStatus.completedSteps ?? 0}/{liveStatus.totalSteps ?? 0})
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-gray-500">{t.liveNoActiveRun}</p>
+          )}
+        </section>
+      ) : null}
 
       <section className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-end gap-3">

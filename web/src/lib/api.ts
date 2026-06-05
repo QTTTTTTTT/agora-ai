@@ -4337,6 +4337,40 @@ export function buildPortfolioQuotesStreamUrl(fundId: string, intervalMs?: numbe
   return buildUrl(url);
 }
 
+// buildWorkflowStreamUrl is the U4 step-1 SSE companion to
+// /api/funds/{fundId}/workflow/status. The server pushes a frame when
+// the fingerprinted fields (state / step / progress / counts / completedAt)
+// change, plus 15s heartbeats; cookie auth, same clamp range as
+// buildPortfolioQuotesStreamUrl. Closes itself when the workflow
+// reaches a terminal state so the client doesn't hold an idle socket
+// open after the daily run finishes.
+export function buildWorkflowStreamUrl(fundId: string, intervalMs?: number): string {
+  let url = `/api/funds/${fundId}/workflow/stream`;
+  if (typeof intervalMs === "number" && intervalMs > 0) {
+    url += `?interval=${intervalMs}ms`;
+  }
+  return buildUrl(url);
+}
+
+// WorkflowStatusFrame is the JSON shape pushed on the `workflow` SSE
+// event. Mirrors api.WorkflowStatus on the backend with optional
+// fields kept optional so the typing handles the reduced payload that
+// /workflow/stream emits when nothing has changed since the last
+// frame.
+export interface WorkflowStatusFrame {
+  fundId: string;
+  tradingDate?: string;
+  state: string;
+  step?: string;
+  startedAt?: string;
+  completedAt?: string;
+  runningForMs?: number;
+  progressPercent?: number;
+  completedSteps?: number;
+  failedSteps?: number;
+  totalSteps?: number;
+}
+
 // PortfolioQuote mirrors the api.PortfolioQuote payload pushed over the
 // quotes SSE stream. The keys match the Position freshness fields so a
 // single React row-patch handler can update both data sources.
