@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { exportFundAuditLogsCSV, fetchFundAuditLogs, formatApiError, type AuditLogEntry } from "../lib/api";
 import { formatDateTimeForLanguage, useAppPreferences } from "../lib/preferences";
 import { VirtualList } from "../components/VirtualList";
+import { useListSearch } from "../lib/useListSearch";
 
 function humanize(value?: string): string {
   if (!value) return "-";
@@ -32,6 +33,9 @@ const AuditLog: React.FC = () => {
             emptyTitle: "No audit events yet",
             emptyDescription: "Auditable events will appear here after protected data is read, exported, snapshotted, or shared.",
             columns: { time: "Time", action: "Action", resource: "Resource", details: "Details" },
+            searchPlaceholder: "Search by action, resource, or detail…",
+            searchEmpty: "No entries match your search.",
+            matchSummary: "Showing {{matched}} of {{total}} entries",
           }
         : {
             title: "统一审计日志",
@@ -45,6 +49,9 @@ const AuditLog: React.FC = () => {
             emptyTitle: "暂无审计事件",
             emptyDescription: "当受保护数据被读取、导出、生成快照或共享后，相关事件会出现在这里。",
             columns: { time: "时间", action: "动作", resource: "资源", details: "详情" },
+            searchPlaceholder: "搜索动作、资源或详情…",
+            searchEmpty: "未找到匹配的审计事件。",
+            matchSummary: "共 {{total}} 条，匹配 {{matched}} 条",
           },
     [language],
   );
@@ -70,6 +77,22 @@ const AuditLog: React.FC = () => {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Client-side debounced search across action, resource type / id,
+  // and a stringified version of the JSON detail. The detail
+  // serialisation is cheap because we only do it for the visible
+  // entries (≤500); for larger volumes future work can move this
+  // to a server-side ?q= parameter.
+  const search = useListSearch(entries, (entry) =>
+    [
+      entry.action,
+      entry.resourceType,
+      entry.resourceId,
+      JSON.stringify(entry.details ?? {}),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
 
   const handleExport = useCallback(async () => {
     if (!fundId || exporting) return;
@@ -134,6 +157,28 @@ const AuditLog: React.FC = () => {
         // matching the row layout) so it sticks above the scroll
         // viewport — react-window doesn't compose with <thead>/<tbody>
         // because rows must be absolutely positioned.
+        <div className="space-y-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <input
+              type="search"
+              value={search.query}
+              onChange={(e) => search.setQuery(e.target.value)}
+              placeholder={copy.searchPlaceholder}
+              aria-label={copy.searchPlaceholder}
+              className="w-full max-w-md rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm placeholder:text-gray-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+            />
+            <p className="text-xs text-gray-500">
+              {copy.matchSummary
+                .replace("{{matched}}", search.matchCount.toString())
+                .replace("{{total}}", entries.length.toString())}
+            </p>
+          </div>
+
+          {search.filtered.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center text-sm text-gray-500 shadow-sm">
+              {copy.searchEmpty}
+            </div>
+          ) : (
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="grid grid-cols-[180px_140px_minmax(180px,1fr)_minmax(280px,2fr)] bg-gray-50 px-4 py-3 text-xs uppercase tracking-wider text-gray-500">
             <div>{copy.columns.time}</div>
@@ -142,9 +187,9 @@ const AuditLog: React.FC = () => {
             <div>{copy.columns.details}</div>
           </div>
           <VirtualList
-            items={entries}
+            items={search.filtered}
             itemHeight={120}
-            height={Math.min(720, entries.length * 120 + 8)}
+            height={Math.min(720, search.filtered.length * 120 + 8)}
             itemKey={(_, item) => item.id}
             renderRow={(entry) => (
               <div className="grid grid-cols-[180px_140px_minmax(180px,1fr)_minmax(280px,2fr)] items-start gap-x-4 border-b border-gray-100 bg-white px-4 py-3 hover:bg-gray-50">
@@ -162,6 +207,8 @@ const AuditLog: React.FC = () => {
               </div>
             )}
           />
+        </div>
+          )}
         </div>
       )}
     </div>
