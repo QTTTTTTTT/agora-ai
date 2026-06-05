@@ -132,6 +132,16 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Enforce bundle size budget
+        # Reads web/bundle-budget.json and fails the build if any
+        # dist/assets/*.js chunk exceeds its named cap or if the
+        # total exceeds totalGzippedKB. Catches regressions like
+        # an accidental moment / lodash import before they ship.
+        # Refresh the budget JSON when an intentional bundle grow
+        # is reviewed — see bundle-budget.json's _comment fields.
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/bundle-budget.sh
+
       - name: Run lint
         run: npm run lint
 

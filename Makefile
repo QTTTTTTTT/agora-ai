@@ -1,4 +1,4 @@
-.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline ha-failover-smoke test-visual-baseline test-visual-baseline-update
+.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline ha-failover-smoke test-visual-baseline test-visual-baseline-update bundle-budget
 
 # Default target prints help so a fresh clone explorer learns the toolbox.
 help:
@@ -21,6 +21,7 @@ help:
 	@echo ""
 	@echo "Performance:"
 	@echo "  make perf-load-baseline Run 30s load against /api/health and capture p50/p95/p99 + 5xx rate"
+	@echo "  make bundle-budget      Enforce frontend bundle size caps against web/bundle-budget.json"
 	@echo ""
 	@echo "Reliability:"
 	@echo "  make ha-failover-smoke  Kill app + bounce postgres, verify recovery within 60s"
@@ -96,3 +97,8 @@ test-visual-baseline:
 
 test-visual-baseline-update:
 	cd web && npm run test:e2e:visual:update
+
+# Enforce frontend bundle size budgets. Expects web/dist to exist
+# (run `cd web && npm run build` first). CI invokes the same script.
+bundle-budget:
+	bash scripts/bundle-budget.sh

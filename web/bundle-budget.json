@@ -1,0 +1,30 @@
+{
+  "_comment_purpose": "Bundle size budgets enforced by scripts/bundle-budget.sh in CI. Sizes are gzipped. The budget is intentionally generous (10-20% headroom over today's measured sizes) so a normal feature PR doesn't bounce; the goal is to catch regressions like 'someone imported moment instead of using Intl' or 'lodash got pulled in', not to nag every kilobyte. Refresh when an intentional bundle grow has been reviewed.",
+  "_comment_units": "All sizes in KB (1024 bytes). Both per-chunk caps and a total cap apply.",
+  "_comment_refresh_workflow": "When a PR legitimately needs more headroom: 1) explain why in the PR description; 2) bump the relevant chunk cap; 3) bump totalGzippedKB if needed; 4) reviewers ack the increase as part of review.",
+
+  "totalGzippedKB": 700,
+
+  "chunkBudgetsGzippedKB": {
+    "charts": 130,
+    "Admin": 90,
+    "index": 100,
+    "vendor": 70,
+    "DecisionCenter": 35,
+    "FundPerformance": 30,
+    "ABTestCompare": 25,
+    "FundSettings": 25,
+    "Dashboard": 25,
+    "TeamManagement": 20,
+    "Backtest": 20,
+    "Companies": 15,
+    "TradeHistory": 15,
+    "AgentLearning": 15,
+    "Marketplace": 15,
+    "MemoryCenter": 15,
+    "Usage": 10,
+    "AccountSecurity": 10
+  },
+
+  "perChunkDefaultGzippedKB": 50
+}
