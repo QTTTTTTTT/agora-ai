@@ -137,6 +137,21 @@ single-spike breaches require a Sentry incident before proceeding.
 Run `scripts/perf-baseline.sh` (template provided) to record the numbers at
 each release into `docs/perf-history.csv` so we can graph drift over time.
 
+For an *active-load* baseline — the passive sampler above only sees numbers
+when the server is already being driven — also run `scripts/perf-load-baseline.sh`
+(or `make perf-load-baseline`). It runs a 30 s burst (concurrency 50) against
+`/api/health` using the in-tree `cmd/perfload` generator, then reads
+`/api/metrics` server-side immediately after, and appends one row to
+`docs/perf-load-history.csv` capturing both client- and server-side
+percentiles. The two views should agree within ~10 ms; a larger gap
+indicates a queue / proxy / TCP-buffer issue worth investigating
+*before* tagging the release.
+
+This is a single-load-point baseline only — for full saturation-curve
+work (1k / 5k / 10k QPS), graduate to k6 or vegeta. The in-tree tool
+exists so we have *some* reproducible perf number today instead of
+deferring it indefinitely.
+
 ---
 
 ## 3. OWASP MASVS L1 self-check (Android)

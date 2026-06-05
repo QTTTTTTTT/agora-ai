@@ -1,4 +1,4 @@
-.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev
+.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline
 
 # Default target prints help so a fresh clone explorer learns the toolbox.
 help:
@@ -18,6 +18,9 @@ help:
 	@echo "  make test               Run server + web unit tests"
 	@echo "  make test-server        go test ./... in server/"
 	@echo "  make test-web           npm test in web/"
+	@echo ""
+	@echo "Performance:"
+	@echo "  make perf-load-baseline Run 30s load against /api/health and capture p50/p95/p99 + 5xx rate"
 
 start:
 	scripts/start.sh
@@ -51,3 +54,13 @@ test-web:
 # .env.bak.<timestamp> before mutating.
 secret-rotate-dev:
 	bash scripts/rotate-dev-secrets.sh
+
+# Companion to scripts/perf-baseline.sh — *active* load baseline.
+# perf-baseline.sh samples /api/metrics passively, which only sees
+# numbers if the server is being driven by traffic right then. This
+# target runs a 30s burst against /api/health (cheapest endpoint, so
+# we measure the HTTP stack, not business logic) and records both
+# client- and server-side latency / 5xx so a regression > 2x shows
+# up release-over-release in docs/perf-load-history.csv.
+perf-load-baseline:
+	bash scripts/perf-load-baseline.sh
