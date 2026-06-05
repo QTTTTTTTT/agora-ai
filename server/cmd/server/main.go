@@ -39,6 +39,7 @@ import (
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/brinson"
 	"github.com/fundai/server/internal/broker"
+	"github.com/fundai/server/internal/dbinstr"
 	"github.com/fundai/server/internal/factorexposure"
 	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/fx"
@@ -446,9 +447,28 @@ func connectDB(cfg *Config) (*sql.DB, error) {
 	var db *sql.DB
 	var err error
 
+	// Slow-query instrumentation. Wraps the lib/pq driver so any
+	// query/exec that exceeds SLOW_QUERY_THRESHOLD_MS gets logged
+	// at WARN level via internal/dbinstr (sanitised query + args
+	// count, never the args themselves). Threshold defaults to 0
+	// (disabled); typical prod setting is 200-500ms. Logged once
+	// at startup so the boot log records whether it's on.
+	driverName := "postgres"
+	thresholdMs := envInt("SLOW_QUERY_THRESHOLD_MS", 0)
+	if thresholdMs > 0 {
+		instrumentedName := "postgres-slowq"
+		_, regErr := dbinstr.RegisterInstrumented("postgres", instrumentedName, time.Duration(thresholdMs)*time.Millisecond)
+		if regErr != nil {
+			slog.Warn("failed to register slow-query driver, falling back to vanilla", "error", regErr)
+		} else {
+			driverName = instrumentedName
+			slog.Info("slow query logging enabled", "threshold_ms", thresholdMs)
+		}
+	}
+
 	maxRetries := 15
 	for i := 0; i < maxRetries; i++ {
-		db, err = sql.Open("postgres", cfg.DatabaseURL)
+		db, err = sql.Open(driverName, cfg.DatabaseURL)
 		if err != nil {
 			slog.Warn("failed to open database", "attempt", i+1, "error", err)
 			time.Sleep(2 * time.Second)
