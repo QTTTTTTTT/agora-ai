@@ -1,4 +1,4 @@
-.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline
+.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline ha-failover-smoke
 
 # Default target prints help so a fresh clone explorer learns the toolbox.
 help:
@@ -21,6 +21,9 @@ help:
 	@echo ""
 	@echo "Performance:"
 	@echo "  make perf-load-baseline Run 30s load against /api/health and capture p50/p95/p99 + 5xx rate"
+	@echo ""
+	@echo "Reliability:"
+	@echo "  make ha-failover-smoke  Kill app + bounce postgres, verify recovery within 60s"
 
 start:
 	scripts/start.sh
@@ -64,3 +67,13 @@ secret-rotate-dev:
 # up release-over-release in docs/perf-load-history.csv.
 perf-load-baseline:
 	bash scripts/perf-load-baseline.sh
+
+# Smoke version of the M2 HA-failover validation. Crashes the app
+# container (expects `restart: unless-stopped` to recover it) and
+# bounces postgres (expects the app's connection pool to retry).
+# Requires the local stack already running via `make start`. This
+# is the floor — a real chaos pipeline still needs to add network
+# partitions, multi-replica failover, etc. (see scripts/ha-failover-smoke.sh
+# for the full caveat list).
+ha-failover-smoke:
+	bash scripts/ha-failover-smoke.sh

@@ -174,6 +174,22 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # M2 — explicit healthcheck mirrors the one baked into the
+    # Dockerfile (line 121-122). Pinning it here too means a contributor
+    # editing compose can reason about the contract without having to
+    # cross-read the Dockerfile, and `docker compose ps` shows the
+    # health column from a single source of truth that travels with the
+    # rest of the service config. Pair this with `restart: unless-stopped`
+    # (above) so a wedged-but-not-crashed app (blocked goroutine, OOM
+    # pause, deadlocked DB pool) gets surfaced as "unhealthy" rather than
+    # silently looking fine. ha-failover-smoke.sh exercises this contract
+    # — see scripts/ha-failover-smoke.sh.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
