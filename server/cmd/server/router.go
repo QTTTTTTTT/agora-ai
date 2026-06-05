@@ -232,17 +232,26 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// outermost (closest to client):
 	//   pathAlias  → rewrite kebab-case URLs to camelCase
 	//   auth       → resolve session cookie → user / role on ctx
+	//   rateLimit  → per-IP token bucket (auth / mutate / read classes)
 	//   cors       → preflight + Origin allow-list
 	//   gzip       → compress JSON / text responses (NOT SSE)
 	//   logger     → record method/path/status/bytes/duration
 	//   recoverer  → catch panics, return 500
+	//
+	// rateLimit sits AFTER cors and BEFORE auth so:
+	// 1) CORS preflight (OPTIONS) responses bypass the bucket
+	//    (browsers send these aggressively and they cost nothing);
+	// 2) /api/auth/login itself IS rate-limited (auth comes after).
+	//
 	// gzip is between cors and logger so logger.bytesWritten reflects
 	// actual on-the-wire size, and so SSE handlers (which set
 	// Content-Type=text/event-stream before WriteHeader) can opt out
 	// via gzip's Content-Type sniff.
+	rateLimitStore := newRateLimiterStore(defaultRateLimitConfig())
 	var handler http.Handler = mux
 	handler = pathAliasMiddleware(handler)
 	handler = authMiddlewareWithKeyring(svc.DB, cfg.effectiveJWTKeyring())(handler)
+	handler = rateLimitMiddleware(rateLimitStore)(handler)
 	handler = corsMiddleware(cfg.CORSOrigins)(handler)
 	handler = gzipMiddleware(handler)
 	handler = requestLogger(svc.Metrics, handler)
