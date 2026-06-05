@@ -401,6 +401,145 @@ Logs to grep for:
    eventually need a dedicated UI page. AP8 made the
    `InheritedFromOtherFund` flag available via the LessonRow
    shape so a future page can render the badge directly.
+6. **Reflection-path coverage gap.** AP1–AP10 only cover
+   the `alphalesson` write path (`origin_kind='alpha_lesson'`,
+   `agent_tag IN ('researcher','analyst',…)`,
+   `agent_id` populated). The parallel **reflection** path
+   in `cmd/server/reflection.go` —
+   `runReflectionCycleWithCadence` →
+   `reflectionMemoryStore.Create` (lines 260–270) — writes
+   `long_term`-layer rows with `Visibility:"fund"` /
+   `OriginKind:"native"` / `AgentID=""` / `agent_tag=NULL`
+   hard-coded. Three downstream consequences:
+
+   - **Backfill 092 skips them.** The migration's WHERE
+     clause requires `origin_kind='alpha_lesson' AND
+     agent_id IS NOT NULL AND tags && ARRAY['researcher',
+     'analyst']`; a reflection row hits zero of those.
+   - **Read path branch 2 skips them.** `ListLessons`
+     gates on `agent_tag IS NOT NULL` before the
+     visibility check, so even if a reflection were
+     manually relabelled `agent_portable` the cross-fund
+     branch would still ignore it.
+   - **Skill broadcast stays fund-local.**
+     `runtimeSkillProposer.ProposeReflectionSkill` fans
+     the reflection out to `fund_team_members` of the
+     **emitting** fund only; an agent who later joins
+     another fund doesn't carry the proposed skill along.
+
+   Most reflection themes observed in production
+   (`reflection:trader:*`, `reflection:workflow:*`) ARE
+   correctly fund-scoped — they encode the fund's
+   execution rules (lot-size gate, splitter cadence, near-
+   close avoidance) or the fund's pipeline configuration
+   (data-feed identity, scheduler cadence), neither of
+   which transfers when an agent moves employer. The gap
+   bites for hypothetical `reflection:researcher:*` /
+   `reflection:analyst:*` themes that distil an agent's
+   directional view on an instrument or sector — those
+   ARE the agent's IP and SHOULD travel.
+
+   Design options (pick ONE; not mutually exclusive with
+   future-work #2 regime selection):
+
+   - **6a. Theme-aware visibility router (low risk).**
+     Extend `runReflectionCycleWithCadence` to inspect
+     the theme extracted by `extractReflectionTheme` and
+     pick `Visibility` per row: `agent_portable` for
+     researcher/analyst themes, `fund` otherwise. Requires
+     plumbing `agent_id` through the source-item pipeline
+     (`collectReflectionSource` already carries
+     `AgentID: row.AgentID.String` per item but drops it
+     before `memory.Reflect`'s grouping step). The
+     simplest landing is a per-group "dominant agent"
+     resolver: if ≥80% of source items in a theme came
+     from the same `agent_id`, attach that ID and route
+     to `agent_portable`; otherwise stay fund-scoped.
+   - **6b. Per-agent reflection cycles (higher fidelity,
+     higher LLM cost).** Run the reflection cycle once
+     per (fund, agent_id) instead of once per fund. Each
+     run produces rows owned by that agent and naturally
+     visibility=`agent_portable`. Cost: today the cycle
+     fires once a week per fund; option 6b multiplies it
+     by team size (~5–10×). The product call is whether
+     the gain (cleaner attribution, no dominant-agent
+     heuristic) is worth ~5× the LLM bill on the
+     reflection step.
+   - **6c. New `long_term_portable` layer (decouples
+     existing readers).** Introduce a sibling layer to
+     `long_term` reserved for cross-fund reflections.
+     Pro: zero impact on the legacy reflection reader
+     (`reflectionServiceAdapter.ListReflections` keeps
+     querying `long_term`, sees only fund-local rows).
+     Con: requires a second `BuildContext`-style splice
+     point in the PM prompt, plus a UI affordance to
+     surface inherited reflections without polluting the
+     fund's own reflection timeline.
+   - **6d. Status-quo + explicit non-goal (do nothing).**
+     Decide that reflection is a fund-level meta-learning
+     surface and that researcher / analyst IP travels
+     EXCLUSIVELY via the alphalesson path. Document the
+     decision so future contributors don't keep
+     re-discovering the gap.
+
+   Recommended path: **6a** as the default, gated behind
+   a feature flag (`fund.config.reflection_portable_routing`,
+   default `false` until validated). It is the lowest-risk
+   intervention, reuses the existing `agent_portable`
+   visibility, and doesn't need a new layer or a new
+   prompt splice point. The dominant-agent heuristic is
+   already justified by the data: themes empirically
+   cluster around a single emitter (a researcher's NVDA
+   notes don't typically interleave with the trader's
+   lot-size complaints).
+
+   Acceptance criteria for whichever option lands:
+
+   1. A `reflection:researcher:*` row written at fund A
+      surfaces in fund B's PM prompt with the
+      `[继承自其他基金]` / `[inherited]` marker when the
+      same researcher is on both teams (mirrors the AP3
+      8-case matrix; add a parallel
+      `TestReflection_CrossFundForResearcher` matrix).
+   2. A `reflection:trader:*` row written at fund A does
+      NOT surface in fund B even when the same trader
+      agent is on both teams (negative test; encodes the
+      "fund-scoped is correct here" decision).
+   3. The `sensitivity='secret'` and per-fund opt-out
+      (`allow_agent_portable_imports=false`) gates apply
+      transitively to reflection rows — they are SQL-level
+      gates so this should be free, but the test should
+      pin it explicitly.
+   4. The skill-proposal fan-out
+     (`runtimeSkillProposer.ProposeReflectionSkill`)
+      respects the same routing decision: a portable
+      reflection produces proposed-skill entries on the
+      agent's record at every fund the agent is on; a
+      fund-scoped reflection stays on the emitting team
+      only.
+   5. Down-migration path exists for any new column or
+      layer (mirrors the `'ap6_backfilled'` sentinel
+      pattern from migration 092).
+
+   Affected files (read-only references for whoever
+   picks this up): `server/cmd/server/reflection.go`
+   (write path + skill broadcast),
+   `server/internal/memory/reflexion.go`
+   (`Reflect` grouping engine),
+   `server/internal/alphalesson/repo.go`
+   (`agent_tag IS NOT NULL` gate that would need to relax
+   if option 6c reuses `ListLessons`),
+   `server/migrations/091_agent_portable_visibility.sql`
+   (no schema change needed for 6a; needed for 6c).
+
+   Operator escape hatch until this lands: a fund whose
+   researcher cares about cross-fund propagation should
+   make sure that researcher is also writing
+   `alpha_lesson` rows (the AP-covered path), not relying
+   solely on the weekly reflection cadence. This is
+   already the production reality — the realtime sink in
+   `alphalesson` fires per-decision and is far more
+   prolific than the once-a-week reflection cycle.
 
 ## File index
 
