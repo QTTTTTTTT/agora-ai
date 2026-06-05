@@ -1572,6 +1572,19 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	if fh := newFundLLMOverridesHandler(svc); fh != nil {
 		fh.RegisterRoutes(mux)
 	}
+	// S9.2 read-only — fund owners can see their fund's per-step
+	// workflow checkpoint timeline so they can self-diagnose the
+	// "did today's report run cleanly?" question without going
+	// through admin support. Resume / re-fire stays admin-only
+	// because re-running a step can spend LLM budget and submit
+	// broker instructions; that decision belongs with platform
+	// operators (handled by /api/admin/workflow-checkpoints/resume).
+	// Nil-safe: when the checkpoint repo is absent the routes stay
+	// unregistered and the fund's workflow page degrades to
+	// "feature unavailable".
+	if wfh := newFundWorkflowCheckpointsHandler(svc); wfh != nil {
+		wfh.RegisterRoutes(mux)
+	}
 
 	// Read-only LLM provider catalog scoped to a fund's owner. Lets
 	// the A/B test creation UI render <select> options for picking

@@ -2816,6 +2816,23 @@ export async function resumeWorkflowCheckpoint(
   );
 }
 
+// listFundWorkflowCheckpoints is the read-only sibling of the admin
+// endpoint, scoped to a single fund and authenticated via the
+// fund-ownership chain (see fund_workflow_checkpoints_handler.go).
+// Resume is intentionally NOT exposed — re-firing a workflow step
+// can re-spend LLM budget and submit broker instructions, so that
+// privilege stays with platform operators (fund owners route those
+// requests through support, who then call the admin endpoint).
+export async function listFundWorkflowCheckpoints(opts: {
+  fundId: string;
+  tradingDate: string;
+}): Promise<import("@fundai/api-client").ListWorkflowCheckpointsResponse> {
+  const qs = new URLSearchParams({ trading_date: opts.tradingDate }).toString();
+  return apiGet<import("@fundai/api-client").ListWorkflowCheckpointsResponse>(
+    `/api/funds/${encodeURIComponent(opts.fundId)}/workflow-checkpoints?${qs}`,
+  );
+}
+
 export type {
   WorkflowCheckpoint,
   WorkflowCheckpointStatus,

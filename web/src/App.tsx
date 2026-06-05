@@ -55,6 +55,7 @@ const KYC = lazyWithRetry(() => import("./pages/KYC"));
 const Marketplace = lazyWithRetry(() => import("./pages/Marketplace"));
 const Auctions = lazyWithRetry(() => import("./pages/Auctions"));
 const Promotions = lazyWithRetry(() => import("./pages/Promotions"));
+const FundWorkflow = lazyWithRetry(() => import("./pages/FundWorkflow"));
 
 interface ErrorBoundaryCopy {
   unexpectedError: string;
@@ -384,6 +385,7 @@ const AppRoutes: React.FC = () => {
               <Route path="memory" element={<MemoryCenter />} />
               <Route path="trades" element={<TradeHistory />} />
               <Route path="cash-ledger" element={<CashLedger />} />
+              <Route path="workflow" element={<FundWorkflow />} />
               <Route path="settings" element={<FundSettings />} />
               <Route path="subscription" element={<Subscription />} />
               <Route path="models" element={<ModelConfig />} />
