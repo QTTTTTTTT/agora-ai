@@ -37,6 +37,7 @@ import AdminLockupSection from "../components/AdminLockupSection";
 import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
 import AdminWSFeedSection from "../components/AdminWSFeedSection";
+import AdminStopTriggerSection from "../components/AdminStopTriggerSection";
 
 interface PlatformSettings {
   access_mode: "paid_open" | "free_open";
@@ -1250,6 +1251,9 @@ const Admin: React.FC = () => {
 
           {/* S12.3 — alertmanager-ingested events + ack flow. */}
           <AdminAlertsSection language={language} />
+
+          {/* Stop-trigger watch — pending stops + poller status. */}
+          <AdminStopTriggerSection language={language} />
 
           <AdminWSFeedSection language={language} />
 
