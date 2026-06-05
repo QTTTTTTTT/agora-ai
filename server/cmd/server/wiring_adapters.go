@@ -70,161 +70,12 @@ import (
 	"github.com/fundai/server/internal/workflow"
 )
 
-type subscriptionServiceAdapter struct {
-	service *subscription.SubscriptionService
-}
-
-func newSubscriptionServiceAdapter(service *subscription.SubscriptionService) *subscriptionServiceAdapter {
-	return &subscriptionServiceAdapter{service: service}
-}
-
-func (a *subscriptionServiceAdapter) ListPlans() []*api.SubscriptionPlan {
-	plans := a.service.ListPlans()
-	result := make([]*api.SubscriptionPlan, 0, len(plans))
-	for _, plan := range plans {
-		result = append(result, convertSubscriptionPlan(plan))
-	}
-	return result
-}
-
-func (a *subscriptionServiceAdapter) GetPlan(tier string) (*api.SubscriptionPlan, error) {
-	plan, err := a.service.GetPlan(tier)
-	if err != nil {
-		return nil, err
-	}
-	return convertSubscriptionPlan(plan), nil
-}
-
-func (a *subscriptionServiceAdapter) GetUserSubscription(ctx context.Context, userID string) (*api.Subscription, error) {
-	sub, err := a.service.GetUserSubscription(ctx, userID)
-	if err != nil || sub == nil {
-		return nil, err
-	}
-	return convertSubscription(sub), nil
-}
-
-func (a *subscriptionServiceAdapter) Subscribe(ctx context.Context, userID, tier, paymentMethod string) (*api.Subscription, error) {
-	sub, err := a.service.Subscribe(ctx, userID, tier, paymentMethod)
-	if err != nil {
-		return nil, err
-	}
-	return convertSubscription(sub), nil
-}
-
-func (a *subscriptionServiceAdapter) Cancel(ctx context.Context, userID string) error {
-	return a.service.Cancel(ctx, userID)
-}
-
-func (a *subscriptionServiceAdapter) GetEffectivePlan(ctx context.Context, userID string) (*api.SubscriptionPlan, error) {
-	plan, err := a.service.GetEffectivePlan(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	return convertSubscriptionPlan(plan), nil
-}
-
-func (a *subscriptionServiceAdapter) CheckQuota(ctx context.Context, userID, action string, currentCount int) error {
-	return a.service.CheckQuota(ctx, userID, action, currentCount)
-}
-
-func (a *subscriptionServiceAdapter) CheckModelAccess(ctx context.Context, userID, modelTier string) error {
-	return a.service.CheckModelAccess(ctx, userID, modelTier)
-}
-
-func (a *subscriptionServiceAdapter) AllowsCustomKey(ctx context.Context, userID string) (bool, error) {
-	return a.service.AllowsCustomKey(ctx, userID)
-}
+// subscriptionServiceAdapter, usageTrackerAdapter, and the Subscription
+// DTO converters live in wiring_adapters_subscription.go (extracted to
+// give the billing-wiring concern a stable file boundary while
+// wiring_adapters.go remains the catch-all for everything else).
 
 var _ llm.SubscriptionGuard = (*llmRuntime)(nil)
-
-type usageTrackerAdapter struct {
-	tracker *subscription.UsageTracker
-}
-
-func newUsageTrackerAdapter(tracker *subscription.UsageTracker) *usageTrackerAdapter {
-	return &usageTrackerAdapter{tracker: tracker}
-}
-
-func (a *usageTrackerAdapter) GetDailySummary(ctx context.Context, userID string, date time.Time) (*api.DailySummary, error) {
-	summary, err := a.tracker.GetDailySummary(ctx, userID, date)
-	if err != nil || summary == nil {
-		return nil, err
-	}
-	return &api.DailySummary{
-		UserID:         summary.UserID,
-		SummaryDate:    summary.SummaryDate,
-		TotalCalls:     summary.TotalCalls,
-		InputTokens:    summary.InputTokens,
-		OutputTokens:   summary.OutputTokens,
-		CostCents:      summary.CostCents,
-		PriceCents:     summary.PriceCents,
-		CustomKeyCalls: summary.CustomKeyCalls,
-		ModelBreakdown: summary.ModelBreakdown,
-		StepBreakdown:  summary.StepBreakdown,
-	}, nil
-}
-
-func (a *usageTrackerAdapter) GetMonthlySummary(ctx context.Context, userID, yearMonth string) (*api.MonthlySummary, error) {
-	summary, err := a.tracker.GetMonthlySummary(ctx, userID, yearMonth)
-	if err != nil || summary == nil {
-		return nil, err
-	}
-	return &api.MonthlySummary{
-		UserID:         summary.UserID,
-		YearMonth:      summary.YearMonth,
-		TotalCalls:     summary.TotalCalls,
-		InputTokens:    summary.InputTokens,
-		OutputTokens:   summary.OutputTokens,
-		CostCents:      summary.CostCents,
-		PriceCents:     summary.PriceCents,
-		CustomKeyCalls: summary.CustomKeyCalls,
-		ModelBreakdown: summary.ModelBreakdown,
-	}, nil
-}
-
-func (a *usageTrackerAdapter) GetUsageHistory(ctx context.Context, userID string, offset, limit int) ([]*api.UsageEntry, int, error) {
-	entries, total, err := a.tracker.GetUsageHistory(ctx, userID, offset, limit)
-	if err != nil {
-		return nil, 0, err
-	}
-	result := make([]*api.UsageEntry, 0, len(entries))
-	for _, entry := range entries {
-		result = append(result, &api.UsageEntry{
-			ID:            entry.ID,
-			FundID:        entry.FundID,
-			StepName:      entry.StepName,
-			ModelProvider: entry.ModelProvider,
-			ModelName:     entry.ModelName,
-			InputTokens:   entry.InputTokens,
-			OutputTokens:  entry.OutputTokens,
-			CostCents:     entry.CostCents,
-			PriceCents:    entry.PriceCents,
-			IsCustomKey:   entry.IsCustomKey,
-			CreatedAt:     entry.CreatedAt,
-		})
-	}
-	return result, total, nil
-}
-
-func (a *usageTrackerAdapter) GetBill(ctx context.Context, userID, yearMonth string) (*api.MonthlyBill, error) {
-	bill, err := a.tracker.GetBill(ctx, userID, yearMonth)
-	if err != nil || bill == nil {
-		return nil, err
-	}
-	return &api.MonthlyBill{
-		ID:              bill.ID,
-		UserID:          bill.UserID,
-		YearMonth:       bill.YearMonth,
-		PlanTier:        bill.PlanTier,
-		SubscriptionFee: bill.SubscriptionFee,
-		ModelUsageFee:   bill.ModelUsageFee,
-		CustomKeyCredit: bill.CustomKeyCredit,
-		TotalFee:        bill.TotalFee,
-		FinalAmount:     bill.FinalAmount,
-		Status:          bill.Status,
-		DetailsJSON:     bill.DetailsJSON,
-	}, nil
-}
 
 type llmRuntime struct {
 	client              *llm.MultiProviderClient
@@ -405,98 +256,10 @@ func (p llmEffectivePlan) AllowsCustomKey() bool {
 	return p.allowCustomKey
 }
 
-type modelConfigServiceAdapter struct {
-	service *subscription.ModelConfigService
-	runtime *llmRuntime
-}
-
-func newModelConfigServiceAdapter(service *subscription.ModelConfigService, runtime *llmRuntime) *modelConfigServiceAdapter {
-	return &modelConfigServiceAdapter{service: service, runtime: runtime}
-}
-
-func (a *modelConfigServiceAdapter) SaveConfig(ctx context.Context, config *api.UserModelConfig) error {
-	if err := a.service.SaveConfig(ctx, &subscription.UserModelConfig{
-		ID:              config.ID,
-		UserID:          config.UserID,
-		AgentID:         config.AgentID,
-		ConfigType:      config.ConfigType,
-		Tier:            config.Tier,
-		Provider:        config.Provider,
-		ModelName:       config.ModelName,
-		BaseURL:         config.BaseURL,
-		APIKeyEncrypted: config.APIKeyEncrypted,
-		IsActive:        config.IsActive,
-		CreatedAt:       config.CreatedAt,
-		UpdatedAt:       config.UpdatedAt,
-	}); err != nil {
-		return err
-	}
-	if a.runtime != nil {
-		return a.runtime.SyncUser(ctx, config.UserID)
-	}
-	return nil
-}
-
-func (a *modelConfigServiceAdapter) GetUserConfigs(ctx context.Context, userID string) ([]*api.UserModelConfig, error) {
-	configs, err := a.service.GetUserConfigs(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]*api.UserModelConfig, 0, len(configs))
-	for _, config := range configs {
-		result = append(result, &api.UserModelConfig{
-			ID:              config.ID,
-			UserID:          config.UserID,
-			AgentID:         config.AgentID,
-			ConfigType:      config.ConfigType,
-			Tier:            config.Tier,
-			Provider:        config.Provider,
-			ModelName:       config.ModelName,
-			BaseURL:         config.BaseURL,
-			APIKeyEncrypted: config.APIKeyEncrypted,
-			IsActive:        config.IsActive,
-			CreatedAt:       config.CreatedAt,
-			UpdatedAt:       config.UpdatedAt,
-		})
-	}
-	return result, nil
-}
-
-func (a *modelConfigServiceAdapter) DeleteConfig(ctx context.Context, userID, configID string) error {
-	if err := a.service.DeleteConfig(ctx, userID, configID); err != nil {
-		return err
-	}
-	if a.runtime != nil {
-		return a.runtime.SyncUser(ctx, userID)
-	}
-	return nil
-}
-
-func (a *modelConfigServiceAdapter) TestConnection(ctx context.Context, config *api.UserModelConfig) (*api.ConnectionTestResult, error) {
-	result, err := a.service.TestConnection(ctx, &subscription.UserModelConfig{
-		ID:              config.ID,
-		UserID:          config.UserID,
-		AgentID:         config.AgentID,
-		ConfigType:      config.ConfigType,
-		Tier:            config.Tier,
-		Provider:        config.Provider,
-		ModelName:       config.ModelName,
-		BaseURL:         config.BaseURL,
-		APIKeyEncrypted: config.APIKeyEncrypted,
-		IsActive:        config.IsActive,
-		CreatedAt:       config.CreatedAt,
-		UpdatedAt:       config.UpdatedAt,
-	})
-	if err != nil || result == nil {
-		return nil, err
-	}
-	return &api.ConnectionTestResult{
-		Success: result.Success,
-		Latency: result.Latency,
-		Message: result.Message,
-		ModelID: result.ModelID,
-	}, nil
-}
+// modelConfigServiceAdapter (BYO LLM key wiring) lives in
+// wiring_adapters_subscription.go alongside the other subscription /
+// usage adapters. Kept together because the three are co-evolved
+// whenever the billing surface changes.
 
 func newLLMRuntime(ctx context.Context, modelConfigs *subscription.ModelConfigService, usageTracker *subscription.UsageTracker, subscriptionService *subscription.SubscriptionService, budgetService *subscription.BudgetService, quotaService *quota.Service, metrics *serverMetrics, defaults LLMDefaultsConfig) (*llmRuntime, error) {
 	return newLLMRuntimeWithProviderRepo(ctx, modelConfigs, usageTracker, subscriptionService, budgetService, quotaService, metrics, defaults, nil, nil)
@@ -10687,44 +10450,9 @@ func abTestDateRange(test *repository.ABTest) (time.Time, time.Time) {
 	return start, end
 }
 
-func convertSubscriptionPlan(plan *subscription.Plan) *api.SubscriptionPlan {
-	if plan == nil {
-		return nil
-	}
-	return &api.SubscriptionPlan{
-		Tier:              string(plan.Tier),
-		Name:              plan.Name,
-		PriceCentsMonth:   plan.PriceCentsMonth,
-		MaxFunds:          plan.MaxFunds,
-		MaxCallsPerDay:    plan.MaxCallsPerDay,
-		ModelTiers:        append([]string(nil), plan.ModelTiers...),
-		Recommended:       plan.Recommended,
-		MaxAgentsPerFund:  plan.MaxAgentsPerFund,
-		MaxWorkflowPerDay: plan.MaxWorkflowPerDay,
-		AllowCustomKey:    plan.AllowCustomKey,
-		AllowABTest:       plan.AllowABTest,
-		AllowExport:       plan.AllowExport,
-		SimulationCapital: plan.SimulationCapital,
-		IncludedTokens:    plan.IncludedTokens,
-		Description:       plan.Description,
-	}
-}
-
-func convertSubscription(sub *subscription.Subscription) *api.Subscription {
-	if sub == nil {
-		return nil
-	}
-	return &api.Subscription{
-		ID:            sub.ID,
-		UserID:        sub.UserID,
-		PlanTier:      string(sub.PlanTier),
-		Status:        sub.Status,
-		StartDate:     sub.StartDate,
-		EndDate:       sub.EndDate,
-		AutoRenew:     sub.AutoRenew,
-		PaymentMethod: sub.PaymentMethod,
-	}
-}
+// convertSubscriptionPlan + convertSubscription live in
+// wiring_adapters_subscription.go alongside the subscription adapters
+// they serve.
 
 func (a *walletServiceAdapter) GetWallet(ctx context.Context, userID string) (*api.WalletAccount, error) {
 	account, err := a.walletRepo.GetOrCreateByUserID(ctx, userID)
