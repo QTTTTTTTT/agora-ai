@@ -28,6 +28,7 @@ import { PriceRefreshDialog, type PriceRefreshRow } from "./decisionCenter/Price
 import { RiskConclusionCard } from "./decisionCenter/RiskConclusionCard";
 import { TraceboardCard } from "./decisionCenter/TraceboardCard";
 import { DecisionSourceChip } from "../components/DecisionSourceChip";
+import { DecisionReasonModal } from "../components/DecisionReasonModal";
 import NextRunBanner from "../components/NextRunBanner";
 import {
   canReviewPlan,
@@ -89,6 +90,14 @@ const DecisionCenter: React.FC = () => {
   // when the plan key already has an entry in the cache; used by the
   // "Retry" button to recover from a previous fetch error.
   const [decisionTraceRetryCounter, setDecisionTraceRetryCounter] = useState(0);
+
+  // "Why this decision?" drill-down modal — aggregates every
+  // reason / reasoning surface for the currently selected plan
+  // into one scrollable view (PM thesis, strategy summary,
+  // per-action reasons, debate, memo, risk review, blocking
+  // reasons, raw JSON). See components/DecisionReasonModal.tsx
+  // for the rationale.
+  const [reasonModalOpen, setReasonModalOpen] = useState(false);
   // PR-4: live quotes pushed from the SSE stream, keyed by symbol so
   // the ActionListCard can render the "现价" column without re-rendering
   // the entire plan list on every tick.
@@ -1597,9 +1606,27 @@ const DecisionCenter: React.FC = () => {
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-gray-500">
-                  {selectedPlanDetail?.status === "rejected" ? copy.rejectedReason : copy.strategyReasoning}
-                </h3>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider text-gray-500">
+                    {selectedPlanDetail?.status === "rejected" ? copy.rejectedReason : copy.strategyReasoning}
+                  </h3>
+                  {/* Drill-down opens a modal that aggregates EVERY
+                      reason source (PM thesis, strategy, per-action
+                      reasons, debate, memo, risk, blocking, raw JSON)
+                      for this plan in one scrollable view. Saves
+                      operators from scrolling through five separate
+                      cards. See components/DecisionReasonModal.tsx. */}
+                  {selectedPlanDetail ? (
+                    <button
+                      type="button"
+                      onClick={() => setReasonModalOpen(true)}
+                      className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-600 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700"
+                    >
+                      <span aria-hidden="true">🔍</span>
+                      {language === "en-US" ? "Why this decision?" : "查看决策依据"}
+                    </button>
+                  ) : null}
+                </div>
                 <div className="mt-3 rounded-xl bg-gray-50 p-4 text-sm leading-7 text-gray-700">
                   <p className="whitespace-pre-line">{selectedStrategyReasoning || (selectedPlanDetail?.status === "rejected" ? copy.noRejectedReason : copy.noStrategyReasoning)}</p>
                 </div>
@@ -1705,6 +1732,13 @@ const DecisionCenter: React.FC = () => {
           acknowledge: copy.priceRefreshAcknowledge,
         }}
         onClose={closePriceRefreshDialog}
+      />
+      <DecisionReasonModal
+        open={reasonModalOpen}
+        onClose={() => setReasonModalOpen(false)}
+        language={language}
+        plan={selectedPlanDetail}
+        decisionTrace={selectedDecisionTrace}
       />
     </div>
   );
