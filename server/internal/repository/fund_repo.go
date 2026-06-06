@@ -872,6 +872,174 @@ func (r *PlanRepo) SetDecisionSource(ctx context.Context, planID, source string,
 	return nil
 }
 
+// SetDecisionProvenance stamps the W1-4 provenance JSONB onto an
+// existing plan: which signal blocks / alpha-tagged lessons /
+// agent skills shaped the decision. Soft-fail by design — empty
+// payload is a no-op and a DB error is returned for the caller
+// to swallow / log without aborting the decide path. Provenance
+// is observability for the Wave-2 self-learning loops, not a
+// correctness signal.
+//
+// payload is the already-marshalled JSONB blob (caller-owned
+// schema, defined in internal/decision/provenance.go). The
+// repository never re-serialises the bytes so the engine can
+// add fields without touching this method.
+func (r *PlanRepo) SetDecisionProvenance(ctx context.Context, planID string, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(planID) == "" {
+		return fmt.Errorf("plan_repo: SetDecisionProvenance: empty plan id")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE investment_plans
+		    SET decision_provenance = $2,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		planID, payload,
+	)
+	if err != nil {
+		return fmt.Errorf("plan_repo: SetDecisionProvenance: %w", err)
+	}
+	return nil
+}
+
+// GetDecisionProvenance reads the W1-4 provenance JSONB for a
+// plan. Returns (nil, nil) when the column is NULL (i.e. legacy
+// row pre-W1-4 or a row where provenance capture was disabled).
+// Caller passes the raw bytes through
+// internal/decision.UnmarshalProvenance to get a typed value.
+func (r *PlanRepo) GetDecisionProvenance(ctx context.Context, planID string) ([]byte, error) {
+	if strings.TrimSpace(planID) == "" {
+		return nil, fmt.Errorf("plan_repo: GetDecisionProvenance: empty plan id")
+	}
+	var raw sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		`SELECT decision_provenance::text
+		   FROM investment_plans
+		  WHERE id = $1`,
+		planID,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("plan_repo: GetDecisionProvenance: %w", err)
+	}
+	if !raw.Valid {
+		return nil, nil
+	}
+	return []byte(raw.String), nil
+}
+
+// SetPlanOutcome stamps the W1-5 outcome snapshot onto an
+// existing plan: window kind, realized PnL / alpha / win-rate,
+// computed-at meta. payload is the already-marshalled JSONB
+// blob (caller-owned schema, defined in
+// internal/planoutcome.Outcome). Soft-fail like
+// SetDecisionProvenance: empty payload is a no-op, an UPDATE
+// failure returns the error for the caller to swallow / log.
+func (r *PlanRepo) SetPlanOutcome(ctx context.Context, planID string, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(planID) == "" {
+		return fmt.Errorf("plan_repo: SetPlanOutcome: empty plan id")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE investment_plans
+		    SET plan_outcome = $2,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		planID, payload,
+	)
+	if err != nil {
+		return fmt.Errorf("plan_repo: SetPlanOutcome: %w", err)
+	}
+	return nil
+}
+
+// GetPlanOutcome reads the W1-5 outcome JSONB for a plan.
+// Returns (nil, nil) when the column is NULL — i.e. the
+// resolver has not run yet for this plan. Caller passes the
+// bytes through internal/planoutcome.Unmarshal to get a typed
+// value.
+func (r *PlanRepo) GetPlanOutcome(ctx context.Context, planID string) ([]byte, error) {
+	if strings.TrimSpace(planID) == "" {
+		return nil, fmt.Errorf("plan_repo: GetPlanOutcome: empty plan id")
+	}
+	var raw sql.NullString
+	err := r.db.QueryRowContext(ctx,
+		`SELECT plan_outcome::text
+		   FROM investment_plans
+		  WHERE id = $1`,
+		planID,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("plan_repo: GetPlanOutcome: %w", err)
+	}
+	if !raw.Valid {
+		return nil, nil
+	}
+	return []byte(raw.String), nil
+}
+
+// ListPendingOutcomePlans returns the IDs of plans whose
+// plan_outcome is NULL and whose created_at is older than the
+// given cutoff. The resolver worker uses this to drive a
+// catch-up sweep on a schedule. The query rides the
+// idx_investment_plans_pending_outcome partial index from
+// migration 094 — it stays cheap even when the table grows.
+//
+// limit caps the number of rows returned per sweep so a single
+// resolver tick doesn't try to process months of backlog at
+// once. Pass 0 to disable the cap.
+func (r *PlanRepo) ListPendingOutcomePlans(ctx context.Context, cutoff time.Time, limit int) ([]string, error) {
+	rows, err := r.queryPendingOutcomePlans(ctx, cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("plan_repo: ListPendingOutcomePlans: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("plan_repo: ListPendingOutcomePlans: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("plan_repo: ListPendingOutcomePlans: rows: %w", err)
+	}
+	return ids, nil
+}
+
+func (r *PlanRepo) queryPendingOutcomePlans(ctx context.Context, cutoff time.Time, limit int) (*sql.Rows, error) {
+	if limit > 0 {
+		return r.db.QueryContext(ctx,
+			`SELECT id
+			   FROM investment_plans
+			  WHERE plan_outcome IS NULL
+			    AND created_at < $1
+			  ORDER BY created_at ASC
+			  LIMIT $2`,
+			cutoff, limit,
+		)
+	}
+	return r.db.QueryContext(ctx,
+		`SELECT id
+		   FROM investment_plans
+		  WHERE plan_outcome IS NULL
+		    AND created_at < $1
+		  ORDER BY created_at ASC`,
+		cutoff,
+	)
+}
+
 // GetDecisionSource is the focused read counterpart to
 // SetDecisionSource. Returns the source tag and the raw JSONB
 // fallback_reason blob (nil when the column is NULL). Kept narrow on
@@ -2588,6 +2756,108 @@ func (r *MemoryRepo) DeleteByIDsWithTx(ctx context.Context, tx *sql.Tx, ids []st
 	}
 	affected, _ := res.RowsAffected()
 	return affected, nil
+}
+
+// IncrementRefutation bumps refutation_count and stamps last_refuted_at on
+// the lesson row. The W2-9 lesson-refute pipeline calls this once per
+// (memory, refuting plan) pair when the plan that USED this memory
+// produced a bad realised outcome. We do NOT auto-flip status here —
+// the lessonrefute package decides whether the new count crosses the
+// soft/hard threshold and calls SetMemoryStatus separately.
+//
+// The update is idempotent at the database layer (just an INCREMENT)
+// but the caller is expected to dedupe by (memory_id, plan_id) at the
+// application layer. Returns the new count, or sql.ErrNoRows if the
+// memory id does not exist.
+func (r *MemoryRepo) IncrementRefutation(ctx context.Context, memoryID string, at time.Time) (int, error) {
+	id := strings.TrimSpace(memoryID)
+	if id == "" {
+		return 0, fmt.Errorf("memory_repo: increment refutation: empty id")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		`UPDATE memories
+		    SET refutation_count = refutation_count + 1,
+		        last_refuted_at  = $2,
+		        updated_at       = NOW()
+		  WHERE id = $1
+		  RETURNING refutation_count`,
+		id, at,
+	).Scan(&count)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, sql.ErrNoRows
+		}
+		return 0, fmt.Errorf("memory_repo: increment refutation: %w", err)
+	}
+	return count, nil
+}
+
+// SetMemoryStatus flips the lesson lifecycle column to one of
+// 'active' | 'soft_refuted' | 'hard_refuted' | 'archived'. The
+// lessonrefute package owns the policy that decides when to call
+// this; the alphalesson context builder reads the column to decide
+// whether to surface the lesson in subsequent prompts.
+//
+// Treat unknown status values as a programmer error and reject them
+// here so the database CHECK constraint (added in a later migration)
+// isn't the first line of defence.
+func (r *MemoryRepo) SetMemoryStatus(ctx context.Context, memoryID, status string) error {
+	id := strings.TrimSpace(memoryID)
+	if id == "" {
+		return fmt.Errorf("memory_repo: set status: empty id")
+	}
+	switch status {
+	case "active", "soft_refuted", "hard_refuted", "archived":
+	default:
+		return fmt.Errorf("memory_repo: set status: unsupported value %q", status)
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE memories SET status = $2, updated_at = NOW() WHERE id = $1`,
+		id, status,
+	)
+	if err != nil {
+		return fmt.Errorf("memory_repo: set status: %w", err)
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// MemoryStatusSnapshot is the lightweight read-only projection the
+// alphalesson context builder uses to decide whether a memory should
+// be surfaced. Exposing only these fields (not the full Memory) keeps
+// the SELECT cheap and makes the boundary contract explicit.
+type MemoryStatusSnapshot struct {
+	ID              string
+	RefutationCount int
+	LastRefutedAt   sql.NullTime
+	Status          string
+}
+
+// GetMemoryStatus fetches the W2-9 status snapshot for one memory.
+// Returns sql.ErrNoRows when the row is missing.
+func (r *MemoryRepo) GetMemoryStatus(ctx context.Context, memoryID string) (MemoryStatusSnapshot, error) {
+	id := strings.TrimSpace(memoryID)
+	if id == "" {
+		return MemoryStatusSnapshot{}, fmt.Errorf("memory_repo: get status: empty id")
+	}
+	var snap MemoryStatusSnapshot
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, refutation_count, last_refuted_at, status FROM memories WHERE id = $1`,
+		id,
+	).Scan(&snap.ID, &snap.RefutationCount, &snap.LastRefutedAt, &snap.Status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MemoryStatusSnapshot{}, sql.ErrNoRows
+		}
+		return MemoryStatusSnapshot{}, fmt.Errorf("memory_repo: get status: %w", err)
+	}
+	return snap, nil
 }
 
 // scanMemories is a shared helper that scans rows into []Memory.

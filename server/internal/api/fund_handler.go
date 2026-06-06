@@ -2033,6 +2033,12 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	// identical; pushes diff-only frames on a 2s tick. Implementation
 	// lives in workflow_stream.go.
 	mux.HandleFunc("GET /api/funds/{fundId}/workflow/stream", h.StreamWorkflowStatus)
+	// W4-25 — multiplexed SSE: subscribe to many funds over one
+	// connection. The browser caps EventSource handles at ~6 per
+	// origin, so a portfolio dashboard tracking 10+ funds would
+	// otherwise queue half its streams. Implementation lives in
+	// workflow_stream.go alongside the per-fund variant.
+	mux.HandleFunc("GET /api/funds/workflow/stream", h.StreamWorkflowStatusMulti)
 	mux.HandleFunc("GET /api/funds/{fundId}/llm-usage", h.GetLLMUsageVisibility)
 	mux.HandleFunc("GET /api/funds/{fundId}/audit", h.ListAuditLogs)
 

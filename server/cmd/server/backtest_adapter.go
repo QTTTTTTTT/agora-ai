@@ -577,32 +577,37 @@ func translateSubmitInput(in api.SubmitBacktestInput) backtest.Request {
 
 // jobToView produces the JSON-friendly view of a backtest.Job for
 // the api response. The handler can also pass in nil safely.
+//
+// W14-4 — uses Job.Snapshot() to read the runner-mutable fields
+// (StartedAt / CompletedAt / Result / Err) under Job.mu.
+// Reading those fields directly from this goroutine (the API
+// handler) races with the runner goroutine that writes them.
 func jobToView(job *backtest.Job) *api.BacktestJob {
 	if job == nil {
 		return nil
 	}
-	snap := job.Progress.Snapshot()
+	snap := job.Snapshot()
 	view := &api.BacktestJob{
-		ID:          job.ID,
-		FundID:      job.Request.FundID,
-		Name:        job.Request.Name,
-		EngineKind:  job.Request.EngineKind,
-		Status:      snap.Status,
+		ID:         snap.ID,
+		FundID:     snap.Request.FundID,
+		Name:       snap.Request.Name,
+		EngineKind: snap.Request.EngineKind,
+		Status:     snap.Progress.Status,
 		Progress: api.BacktestProgressView{
-			TotalDays:   snap.TotalDays,
-			DoneDays:    snap.DoneDays,
-			CurrentDate: snap.CurrentDate,
+			TotalDays:   snap.Progress.TotalDays,
+			DoneDays:    snap.Progress.DoneDays,
+			CurrentDate: snap.Progress.CurrentDate,
 		},
-		SubmittedAt: job.SubmittedAt,
-		StartedAt:   job.StartedAt,
-		CompletedAt: job.CompletedAt,
-		Request:     translateRequestEcho(job.Request),
+		SubmittedAt: snap.SubmittedAt,
+		StartedAt:   snap.StartedAt,
+		CompletedAt: snap.CompletedAt,
+		Request:     translateRequestEcho(snap.Request),
 	}
-	if job.Err != nil {
-		view.Error = job.Err.Error()
+	if snap.Err != nil {
+		view.Error = snap.Err.Error()
 	}
-	if job.Result != nil {
-		view.Result = translateResultView(job.Result)
+	if snap.Result != nil {
+		view.Result = translateResultView(snap.Result)
 	}
 	return view
 }

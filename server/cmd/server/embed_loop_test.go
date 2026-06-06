@@ -28,9 +28,15 @@ func TestMemoryEmbedLoopRunOnceWritesBack(t *testing.T) {
 	loop := newMemoryEmbedLoop(db, &stubEmbedder{vec: []float32{0.1, 0.2}})
 	loop.batch = 2
 
-	rows := sqlmock.NewRows([]string{"id", "content"}).
-		AddRow("m1", "hello world").
-		AddRow("m2", "another")
+	// W14-1 — loadDue now also selects fund_id so the embed
+	// quota recorder side-car can attribute calls per fund. The
+	// mock row schema mirrors the SQL exactly; an empty fundID
+	// here exercises the "anonymous backfill" path which the
+	// recorder silently drops, the same way a NULL fund_id row
+	// behaves in production.
+	rows := sqlmock.NewRows([]string{"id", "fund_id", "content"}).
+		AddRow("m1", "", "hello world").
+		AddRow("m2", "", "another")
 	mock.ExpectQuery(regexp.QuoteMeta("FROM memories")).
 		WithArgs(2).
 		WillReturnRows(rows)
@@ -59,7 +65,7 @@ func TestMemoryEmbedLoopSkipsOnEmbedderFailure(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("FROM memories")).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "content"}).AddRow("m1", "abc"))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "fund_id", "content"}).AddRow("m1", "", "abc"))
 	// No UPDATE expected since embed errored.
 
 	loop.runOnce()

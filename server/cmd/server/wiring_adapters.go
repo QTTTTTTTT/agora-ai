@@ -1647,6 +1647,19 @@ type runtimePMAgent struct {
 	// concern and avoids forcing the G1 #2 attribution writer to
 	// know about S11 fields.
 	lastDecisionSourceByFund sync.Map
+
+	// lastProvenanceByFund is the W1-4 sibling of
+	// lastTraceByFund. It carries the decision.Provenance struct
+	// captured at buildDecisionInput time (which signal blocks
+	// made it into the prompt, plus any lesson / skill IDs the
+	// wiring layer can attach) so GeneratePlan can persist it
+	// via PlanRepo.SetDecisionProvenance once the plan ID
+	// exists. Same load-and-delete contract as the other two
+	// per-fund caches above. Decoupled into its own map so the
+	// Wave-2 self-learning trackers can consume the stash
+	// without conflating with the attribution / decision-source
+	// concerns.
+	lastProvenanceByFund sync.Map
 }
 
 // decisionSourceRecord is the per-fund payload stashed by
@@ -13297,6 +13310,20 @@ func (a *runtimePMAgent) GeneratePlan(ctx context.Context, fundID, tradingDate s
 			slog.Warn("plan_repo SetDecisionSource failed", "fundId", fundID, "planId", id, "err", err)
 		}
 	}
+	// W1-4 — persist the captured Provenance (which signal blocks
+	// shaped the prompt, plus any lesson / skill IDs the wiring
+	// layer was able to attach). Soft-fail like SetDecisionSource:
+	// a missing stash means buildDecisionInput took a degraded
+	// path and we keep the row's provenance NULL; a UPDATE
+	// failure logs a warning but doesn't fail plan creation. The
+	// Wave-2 self-learning trackers consume this column.
+	if prov, ok := a.consumeProvenance(fundID); ok {
+		if payload, err := decision.MarshalProvenance(prov); err == nil && len(payload) > 0 {
+			if err := a.planRepo.SetDecisionProvenance(ctx, id, payload); err != nil {
+				slog.Warn("plan_repo SetDecisionProvenance failed", "fundId", fundID, "planId", id, "err", err)
+			}
+		}
+	}
 	// G1 #2: attribution writer needs the LLM's per-action
 	// reasoning (where the PM names blocks like "qualityScores",
 	// "valueScores", etc.) plus the high-level summary. The
@@ -14675,6 +14702,25 @@ func (a *runtimePMAgent) consumeDecisionSource(fundID string) (decisionSourceRec
 	return rec, ok
 }
 
+// consumeProvenance is the W1-4 load-and-delete read for the
+// decision.Provenance stashed at buildDecisionInput time. Mirrors
+// consumeDecisionSource's contract (single-shot consumption, no
+// stale rows ever). Returns the zero Provenance + false when the
+// fund didn't go through the modern decision-input path this tick
+// (legacy fallback, missing engine, etc.) — callers should treat
+// that as "no provenance to persist".
+func (a *runtimePMAgent) consumeProvenance(fundID string) (decision.Provenance, bool) {
+	if a == nil || strings.TrimSpace(fundID) == "" {
+		return decision.Provenance{}, false
+	}
+	v, ok := a.lastProvenanceByFund.LoadAndDelete(fundID)
+	if !ok {
+		return decision.Provenance{}, false
+	}
+	prov, ok := v.(decision.Provenance)
+	return prov, ok
+}
+
 // buildPlanActionsLegacy is the pre-Phase-2A deterministic plan
 // generator extracted into its own function so the LLM-driven path
 // can short-circuit it without losing the safety net. With holdings
@@ -15475,6 +15521,24 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 	// (≤ N_funds rows live at once).
 	if a != nil && strings.TrimSpace(fundID) != "" {
 		a.lastTraceByFund.Store(fundID, trace)
+
+		// W1-4: stash decision Provenance alongside the trace.
+		// Step-1 captures the cheap-to-record block-presence
+		// list + the signal count derived from it. Lessons /
+		// skills / token accounting will be backfilled by the
+		// Wave-2 trackers — those need wiring into the
+		// alphalesson.BuildContext call site + the LLM client
+		// response (token usage), which lives outside the
+		// engine's reach today. By landing the schema +
+		// repository writer + capture site now, those follow-up
+		// patches stay surgical: each backfills one Provenance
+		// field without re-touching the persistence path.
+		blocks := trace.PresentBlocks()
+		prov := decision.Provenance{
+			PromptBlocks: append([]string(nil), blocks...),
+			SignalCount:  len(blocks),
+		}
+		a.lastProvenanceByFund.Store(fundID, prov)
 	}
 
 	// Sprint D #1 — Prometheus counters for signal-block presence,
@@ -16508,6 +16572,10 @@ func (a *runtimePMAgent) buildSemanticRecall(ctx context.Context, fundID, macroB
 	}
 	embedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	// W14-1 — attach the fundID to the embed ctx so the
+	// QuotaEmbedder's per-fund side-car can attribute this call.
+	// Aggregate metrics are unchanged.
+	embedCtx = recall.WithFundID(embedCtx, fundID)
 	vec, err := a.recallEmbedder.Embed(embedCtx, query)
 	if err != nil {
 		slog.Debug("semantic recall: embed query failed",

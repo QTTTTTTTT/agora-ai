@@ -108,6 +108,30 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	if stopHandler := newStopTriggerStatusHandler(svc); stopHandler != nil {
 		stopHandler.RegisterRoutes(mux)
 	}
+	// W1-2 — DB connection pool status (super-admin only). JSON
+	// twin of the fundai_db_* gauges in /api/metrics. The Admin UI
+	// can poll this for a live "pool saturation" panel without
+	// having to scrape and parse Prometheus text.
+	if poolHandler := newDBPoolHandler(svc, cfg); poolHandler != nil {
+		poolHandler.RegisterRoutes(mux)
+	}
+	// W8-2 — memory re-embed queue snapshot (super-admin only).
+	// JSON twin of the fundai_memreembed_* counters in /api/metrics
+	// (W7-1). Handler always registers — when the queue is nil it
+	// reports `enabled=false` instead of 404 so the Admin UI panel
+	// can render a "re-embed disabled" state without special-casing
+	// the route shape.
+	if reembedHandler := newMemReembedHandler(svc); reembedHandler != nil {
+		reembedHandler.RegisterRoutes(mux)
+	}
+	// W11-1 — embedquota.Limiter snapshot (super-admin only).
+	// JSON twin of the fundai_embed_quota_* metrics in
+	// /api/metrics (W6-2 / W8-1 / W9-1 / W10-1). Same nil-safe
+	// shape as the memreembed handler so the Admin UI can render
+	// a "limiter disabled" state without 404 special-casing.
+	if quotaHandler := newEmbedQuotaHandler(svc); quotaHandler != nil {
+		quotaHandler.RegisterRoutes(mux)
+	}
 	// P0-5 — order Cancel / Replace API.
 	// P0-9 — wire the live-trading hard gate. We construct it once
 	// and pass into the order-actions handler. The kill switch is
@@ -243,7 +267,7 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	//   auth       → resolve session cookie → user / role on ctx
 	//   rateLimit  → per-IP token bucket (auth / mutate / read classes)
 	//   cors       → preflight + Origin allow-list
-	//   gzip       → compress JSON / text responses (NOT SSE)
+	//   compress   → Brotli (preferred) or gzip JSON / text (NOT SSE)
 	//   logger     → record method/path/status/bytes/duration
 	//   recoverer  → catch panics, return 500
 	//
@@ -252,17 +276,17 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	//    (browsers send these aggressively and they cost nothing);
 	// 2) /api/auth/login itself IS rate-limited (auth comes after).
 	//
-	// gzip is between cors and logger so logger.bytesWritten reflects
-	// actual on-the-wire size, and so SSE handlers (which set
-	// Content-Type=text/event-stream before WriteHeader) can opt out
-	// via gzip's Content-Type sniff.
+	// compress is between cors and logger so logger.bytesWritten
+	// reflects actual on-the-wire size, and so SSE handlers (which
+	// set Content-Type=text/event-stream before WriteHeader) can
+	// opt out via shouldCompress's Content-Type sniff.
 	rateLimitStore := newRateLimiterStore(defaultRateLimitConfig())
 	var handler http.Handler = mux
 	handler = pathAliasMiddleware(handler)
 	handler = authMiddlewareWithKeyring(svc.DB, cfg.effectiveJWTKeyring())(handler)
 	handler = rateLimitMiddleware(rateLimitStore)(handler)
 	handler = corsMiddleware(cfg.CORSOrigins)(handler)
-	handler = gzipMiddleware(handler)
+	handler = compressionMiddleware(handler)
 	handler = requestLogger(svc.Metrics, handler)
 	handler = recoverer(svc.Metrics, handler)
 

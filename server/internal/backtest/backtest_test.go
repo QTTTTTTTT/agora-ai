@@ -483,8 +483,13 @@ func TestJobStoreSubmitRunsAndCompletes(t *testing.T) {
 	if waitForStatus(job.Progress, "completed", 2*time.Second) != "completed" {
 		t.Fatalf("job did not complete: status=%s", job.Progress.Snapshot().Status)
 	}
-	if job.Result == nil || len(job.Result.NavCurve) != 3 {
-		t.Errorf("result wrong: %+v", job.Result)
+	// W14-4 — read Result via Snapshot. Direct field access
+	// races with the runner goroutine even after status flips
+	// to "completed" (Progress.mu and Job.mu are independent
+	// happens-before edges).
+	snap := job.Snapshot()
+	if snap.Result == nil || len(snap.Result.NavCurve) != 3 {
+		t.Errorf("result wrong: %+v", snap.Result)
 	}
 }
 
@@ -559,6 +564,84 @@ func TestJobStoreListFiltersAndSortsNewestFirst(t *testing.T) {
 		}
 	}
 	_ = a // referenced for completeness
+}
+
+// TestJobSnapshotIsRaceFree — W14-4 regression test.
+//
+// Before the fix, jobToView (and any other cross-goroutine
+// reader) accessed job.StartedAt / Result / Err directly while
+// the runner goroutine was still writing them. The race
+// detector flagged this in cmd/server tests via
+// TestAdapterSubmitSweepFansOutCartesian. This test pins the
+// fix in the package that owns the mutex: a concurrent reader
+// pounding Snapshot() while a Submit-triggered runner is in
+// flight must complete cleanly under -race.
+//
+// We deliberately race the two: kick off Submit, immediately
+// spin up a reader goroutine, let both run for a beat, then
+// wait for completion and assert Snapshot reflects the final
+// state. If anyone removes Job.mu, this test fails with a
+// race detector warning rather than a silently-wrong assertion.
+func TestJobSnapshotIsRaceFree(t *testing.T) {
+	start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	bars := buildSyntheticBars(start, []float64{100, 101, 102})
+	engine := &Runner{
+		OHLC:   &stubOHLC{bars: map[string][]ohlc.Bar{"AAPL": bars}},
+		Decide: &stubDecide{},
+	}
+	store := NewJobStore(engine)
+	req := Request{FundID: "fund-1", Symbols: []string{"AAPL"}, Start: start, End: start.AddDate(0, 0, 2), InitialCash: 1000}
+	job, err := store.Submit(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	// Start a reader goroutine that hammers Snapshot. If we
+	// ever stop synchronising the mutable fields, the race
+	// detector trips here.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			snap := job.Snapshot()
+			_ = snap.StartedAt
+			_ = snap.CompletedAt
+			_ = snap.Result
+			_ = snap.Err
+		}
+	}()
+
+	if waitForStatus(job.Progress, "completed", 2*time.Second) != "completed" {
+		t.Fatalf("job did not complete")
+	}
+	<-done
+
+	final := job.Snapshot()
+	if final.Result == nil {
+		t.Fatalf("expected non-nil Result on completed job, got %+v", final)
+	}
+	if final.StartedAt.IsZero() {
+		t.Errorf("expected StartedAt to be set after completion")
+	}
+	if final.CompletedAt.IsZero() {
+		t.Errorf("expected CompletedAt to be set after completion")
+	}
+	if final.Err != nil {
+		t.Errorf("expected nil Err on success path, got %v", final.Err)
+	}
+}
+
+// TestJobSnapshotNilSafe pins the defensive nil-receiver guard
+// — callers in cmd/server occasionally end up with a nil *Job
+// from store.Get on an unknown ID; Snapshot must return a zero
+// value rather than panic.
+func TestJobSnapshotNilSafe(t *testing.T) {
+	var j *Job
+	snap := j.Snapshot()
+	if snap.ID != "" {
+		t.Errorf("expected zero JobSnapshot for nil receiver, got ID=%q", snap.ID)
+	}
 }
 
 func TestJobStoreEvictionDoesNotDropActive(t *testing.T) {

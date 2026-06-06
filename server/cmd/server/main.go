@@ -50,6 +50,9 @@ import (
 	"github.com/fundai/server/internal/marketplace"
 	"github.com/fundai/server/internal/modelab"
 	"github.com/fundai/server/internal/promotion"
+	"github.com/fundai/server/internal/embedquota"
+	"github.com/fundai/server/internal/embedquotaobs"
+	"github.com/fundai/server/internal/memreembed"
 	"github.com/fundai/server/internal/recall"
 	"github.com/fundai/server/internal/drawdown"
 	"github.com/fundai/server/internal/lockup"
@@ -181,6 +184,13 @@ type RecallEmbedConfig struct {
 	APIKey  string
 	BaseURL string
 	Model   string
+	// W5-3 — embedquota wiring. Zero values fall back to the
+	// embedquota.DefaultConfig() baseline (200 calls/min,
+	// 1M tokens/day). Operators can ratchet either down via
+	// EMBED_QUOTA_RPS / EMBED_QUOTA_DAILY_TOKENS to match the
+	// negotiated provider tier.
+	MaxCallsPerMinute int
+	TokenQuotaPerDay  int
 }
 
 // LoadConfig reads configuration from environment with sensible defaults.
@@ -266,9 +276,11 @@ func LoadConfig() *Config {
 		},
 		AppPublicURL: strings.TrimRight(firstEnv("APP_PUBLIC_URL", "http://localhost:5173"), "/"),
 		RecallEmbed: RecallEmbedConfig{
-			APIKey:  firstEnv("RECALL_OPENAI_API_KEY", "OPENAI_API_KEY", ""),
-			BaseURL: firstEnv("RECALL_OPENAI_BASE_URL", "OPENAI_BASE_URL", ""),
-			Model:   firstEnv("RECALL_EMBED_MODEL", "text-embedding-3-small"),
+			APIKey:            firstEnv("RECALL_OPENAI_API_KEY", "OPENAI_API_KEY", ""),
+			BaseURL:           firstEnv("RECALL_OPENAI_BASE_URL", "OPENAI_BASE_URL", ""),
+			Model:             firstEnv("RECALL_EMBED_MODEL", "text-embedding-3-small"),
+			MaxCallsPerMinute: envInt("EMBED_QUOTA_RPM", 0),
+			TokenQuotaPerDay:  envInt("EMBED_QUOTA_DAILY_TOKENS", 0),
 		},
 	}
 
@@ -703,8 +715,26 @@ type Services struct {
 	LessonScoringLoop      *lessonScoringLoop
 	MemoryArchiveLoop      *memoryArchiveLoop
 	MemoryEmbedLoop        *memoryEmbedLoop
-	CorpActionIngestLoop   *corpActionIngestLoop
-	Mailer                 mailer.Mailer
+	MemReembedLoop         *memReembedLoop
+	// W5-3 — shared limiter used by every embed call path
+	// (memoryEmbedLoop + workflow semantic recall + memreembed
+	// re-embed worker). Exposed on Services so an admin route
+	// can surface its Snapshot() for observability without
+	// reaching into the embed loop's internals.
+	EmbedLimiter *embedquota.Limiter
+	// W14-1 — per-fund embed observability side-car. Optional;
+	// nil disables per-fund attribution and the QuotaEmbedder
+	// falls back to W5-3 / aggregate-only behaviour. See
+	// docs/PER_FUND_EMBEDQUOTA_OBSERVABILITY.md for the rollout
+	// rationale and cardinality budget.
+	EmbedQuotaRecorder *embedquotaobs.Recorder
+	// W6-1 — re-embed queue. Consolidation callers obtain this
+	// to enqueue freshly-rewritten memories; the worker behind
+	// the queue (MemReembedLoop) shares the same quota-gated
+	// embedder as MemoryEmbedLoop.
+	MemReembedQueue      *memreembed.Queue
+	CorpActionIngestLoop *corpActionIngestLoop
+	Mailer               mailer.Mailer
 }
 
 func (s *Services) Stop() {
@@ -740,6 +770,12 @@ func (s *Services) Stop() {
 	}
 	if s.MemoryEmbedLoop != nil {
 		s.MemoryEmbedLoop.Stop()
+	}
+	if s.MemReembedLoop != nil {
+		s.MemReembedLoop.Stop()
+	}
+	if s.EmbedQuotaRecorder != nil {
+		s.EmbedQuotaRecorder.Close()
 	}
 	if s.CorpActionIngestLoop != nil {
 		s.CorpActionIngestLoop.Stop()
@@ -1377,13 +1413,63 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 			if cfg.RecallEmbed.Model != "" {
 				embedder.ModelID = cfg.RecallEmbed.Model
 			}
-			memoryEmbed := newMemoryEmbedLoop(db, embedder)
+			// W5-3 — wrap the bare OpenAI client with the
+			// embedquota limiter so every embed call goes through
+			// rate + quota gating. The two callsites
+			// (memoryEmbedLoop + WithSemanticRecall) receive the
+			// decorated handle so they share one daily ledger.
+			quotaCfg := embedquota.DefaultConfig()
+			if cfg.RecallEmbed.MaxCallsPerMinute > 0 {
+				quotaCfg.MaxCallsPerMinute = cfg.RecallEmbed.MaxCallsPerMinute
+			}
+			if cfg.RecallEmbed.TokenQuotaPerDay > 0 {
+				quotaCfg.TokenQuotaPerDay = cfg.RecallEmbed.TokenQuotaPerDay
+			}
+			limiter := embedquota.New(quotaCfg)
+			services.EmbedLimiter = limiter
+			// W14-1 — opt-in per-fund observability side-car.
+			// Off by default: production roll-out is gated on the
+			// EMBED_QUOTA_OBS_ENABLED flag so we can land the wire
+			// in main but only flip it on for one cluster at a
+			// time. ADR: docs/PER_FUND_EMBEDQUOTA_OBSERVABILITY.md.
+			var recorder *embedquotaobs.Recorder
+			if strings.EqualFold(strings.TrimSpace(os.Getenv("EMBED_QUOTA_OBS_ENABLED")), "true") {
+				recorder = embedquotaobs.New(embedquotaobs.Config{})
+				services.EmbedQuotaRecorder = recorder
+				slog.Info("embed quota observability enabled",
+					"max_funds", embedquotaobs.Config{}.Normalised().MaxFunds,
+					"retain_for", embedquotaobs.Config{}.Normalised().RetainFor.String(),
+				)
+			}
+			gated := recall.NewQuotaEmbedderWithRecorder(embedder, limiter, recorder)
+			memoryEmbed := newMemoryEmbedLoop(db, gated)
 			memoryEmbed.SetLeaderChecker(leaseManager)
 			memoryEmbed.Start()
 			services.MemoryEmbedLoop = memoryEmbed
 			recallSvc := recall.New(db)
-			workflowService.WithSemanticRecall(recallSvc, embedder)
-			slog.Info("memory embed loop enabled", "model", embedder.Model())
+			workflowService.WithSemanticRecall(recallSvc, gated)
+
+			// W6-1 — bring up the re-embed queue + worker. The
+			// queue is exposed on services.MemReembedQueue so
+			// future consolidation callers can Enqueue without
+			// reaching into the loop's internals; the worker
+			// shares the same quota-gated embedder so the daily
+			// token ledger is one source of truth across all
+			// embed paths.
+			reembedQueue := memreembed.NewQueue(memreembed.DefaultConfig())
+			reembedWriter := newMemReembedWriter(db, embedder.Model())
+			reembedLoop := newMemReembedLoop(reembedQueue, gated, reembedWriter)
+			reembedLoop.SetLeaderChecker(leaseManager)
+			reembedLoop.Start()
+			services.MemReembedQueue = reembedQueue
+			services.MemReembedLoop = reembedLoop
+
+			slog.Info("memory embed loop enabled",
+				"model", embedder.Model(),
+				"quota_rpm", quotaCfg.MaxCallsPerMinute,
+				"quota_daily_tokens", quotaCfg.TokenQuotaPerDay,
+				"reembed_queue", "enabled",
+			)
 		} else {
 			slog.Info("memory embed loop disabled (no OPENAI_API_KEY)")
 		}
@@ -1502,7 +1588,284 @@ func handleMetrics(svc *Services) http.HandlerFunc {
 		_, _ = w.Write([]byte(svc.Metrics.ExportPrometheus()))
 		_, _ = w.Write([]byte(exportRuntimePrometheus(svc.DB, svc.LeaseManager)))
 		_, _ = w.Write([]byte(exportMarketDataPrometheus(svc.MarketDataService)))
+		_, _ = w.Write([]byte(exportEmbedQuotaPrometheus(svc.EmbedLimiter)))
+		_, _ = w.Write([]byte(exportEmbedQuotaPerFundPrometheus(svc.EmbedQuotaRecorder)))
+		_, _ = w.Write([]byte(exportSSEMuxPrometheus()))
+		_, _ = w.Write([]byte(exportMemReembedPrometheus(svc.MemReembedQueue)))
 	}
+}
+
+// exportMemReembedPrometheus renders W7-1 gauges/counters for the
+// memory re-embed queue (W3-18 + W6-1). Emits a sentinel
+// `status="disabled"` series when the queue is nil so the
+// dashboard panel can label "re-embed disabled" without inspecting
+// a feature flag. Mirrors the shape of exportEmbedQuotaPrometheus
+// so an operator alerting on one already knows the convention.
+//
+//   pending           — gauge: requests waiting for the worker.
+//                       Trends up if the worker is starved (provider
+//                       rate-limit, leader gone) or if consolidation
+//                       is producing faster than the worker can
+//                       consume.
+//   embedded_total    — counter: successfully re-embedded rows.
+//   retried_total     — counter: per-attempt retries (retries
+//                       per request can exceed 1).
+//   dead_letter_total — counter: requests that hit MaxRetries and
+//                       were dropped. Spike here means the provider
+//                       is sustained-failing.
+//   status            — gauge: 1=enabled (queue wired), 0=disabled.
+func exportMemReembedPrometheus(queue *memreembed.Queue) string {
+	var b strings.Builder
+	if queue == nil {
+		b.WriteString("# HELP fundai_memreembed_status Memory re-embed queue status (1=enabled, 0=disabled).\n")
+		b.WriteString("# TYPE fundai_memreembed_status gauge\n")
+		b.WriteString("fundai_memreembed_status 0\n")
+		return b.String()
+	}
+	stats := queue.Stats()
+	b.WriteString("# HELP fundai_memreembed_pending Re-embed requests waiting to be processed.\n")
+	b.WriteString("# TYPE fundai_memreembed_pending gauge\n")
+	fmt.Fprintf(&b, "fundai_memreembed_pending %d\n", stats.Pending)
+	b.WriteString("# HELP fundai_memreembed_embedded_total Total memories successfully re-embedded since process start.\n")
+	b.WriteString("# TYPE fundai_memreembed_embedded_total counter\n")
+	fmt.Fprintf(&b, "fundai_memreembed_embedded_total %d\n", stats.Embedded)
+	b.WriteString("# HELP fundai_memreembed_retried_total Total individual re-embed retry attempts since process start.\n")
+	b.WriteString("# TYPE fundai_memreembed_retried_total counter\n")
+	fmt.Fprintf(&b, "fundai_memreembed_retried_total %d\n", stats.Retried)
+	b.WriteString("# HELP fundai_memreembed_dead_letter_total Total re-embed requests that exhausted retries and were dropped.\n")
+	b.WriteString("# TYPE fundai_memreembed_dead_letter_total counter\n")
+	fmt.Fprintf(&b, "fundai_memreembed_dead_letter_total %d\n", stats.DeadLetter)
+	b.WriteString("# HELP fundai_memreembed_status Memory re-embed queue status (1=enabled, 0=disabled).\n")
+	b.WriteString("# TYPE fundai_memreembed_status gauge\n")
+	b.WriteString("fundai_memreembed_status 1\n")
+	if !stats.LastErrTime.IsZero() {
+		b.WriteString("# HELP fundai_memreembed_last_error_unix Unix-seconds timestamp of the most recent re-embed error (0 if never).\n")
+		b.WriteString("# TYPE fundai_memreembed_last_error_unix gauge\n")
+		fmt.Fprintf(&b, "fundai_memreembed_last_error_unix %d\n", stats.LastErrTime.Unix())
+	}
+	return b.String()
+}
+
+// exportEmbedQuotaPrometheus renders W6-2 gauges for the
+// embedquota.Limiter. Emits zero-status (`status="unavailable"`)
+// when the limiter is nil so the dashboard panel can label
+// "embed quota disabled" without inspecting a feature flag.
+func exportEmbedQuotaPrometheus(limiter *embedquota.Limiter) string {
+	h := limiter.HealthSnapshot()
+	var b strings.Builder
+	b.WriteString("# HELP fundai_embed_quota_tokens_today_used Tokens consumed by the embed worker today (UTC).\n")
+	b.WriteString("# TYPE fundai_embed_quota_tokens_today_used gauge\n")
+	fmt.Fprintf(&b, "fundai_embed_quota_tokens_today_used %d\n", h.TokensTodayUsed)
+	b.WriteString("# HELP fundai_embed_quota_tokens_daily_max Configured maximum tokens per UTC day.\n")
+	b.WriteString("# TYPE fundai_embed_quota_tokens_daily_max gauge\n")
+	fmt.Fprintf(&b, "fundai_embed_quota_tokens_daily_max %d\n", h.TokensDailyMax)
+	b.WriteString("# HELP fundai_embed_quota_calls_last_minute Embed calls in the last 60 seconds.\n")
+	b.WriteString("# TYPE fundai_embed_quota_calls_last_minute gauge\n")
+	fmt.Fprintf(&b, "fundai_embed_quota_calls_last_minute %d\n", h.CallsLastMinute)
+	b.WriteString("# HELP fundai_embed_quota_calls_per_minute_max Configured maximum embed calls per minute.\n")
+	b.WriteString("# TYPE fundai_embed_quota_calls_per_minute_max gauge\n")
+	fmt.Fprintf(&b, "fundai_embed_quota_calls_per_minute_max %d\n", h.CallsPerMinuteMax)
+	b.WriteString("# HELP fundai_embed_quota_status Limiter status (1=ok, 2=throttled, 3=near_limit, 4=exhausted, 0=unavailable).\n")
+	b.WriteString("# TYPE fundai_embed_quota_status gauge\n")
+	fmt.Fprintf(&b, "fundai_embed_quota_status %d\n", encodeEmbedQuotaStatus(h.Status))
+	// W8-1 — backpressure event counters. Distinct from `status`
+	// (point-in-time) so an alert can fire on rate() over a
+	// rolling window. Throttled = rate-limit hit, request was
+	// asked to wait. Exhausted = daily token cap hit, request
+	// was rejected outright.
+	b.WriteString("# HELP fundai_embed_quota_throttled_total Acquire calls that hit the per-minute rate limit since process start.\n")
+	b.WriteString("# TYPE fundai_embed_quota_throttled_total counter\n")
+	fmt.Fprintf(&b, "fundai_embed_quota_throttled_total %d\n", h.ThrottledTotal)
+	b.WriteString("# HELP fundai_embed_quota_exhausted_total Acquire calls rejected because the daily token quota was exhausted.\n")
+	b.WriteString("# TYPE fundai_embed_quota_exhausted_total counter\n")
+	fmt.Fprintf(&b, "fundai_embed_quota_exhausted_total %d\n", h.ExhaustedTotal)
+	// W9-1 — Acquire wait-time histogram. Counters tell us
+	// "how often we throttled"; this tells us "how bad it got",
+	// which is what an SLO/alert needs (e.g. p99 < 1s).
+	hist := limiter.WaitHistogram()
+	b.WriteString("# HELP fundai_embed_quota_acquire_wait_seconds Distribution of recommended wait durations returned by Acquire.\n")
+	b.WriteString("# TYPE fundai_embed_quota_acquire_wait_seconds histogram\n")
+	for _, bucket := range hist.Buckets {
+		fmt.Fprintf(&b, "fundai_embed_quota_acquire_wait_seconds_bucket{le=\"%s\"} %d\n",
+			formatPromBucketLe(bucket.LeSeconds), bucket.Count)
+	}
+	fmt.Fprintf(&b, "fundai_embed_quota_acquire_wait_seconds_bucket{le=\"+Inf\"} %d\n", hist.Count)
+	fmt.Fprintf(&b, "fundai_embed_quota_acquire_wait_seconds_sum %s\n", formatPromFloat(hist.SumSeconds))
+	fmt.Fprintf(&b, "fundai_embed_quota_acquire_wait_seconds_count %d\n", hist.Count)
+	// W10-1 — RecordUsage token-volume histogram, paired with
+	// the wait histogram. Together they answer "did throttling
+	// come from more calls or fatter calls?" — which the
+	// individual Counters can't disambiguate.
+	tokens := limiter.TokenHistogram()
+	b.WriteString("# HELP fundai_embed_quota_call_tokens Distribution of tokens consumed per RecordUsage observation.\n")
+	b.WriteString("# TYPE fundai_embed_quota_call_tokens histogram\n")
+	for _, bucket := range tokens.Buckets {
+		fmt.Fprintf(&b, "fundai_embed_quota_call_tokens_bucket{le=\"%s\"} %d\n",
+			formatPromBucketLe(bucket.Le), bucket.Count)
+	}
+	fmt.Fprintf(&b, "fundai_embed_quota_call_tokens_bucket{le=\"+Inf\"} %d\n", tokens.Count)
+	fmt.Fprintf(&b, "fundai_embed_quota_call_tokens_sum %d\n", tokens.Sum)
+	fmt.Fprintf(&b, "fundai_embed_quota_call_tokens_count %d\n", tokens.Count)
+	return b.String()
+}
+
+// exportEmbedQuotaPerFundPrometheus renders the W14-2 per-fund
+// fan-out of the embed quota metrics. Coexists with the
+// aggregate exportEmbedQuotaPrometheus — both are emitted on
+// /metrics so SLO queries that want process-totals can keep
+// using the unlabeled series, while per-fund dashboards can
+// pivot on the new fund_id label.
+//
+// CARDINALITY
+// -----------
+// Each fund contributes:
+//   2 counters    (throttled_total, exhausted_total)
+//   1 gauge       (tokens_today_used)
+//   waitBuckets+3 histogram series (each bucket + +Inf + sum + count)
+//   tokenBuckets+3 histogram series
+//
+// embedquotaobs.Recorder caps the active set to MaxFunds (default
+// 200). Overflow funds are coalesced into the OverflowFundID
+// bucket — emitted as a single series so dashboards can alarm on
+// "we exceeded the per-fund cardinality budget" without losing
+// signal.
+//
+// DISABLED PATH
+// -------------
+// recorder=nil emits a single status sentinel so the dashboard
+// panel can render "per-fund observability disabled" without
+// inspecting EMBED_QUOTA_OBS_ENABLED in two places. This mirrors
+// the convention used by exportMemReembedPrometheus.
+func exportEmbedQuotaPerFundPrometheus(recorder *embedquotaobs.Recorder) string {
+	var b strings.Builder
+	if recorder == nil {
+		b.WriteString("# HELP fundai_embed_quota_per_fund_status Per-fund embed quota observability status (1=enabled, 0=disabled).\n")
+		b.WriteString("# TYPE fundai_embed_quota_per_fund_status gauge\n")
+		b.WriteString("fundai_embed_quota_per_fund_status 0\n")
+		return b.String()
+	}
+	b.WriteString("# HELP fundai_embed_quota_per_fund_status Per-fund embed quota observability status (1=enabled, 0=disabled).\n")
+	b.WriteString("# TYPE fundai_embed_quota_per_fund_status gauge\n")
+	b.WriteString("fundai_embed_quota_per_fund_status 1\n")
+
+	// We emit each metric family once with all funds packed in,
+	// so Prometheus can group # HELP / # TYPE correctly. The
+	// extra prelude pass costs O(snapshots) but keeps the
+	// exposition spec-compliant.
+	snaps := recorder.Snapshot()
+
+	b.WriteString("# HELP fundai_embed_quota_per_fund_throttled_total Acquire calls that hit the per-minute rate limit, per fund.\n")
+	b.WriteString("# TYPE fundai_embed_quota_per_fund_throttled_total counter\n")
+	for _, s := range snaps {
+		fmt.Fprintf(&b, "fundai_embed_quota_per_fund_throttled_total{fund_id=%q} %d\n", s.FundID, s.ThrottledTotal)
+	}
+
+	b.WriteString("# HELP fundai_embed_quota_per_fund_exhausted_total Acquire calls rejected by the daily token quota, per fund.\n")
+	b.WriteString("# TYPE fundai_embed_quota_per_fund_exhausted_total counter\n")
+	for _, s := range snaps {
+		fmt.Fprintf(&b, "fundai_embed_quota_per_fund_exhausted_total{fund_id=%q} %d\n", s.FundID, s.ExhaustedTotal)
+	}
+
+	b.WriteString("# HELP fundai_embed_quota_per_fund_tokens_today_used Tokens consumed today (UTC), per fund.\n")
+	b.WriteString("# TYPE fundai_embed_quota_per_fund_tokens_today_used gauge\n")
+	for _, s := range snaps {
+		fmt.Fprintf(&b, "fundai_embed_quota_per_fund_tokens_today_used{fund_id=%q} %d\n", s.FundID, s.TokensTodayUsed)
+	}
+
+	b.WriteString("# HELP fundai_embed_quota_per_fund_acquire_wait_seconds Distribution of Acquire wait durations, per fund.\n")
+	b.WriteString("# TYPE fundai_embed_quota_per_fund_acquire_wait_seconds histogram\n")
+	for _, s := range snaps {
+		writePerFundHistogram(&b, "fundai_embed_quota_per_fund_acquire_wait_seconds", s.FundID, s.WaitBuckets, s.WaitCount, s.WaitSumSeconds, formatPromFloat)
+	}
+
+	b.WriteString("# HELP fundai_embed_quota_per_fund_call_tokens Distribution of tokens consumed per RecordUsage observation, per fund.\n")
+	b.WriteString("# TYPE fundai_embed_quota_per_fund_call_tokens histogram\n")
+	for _, s := range snaps {
+		writePerFundHistogram(&b, "fundai_embed_quota_per_fund_call_tokens", s.FundID, s.TokenBuckets, s.TokenCount, float64(s.TokenSum), func(f float64) string {
+			// Token sum is integer-valued — emit it as such so
+			// recording rules / max() queries don't see a fake
+			// floating-point tail.
+			return strconv.FormatInt(int64(f), 10)
+		})
+	}
+
+	return b.String()
+}
+
+// writePerFundHistogram emits the canonical histogram exposition
+// (buckets + +Inf + sum + count) for one fund. Pulled out to
+// keep the exporter readable: two histograms (wait + tokens)
+// share identical machinery, only the formatter for `_sum`
+// differs.
+func writePerFundHistogram(
+	b *strings.Builder,
+	metric string,
+	fundID string,
+	buckets []embedquotaobs.BucketCount,
+	count uint64,
+	sumValue float64,
+	formatSum func(float64) string,
+) {
+	for _, bucket := range buckets {
+		fmt.Fprintf(b, "%s_bucket{fund_id=%q,le=\"%s\"} %d\n",
+			metric, fundID, formatPromBucketLe(bucket.Le), bucket.Count)
+	}
+	fmt.Fprintf(b, "%s_bucket{fund_id=%q,le=\"+Inf\"} %d\n", metric, fundID, count)
+	fmt.Fprintf(b, "%s_sum{fund_id=%q} %s\n", metric, fundID, formatSum(sumValue))
+	fmt.Fprintf(b, "%s_count{fund_id=%q} %d\n", metric, fundID, count)
+}
+
+// formatPromBucketLe renders a bucket boundary in the trim form
+// Prometheus exposition expects (no exponential notation, no
+// trailing zeros). 0.001 stays "0.001"; 1 stays "1"; 600 stays
+// "600". strconv.FormatFloat with -1 precision is the canonical
+// Go way to do this without the regex hacks Prometheus client
+// libs sometimes ship.
+func formatPromBucketLe(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// formatPromFloat renders a sum value. We always want enough
+// precision to preserve sub-millisecond observations
+// (-1 precision again does the right thing).
+func formatPromFloat(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+func encodeEmbedQuotaStatus(s embedquota.Status) int {
+	switch s {
+	case embedquota.StatusOK:
+		return 1
+	case embedquota.StatusThrottled:
+		return 2
+	case embedquota.StatusNearLimit:
+		return 3
+	case embedquota.StatusExhausted:
+		return 4
+	default:
+		return 0
+	}
+}
+
+// exportSSEMuxPrometheus renders W6-2 counters for the SSE
+// multiplex endpoint. Lives in cmd/server (not the api package)
+// so the import direction stays one-way (cmd → internal).
+func exportSSEMuxPrometheus() string {
+	m := api.SnapshotMuxStreamMetrics()
+	var b strings.Builder
+	b.WriteString("# HELP fundai_workflow_sse_mux_active_connections Currently open multiplex SSE connections.\n")
+	b.WriteString("# TYPE fundai_workflow_sse_mux_active_connections gauge\n")
+	fmt.Fprintf(&b, "fundai_workflow_sse_mux_active_connections %d\n", m.ActiveConnections)
+	b.WriteString("# HELP fundai_workflow_sse_mux_connections_total Total multiplex SSE connections opened since process start.\n")
+	b.WriteString("# TYPE fundai_workflow_sse_mux_connections_total counter\n")
+	fmt.Fprintf(&b, "fundai_workflow_sse_mux_connections_total %d\n", m.ConnectionsTotal)
+	b.WriteString("# HELP fundai_workflow_sse_mux_subscriptions_total Total fund subscriptions across all multiplex SSE connections.\n")
+	b.WriteString("# TYPE fundai_workflow_sse_mux_subscriptions_total counter\n")
+	fmt.Fprintf(&b, "fundai_workflow_sse_mux_subscriptions_total %d\n", m.SubscriptionsTotal)
+	b.WriteString("# HELP fundai_workflow_sse_mux_forbidden_frames_total Number of forbidden-fund error frames emitted by the multiplex SSE endpoint.\n")
+	b.WriteString("# TYPE fundai_workflow_sse_mux_forbidden_frames_total counter\n")
+	fmt.Fprintf(&b, "fundai_workflow_sse_mux_forbidden_frames_total %d\n", m.ForbiddenFramesTotal)
+	return b.String()
 }
 
 const (
@@ -2225,8 +2588,15 @@ func requestLogger(metrics *serverMetrics, next http.Handler) http.Handler {
 		userID, _ := api.AuthenticatedUserID(r)
 		userRole, _ := api.AuthenticatedUserRole(r)
 		duration := time.Since(start)
+		// Templatized path collapses opaque IDs (UUID / nanoid /
+		// cuid / numeric ids) to {id} placeholders. The histogram
+		// + counter metrics use this label to keep cardinality
+		// bounded and make P95/P99 statistically meaningful.
+		// Raw path is still emitted on the structured log line so
+		// debugging individual requests stays possible.
+		routeLabel := templatizeAPIPath(r.URL.Path)
 		if metrics != nil {
-			metrics.ObserveHTTP(r.Method, r.URL.Path, recorder.status, duration)
+			metrics.ObserveHTTP(r.Method, routeLabel, recorder.status, duration)
 		}
 		slog.Info("request",
 			"request_id", requestID,
@@ -2234,6 +2604,7 @@ func requestLogger(metrics *serverMetrics, next http.Handler) http.Handler {
 			"span_id", spanID,
 			"method", r.Method,
 			"path", r.URL.Path,
+			"route", routeLabel,
 			"status", recorder.status,
 			"duration_ms", duration.Milliseconds(),
 			"bytes", recorder.bytesWritten,
@@ -3167,6 +3538,79 @@ type serverMetrics struct {
 
 var httpRequestDurationSecondsBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
+// httpRequestQuantiles is the canonical set of latency quantiles
+// computed at /api/metrics export time. We surface P50 (median —
+// "what does typical traffic look like"), P95 ("what does the
+// long tail of the slowest 5% look like"), and P99 ("does the
+// tail blow up"). Adding more quantiles is cheap; the cost is in
+// the resulting metric cardinality (one additional gauge series
+// per quantile per route × method × status).
+var httpRequestQuantiles = []float64{0.5, 0.95, 0.99}
+
+// bucketCountsForKey extracts the cumulative bucket counts for one
+// (method, route, status) key out of the flat httpRequestDurationBuckets
+// map. The map is keyed "<key>,le=<bucket>" and shares the bucket
+// schedule with httpRequestDurationSecondsBuckets — we walk that
+// schedule plus the implicit +Inf bucket and look up each entry.
+// Returns a slice with len(httpRequestDurationSecondsBuckets)+1
+// entries: [bucket0_count, bucket1_count, ..., +Inf_count].
+func bucketCountsForKey(all map[string]int64, key string) []int64 {
+	out := make([]int64, len(httpRequestDurationSecondsBuckets)+1)
+	for i, bound := range httpRequestDurationSecondsBuckets {
+		out[i] = all[fmt.Sprintf("%s,le=%s", key, prometheusFloat(bound))]
+	}
+	out[len(out)-1] = all[fmt.Sprintf("%s,le=+Inf", key)]
+	return out
+}
+
+// histogramQuantile estimates a quantile from a Prometheus-style
+// cumulative-bucket histogram via linear interpolation, mirroring
+// the standard histogram_quantile() PromQL function.
+//
+// boundaries: the upper bounds for each finite bucket (ascending).
+// counts:     cumulative observations falling into each bucket;
+//             counts[len(boundaries)] is the +Inf bucket.
+// total:      the total observation count (equals counts[+Inf]).
+// q:          the target quantile in (0, 1).
+//
+// Behaviour:
+//   - q ≤ 0: returns 0.
+//   - q ≥ 1: returns the largest finite bucket boundary (capped).
+//   - When the rank lands inside finite bucket i, interpolates
+//     linearly between boundaries[i-1] (or 0) and boundaries[i].
+//   - When the rank lands in the +Inf bucket, returns the largest
+//     finite boundary (caller should know the histogram is
+//     under-resolved at the tail).
+func histogramQuantile(boundaries []float64, counts []int64, total int64, q float64) float64 {
+	if total <= 0 || q <= 0 || len(boundaries) == 0 {
+		return 0
+	}
+	if q >= 1 {
+		return boundaries[len(boundaries)-1]
+	}
+	rank := q * float64(total)
+	prevCount := int64(0)
+	prevBound := 0.0
+	for i, ub := range boundaries {
+		c := counts[i]
+		if float64(c) >= rank {
+			// Rank lands in this bucket. Interpolate between
+			// prevBound..ub by the fractional position of (rank -
+			// prevCount) within (c - prevCount).
+			delta := float64(c - prevCount)
+			if delta <= 0 {
+				return ub
+			}
+			frac := (rank - float64(prevCount)) / delta
+			return prevBound + (ub-prevBound)*frac
+		}
+		prevCount = c
+		prevBound = ub
+	}
+	// Fell through to +Inf bucket; cap at the largest finite bound.
+	return boundaries[len(boundaries)-1]
+}
+
 func newServerMetrics() *serverMetrics {
 	return &serverMetrics{
 		httpRequestsTotal:             make(map[string]int64),
@@ -3871,6 +4315,31 @@ func (m *serverMetrics) ExportPrometheus() string {
 	for _, key := range sortedMetricKeys(m.httpRequestCount) {
 		lines = append(lines, fmt.Sprintf("fundai_http_request_duration_seconds_count{%s} %d", prometheusLabels(key), m.httpRequestCount[key]))
 	}
+	// Computed quantile gauges. Self-contained derivation from the
+	// bucket counters above via linear interpolation between bucket
+	// boundaries — cheap, deterministic, and lets operators alert
+	// on tail latency without standing up a Prometheus stack just
+	// to call histogram_quantile(). The accuracy is bounded by the
+	// bucket granularity: a 250 ms / 500 ms bucket pair caps the
+	// P95 estimate's resolution at 250 ms in that range.
+	lines = append(lines,
+		"# HELP fundai_http_request_duration_seconds_quantile Self-derived P50/P95/P99 latency in seconds (bucket interpolation).",
+		"# TYPE fundai_http_request_duration_seconds_quantile gauge",
+	)
+	for _, key := range sortedMetricKeys(m.httpRequestCount) {
+		count := m.httpRequestCount[key]
+		if count == 0 {
+			continue
+		}
+		buckets := bucketCountsForKey(m.httpRequestDurationBuckets, key)
+		for _, q := range httpRequestQuantiles {
+			val := histogramQuantile(httpRequestDurationSecondsBuckets, buckets, count, q)
+			lines = append(lines, fmt.Sprintf(
+				"fundai_http_request_duration_seconds_quantile{%s,quantile=\"%s\"} %.6f",
+				prometheusLabels(key), prometheusFloat(q), val,
+			))
+		}
+	}
 	lines = append(lines,
 		"# HELP fundai_http_panics_total Total recovered panics by path.",
 		"# TYPE fundai_http_panics_total counter",
@@ -4155,6 +4624,24 @@ func exportRuntimePrometheus(db *sql.DB, leaseManager *scheduler.LeaseManager) s
 	var lines []string
 	if db != nil {
 		stats := db.Stats()
+		// Pool saturation gauge (%): 100 × InUse / MaxOpen. When
+		// MaxOpen is 0 the pool is unlimited and the ratio is
+		// undefined — emit -1 so dashboards can mask the panel.
+		// Operators alert on this gauge approaching 90%, which is
+		// the canonical "your service is about to hang" signal
+		// before the wait_count counter starts climbing.
+		utilization := -1.0
+		if stats.MaxOpenConnections > 0 {
+			utilization = 100.0 * float64(stats.InUse) / float64(stats.MaxOpenConnections)
+		}
+		// Wait-duration average (seconds per wait). Helps separate
+		// "many small waits" from "one giant stall" — both share
+		// the same wait_count number but mean very different things
+		// for tail latency. -1 when wait_count is 0.
+		waitAvg := -1.0
+		if stats.WaitCount > 0 {
+			waitAvg = stats.WaitDuration.Seconds() / float64(stats.WaitCount)
+		}
 		lines = append(lines,
 			"# HELP fundai_db_open_connections Current number of established database connections.",
 			"# TYPE fundai_db_open_connections gauge",
@@ -4168,12 +4655,27 @@ func exportRuntimePrometheus(db *sql.DB, leaseManager *scheduler.LeaseManager) s
 			"# HELP fundai_db_max_open_connections Configured maximum number of open database connections. Zero means unlimited.",
 			"# TYPE fundai_db_max_open_connections gauge",
 			fmt.Sprintf("fundai_db_max_open_connections %d", stats.MaxOpenConnections),
+			"# HELP fundai_db_pool_utilization_pct Pool utilization in percent (100 * in_use / max_open). -1 when max_open is unlimited.",
+			"# TYPE fundai_db_pool_utilization_pct gauge",
+			fmt.Sprintf("fundai_db_pool_utilization_pct %.2f", utilization),
 			"# HELP fundai_db_wait_count_total Total database connection waits due to pool saturation.",
 			"# TYPE fundai_db_wait_count_total counter",
 			fmt.Sprintf("fundai_db_wait_count_total %d", stats.WaitCount),
 			"# HELP fundai_db_wait_duration_seconds_total Total time spent waiting for database connections.",
 			"# TYPE fundai_db_wait_duration_seconds_total counter",
 			fmt.Sprintf("fundai_db_wait_duration_seconds_total %.6f", stats.WaitDuration.Seconds()),
+			"# HELP fundai_db_wait_avg_seconds Average wait time per acquisition that had to block on the pool. -1 when no waits have occurred.",
+			"# TYPE fundai_db_wait_avg_seconds gauge",
+			fmt.Sprintf("fundai_db_wait_avg_seconds %.6f", waitAvg),
+			"# HELP fundai_db_max_idle_closed_total Total connections closed due to MaxIdleConns enforcement. Spikes mean the pool is over-trimming idle conns.",
+			"# TYPE fundai_db_max_idle_closed_total counter",
+			fmt.Sprintf("fundai_db_max_idle_closed_total %d", stats.MaxIdleClosed),
+			"# HELP fundai_db_max_idle_time_closed_total Total connections closed due to ConnMaxIdleTime expiry.",
+			"# TYPE fundai_db_max_idle_time_closed_total counter",
+			fmt.Sprintf("fundai_db_max_idle_time_closed_total %d", stats.MaxIdleTimeClosed),
+			"# HELP fundai_db_max_lifetime_closed_total Total connections closed due to ConnMaxLifetime expiry.",
+			"# TYPE fundai_db_max_lifetime_closed_total counter",
+			fmt.Sprintf("fundai_db_max_lifetime_closed_total %d", stats.MaxLifetimeClosed),
 		)
 	}
 	if leaseManager != nil {

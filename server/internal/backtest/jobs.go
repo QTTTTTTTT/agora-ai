@@ -64,16 +64,89 @@ func NewJobStore(engine Engine) *JobStore {
 // Job is the per-submission record. Progress is exposed for
 // polling; Result is only populated after Status transitions to
 // "completed". Error is populated on "failed".
+//
+// Concurrency contract (W14-4 — race fix):
+//
+//   IMMUTABLE after Submit returns: ID, Request, SubmittedAt,
+//   Progress, cancel. These may be read freely from any
+//   goroutine without locks.
+//
+//   MUTABLE under mu: StartedAt, CompletedAt, Result, Err.
+//   These are written exclusively by the runner goroutine in
+//   run(). External callers MUST go through Snapshot() (or
+//   acquire mu via the helper accessors) to read them. Reading
+//   the public fields directly without holding mu is a data
+//   race even after Progress.Snapshot().Status returns
+//   "completed" — Go's race detector tracks happens-before
+//   per-mutex, and synchronisation through Progress.mu does
+//   NOT extend to these unrelated fields.
+//
+// We deliberately keep the field names exported for backwards
+// compatibility with the existing wire-shape projection helpers
+// (backtest_adapter.go, etc.). Treat them as read-only when
+// the goroutine you're on is not the runner.
 type Job struct {
+	ID          string
+	Request     Request
+	SubmittedAt time.Time
+	Progress    *Progress
+	cancel      context.CancelFunc
+
+	// All fields below are guarded by mu. The runner goroutine
+	// writes; everyone else reads via Snapshot.
+	mu          sync.RWMutex
+	StartedAt   time.Time
+	CompletedAt time.Time
+	Result      *Result
+	Err         error
+}
+
+// JobSnapshot is the race-free view of a Job. Returned by
+// Job.Snapshot() — all fields are copies of the underlying
+// state captured atomically (well, under mu) so callers can
+// safely format / serialise without re-touching the live Job.
+//
+// We embed ProgressSnapshot rather than the live *Progress so
+// the snapshot is fully self-contained. Callers that needed the
+// live progress pointer (e.g. to subscribe for further updates)
+// still have job.Progress directly — the snapshot is for
+// "render this state to JSON now" use cases.
+type JobSnapshot struct {
 	ID          string
 	Request     Request
 	SubmittedAt time.Time
 	StartedAt   time.Time
 	CompletedAt time.Time
-	Progress    *Progress
+	Progress    ProgressSnapshot
 	Result      *Result
 	Err         error
-	cancel      context.CancelFunc
+}
+
+// Snapshot returns a stable view of the mutable Job fields. Safe
+// to call from any goroutine. Callers should prefer this over
+// reading job.StartedAt / job.Result / job.Err directly — those
+// reads race with the runner goroutine.
+//
+// The Result pointer is shared (we don't deep-copy NavCurve and
+// Trades), so once a job has finalised the snapshot's Result
+// pointer is stable. Callers must not mutate Result through the
+// snapshot — that would leak back into the JobStore.
+func (j *Job) Snapshot() JobSnapshot {
+	if j == nil {
+		return JobSnapshot{}
+	}
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return JobSnapshot{
+		ID:          j.ID,
+		Request:     j.Request,
+		SubmittedAt: j.SubmittedAt,
+		StartedAt:   j.StartedAt,
+		CompletedAt: j.CompletedAt,
+		Progress:    j.Progress.Snapshot(),
+		Result:      j.Result,
+		Err:         j.Err,
+	}
 }
 
 // Submit enqueues a new backtest and starts the goroutine
@@ -125,6 +198,13 @@ func (s *JobStore) Submit(ctx context.Context, req Request) (*Job, error) {
 }
 
 // run is the background goroutine for one job.
+//
+// W14-4 — every assignment to the mutable Job fields runs under
+// job.mu. We grab the write lock briefly per assignment rather
+// than holding it for the whole engine.Run, since engine.Run is
+// what we actually want concurrent readers to be able to
+// observe progress on (via Progress.Snapshot, which has its own
+// lock).
 func (s *JobStore) run(ctx context.Context, job *Job) {
 	defer job.cancel()
 	defer func() {
@@ -132,19 +212,26 @@ func (s *JobStore) run(ctx context.Context, job *Job) {
 			s.OnFinal(job)
 		}
 	}()
+	job.mu.Lock()
 	job.StartedAt = s.now()
+	job.mu.Unlock()
 	result, err := s.engine.Run(ctx, job.Request, job.Progress)
-	job.CompletedAt = s.now()
 	if err != nil {
+		job.mu.Lock()
+		job.CompletedAt = s.now()
+		job.Err = err
+		job.mu.Unlock()
 		if errors.Is(err, ErrCancelled) {
 			job.Progress.markStatus("cancelled", err)
 		} else {
 			job.Progress.markStatus("failed", err)
 		}
-		job.Err = err
 		return
 	}
+	job.mu.Lock()
+	job.CompletedAt = s.now()
 	job.Result = result
+	job.mu.Unlock()
 	job.Progress.markStatus("completed", nil)
 }
 

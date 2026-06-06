@@ -155,7 +155,11 @@ func (l *memoryEmbedLoop) runOnce() {
 		if text == "" {
 			continue
 		}
-		vec, err := l.embedder.Embed(ctx, text)
+		// W14-1 — derive a per-row ctx so the QuotaEmbedder side-
+		// car attributes this call. Empty fundID returns ctx
+		// unchanged, so legacy NULL rows still flow through.
+		embedCtx := recall.WithFundID(ctx, row.fundID)
+		vec, err := l.embedder.Embed(embedCtx, text)
 		if err != nil {
 			failed++
 			slog.Warn("memory embed: provider failed", "id", row.id, "err", err)
@@ -182,12 +186,18 @@ func (l *memoryEmbedLoop) runOnce() {
 
 type dueMemoryEmbed struct {
 	id      string
+	fundID  string // W14-1 — populated for per-fund embed observability.
 	content string
 }
 
 func (l *memoryEmbedLoop) loadDue(ctx context.Context, batch int) ([]dueMemoryEmbed, error) {
+	// W14-1 — also pull fund_id so the embed call can be
+	// attributed per fund. Legacy rows (cold-start, pre-001
+	// migration) may have NULL fund_id; we accept the value as
+	// "" and the side-car will silently drop those calls from
+	// per-fund metrics, which is the correct semantics.
 	const q = `
-SELECT id, content
+SELECT id, COALESCE(fund_id::text, ''), content
   FROM memories
  WHERE embedding IS NULL
    AND content IS NOT NULL
@@ -201,7 +211,7 @@ SELECT id, content
 	var out []dueMemoryEmbed
 	for rows.Next() {
 		var d dueMemoryEmbed
-		if err := rows.Scan(&d.id, &d.content); err != nil {
+		if err := rows.Scan(&d.id, &d.fundID, &d.content); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
