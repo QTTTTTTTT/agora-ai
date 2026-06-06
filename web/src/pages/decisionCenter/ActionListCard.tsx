@@ -37,6 +37,12 @@ export interface ActionListCardLabels {
   contractMultiplier: string;
   expiryDate: string;
   opposedBy: string;
+  /**
+   * W13-4 — joiner for inline lists (e.g. opposedBy =
+   * ["Risk","Compliance"] → "Risk, Compliance" in en, "Risk、Compliance"
+   * in zh). See the en-US/zh-CN decisionCenter bundle.
+   */
+  listSeparator: string;
   reduceOnly: string;
   marketResearch: string;
   researchSummary: string;
@@ -185,7 +191,7 @@ function ActionListCardInner({
                     {action.expiryDate ? <span>{labels.expiryDate}: {formatDateForLanguage(action.expiryDate, language)}</span> : null}
                   </div>
                   {(action.opposedBy ?? []).length ? (
-                    <p className="mt-2 text-xs text-red-600">{labels.opposedBy}: {action.opposedBy?.join(language === "en-US" ? ", " : "、")}</p>
+                    <p className="mt-2 text-xs text-red-600">{labels.opposedBy}: {action.opposedBy?.join(labels.listSeparator)}</p>
                   ) : null}
                   <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500">{labels.marketResearch}</h4>

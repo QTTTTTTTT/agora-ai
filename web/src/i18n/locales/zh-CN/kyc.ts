@@ -1,0 +1,31 @@
+// KYC.tsx 的中文翻译（W4-26 迁移）。
+const kyc = {
+  title: "实名认证（KYC）",
+  subtitle: "提交或查看当前认证状态。实盘交易、市场发布与钱包充值前需要完成 KYC。",
+  back: "返回公司列表",
+  loading: "正在加载 KYC 状态...",
+  loadError: "加载 KYC 状态失败",
+  currentStatus: "当前状态",
+  currentLevel: "当前等级",
+  submitTitle: "提交认证申请",
+  fullName: "真实姓名",
+  level: "申请等级",
+  documentType: "证件类型",
+  documentNumber: "证件号码",
+  documentUrls: "证件图片 URL（可选，每行一个）",
+  submit: "提交审核",
+  submitting: "提交中...",
+  submitError: "提交 KYC 申请失败",
+  submitSuccess: "KYC 申请已提交，等待管理员审核。",
+  pendingBlock: "你已有待审核的 KYC 申请，请等待管理员处理后再提交新的申请。",
+  verifiedBlock: "当前账号已具备该等级或更高等级认证；如需升级，请选择更高等级。",
+  fullNameRequired: "请输入真实姓名。",
+  documentRequired: "请输入证件号码。",
+  history: "申请历史",
+  noHistory: "暂无 KYC 申请记录。",
+  attachments: "附件",
+  rejectionReason: "拒绝原因",
+  submittedAt: "提交于",
+} as const;
+
+export default kyc;

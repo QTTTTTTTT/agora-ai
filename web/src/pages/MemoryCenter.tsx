@@ -4,6 +4,13 @@ import { apiGet, formatApiError } from "../lib/api";
 import { formatDateForLanguage, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
 import { renderLesson } from "../lib/lessonRenderer";
 import { highlightTokens, rankMemoryEntries, type ScoredMemoryEntry } from "../lib/memorySearch";
+// W10-3 — i18n migration. The runtime bundle comes from
+// `i18n.getResourceBundle()`; the static import is the
+// fallback / type-source so consumer JSX keeps narrow literal
+// types when indexing nested objects by typed enums (e.g.
+// `copy.layerLabels[layer as MemoryLayer]`).
+import i18n from "../i18n";
+import memoryCenterEnFallback from "../i18n/locales/en-US/memoryCenter";
 
 import type { MemoryLayer as SharedMemoryLayer } from "@fundai/api-client";
 
@@ -219,137 +226,20 @@ const MemoryCenter: React.FC = () => {
   const [query, setQuery] = useState("");
   const [focus, setFocus] = useState<MemoryFocus>("all");
 
-  const copy = useMemo(
-    () =>
-      language === "en-US"
-        ? {
-            loading: "Loading memory center...",
-            retry: "Retry",
-            missingFundId: "Missing fundId",
-            loadFailed: "Failed to load memory center",
-            title: "Memory center",
-            subtitle:
-              "Browse long-term memory, daily logs, distilled insights, and collaborative records for the fund, then filter by member, timeline, and statistics.",
-            memberFilter: "Member filter",
-            allMembers: "All members",
-            focusLabel: "Focus",
-            focusOptions: {
-              all: "All memory",
-              market: "Market research",
-            } as Record<MemoryFocus, string>,
-            marketCoverage: "Market coverage",
-            marketCoverageSubtitle: "Track how much of the team memory is now grounded in quotes, news, and research snapshots.",
-            marketEntries: "Market entries",
-            marketTags: "Market tags",
-            latestMarketEntry: "Latest market entry",
-            noMarketEntry: "None yet",
-            researchBadge: "Research",
-            newsBadge: "News",
-            quoteBadge: "Quote",
-            signalBadge: "Signal",
-            viewModes: {
-              content: "Content",
-              search: "Search",
-              timeline: "Timeline",
-              stats: "Stats",
-            } as Record<ViewMode, string>,
-            statsEmptyTitle: "No memory data to analyze yet",
-            statsEmptyDescription:
-              "Once workflows, research discussions, or team collaboration produce records, this view will summarize layer distribution, active members, and key themes.",
-            totalEntries: "Total entries",
-            mostActiveMember: "Most active member",
-            layerDistribution: "Layer distribution",
-            topTags: "Top tags",
-            noTags: "No tags yet",
-            searchPlaceholder: "Search memory by title or content...",
-            foundResults: "results found",
-            noSearchResults: "No matching memory found. Try different keywords or switch back to content view.",
-            timelineTitle: "Daily log timeline",
-            timelineEmpty: "No daily memory exists yet. Once day-to-day runs and collaboration records appear, key events will show up here in order.",
-            contentEmpty: "This layer has no memory entries yet. Related collaboration records will settle here automatically later.",
-            noSelectedEntry: "There is no memory to display in this layer yet. Switch to another layer or wait for new records.",
-            memberPrefix: "Member:",
-            unassignedMember: "Unassigned member",
-            noActiveMember: "None yet",
-            layerLabels: {
-              long_term: "Long-term memory",
-              daily: "Daily logs",
-              dreams: "Insights",
-              agent: "Collaboration memory",
-              analysis: "Market analysis",
-            } as Record<MemoryLayer, string>,
-            layerIcons: {
-              long_term: "🧠",
-              daily: "📅",
-              dreams: "💭",
-              agent: "🤖",
-              analysis: "📈",
-            } as Record<MemoryLayer, string>,
-          }
-        : {
-            loading: "正在加载记忆中心...",
-            retry: "重试",
-            missingFundId: "缺少 fundId",
-            loadFailed: "加载记忆中心失败",
-            title: "记忆中心",
-            subtitle: "查看基金的长期记忆、日记日志、洞察沉淀与成员协作记录，并按成员筛选内容、时间线与统计。",
-            memberFilter: "成员筛选",
-            allMembers: "全部成员",
-            focusLabel: "查看重点",
-            focusOptions: {
-              all: "全部记忆",
-              market: "市场研究",
-            } as Record<MemoryFocus, string>,
-            marketCoverage: "市场研究覆盖",
-            marketCoverageSubtitle: "快速查看团队记忆里有多少内容已经沉淀为行情、资讯和研究快照。",
-            marketEntries: "市场条目",
-            marketTags: "市场标签",
-            latestMarketEntry: "最近市场条目",
-            noMarketEntry: "暂无",
-            researchBadge: "研究",
-            newsBadge: "资讯",
-            quoteBadge: "行情",
-            signalBadge: "信号",
-            viewModes: {
-              content: "内容视图",
-              search: "全文搜索",
-              timeline: "时间线",
-              stats: "统计",
-            } as Record<ViewMode, string>,
-            statsEmptyTitle: "当前还没有可统计的记忆内容",
-            statsEmptyDescription: "等策略流程、研究讨论或成员协作产生记录后，这里会自动汇总条目分布、活跃成员与高频主题。",
-            totalEntries: "总条目数",
-            mostActiveMember: "最活跃成员",
-            layerDistribution: "分层分布",
-            topTags: "高频标签",
-            noTags: "暂无标签统计",
-            searchPlaceholder: "按标题、内容关键词搜索记忆...",
-            foundResults: "条结果",
-            noSearchResults: "没有匹配的记忆内容，请尝试更换关键词或切到内容视图浏览各层记录。",
-            timelineTitle: "日记时间线",
-            timelineEmpty: "当前还没有日记层记忆。等日常运行和协作记录产生后，这里会按时间顺序展示关键节点。",
-            contentEmpty: "该层还没有记忆条目，后续相关协作内容会自动沉淀到这里。",
-            noSelectedEntry: "当前层还没有可展示的记忆内容，请先切换到其他层或等待新的协作记录写入。",
-            memberPrefix: "成员：",
-            unassignedMember: "未关联成员",
-            noActiveMember: "暂无",
-            layerLabels: {
-              long_term: "长期记忆",
-              daily: "日记日志",
-              dreams: "洞察沉淀",
-              agent: "协作记忆",
-              analysis: "市场分析",
-            } as Record<MemoryLayer, string>,
-            layerIcons: {
-              long_term: "🧠",
-              daily: "📅",
-              dreams: "💭",
-              agent: "🤖",
-              analysis: "📈",
-            } as Record<MemoryLayer, string>,
-          },
-    [language],
-  );
+  // W10-3 — translations now live in
+  // web/src/i18n/locales/{en-US,zh-CN}/memoryCenter.ts. We resolve
+  // the bundle via `getResourceBundle` rather than `useTranslation`'s
+  // `t()` so existing JSX (`copy.layerLabels.long_term`,
+  // `copy.viewModes[viewMode]`) keeps its narrow literal types from
+  // the `as const` fallback — losing those types would force every
+  // index access into `string | undefined` and require defensive
+  // fallbacks at every call site.
+  const copy = useMemo(() => {
+    const bundle = i18n.getResourceBundle(language, "memoryCenter") as
+      | typeof memoryCenterEnFallback
+      | undefined;
+    return bundle ?? memoryCenterEnFallback;
+  }, [language]);
 
   const layerMeta = useMemo(
     () => ({

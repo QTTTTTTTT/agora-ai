@@ -49,6 +49,62 @@ import forgotPasswordEn from "./locales/en-US/forgotPassword";
 import forgotPasswordZh from "./locales/zh-CN/forgotPassword";
 import validationEn from "./locales/en-US/validation";
 import validationZh from "./locales/zh-CN/validation";
+// W4-26 — i18n coverage of 5 core pages. Each new namespace
+// mirrors the previously-inline `copy` block of the matching
+// page; see the per-page TSX for the consumer side.
+import auditLogEn from "./locales/en-US/auditLog";
+import auditLogZh from "./locales/zh-CN/auditLog";
+import resetPasswordEn from "./locales/en-US/resetPassword";
+import resetPasswordZh from "./locales/zh-CN/resetPassword";
+import verifyEmailEn from "./locales/en-US/verifyEmail";
+import verifyEmailZh from "./locales/zh-CN/verifyEmail";
+import walletEn from "./locales/en-US/wallet";
+import walletZh from "./locales/zh-CN/wallet";
+import kycEn from "./locales/en-US/kyc";
+import kycZh from "./locales/zh-CN/kyc";
+// W5-1 — deep i18n migration of TradeHistory's full string surface
+// (column headers, status / side / order-type dictionaries,
+// modify-order modal labels, slice splitter labels). The shape
+// mirrors the previously-inline `copy` block one-for-one.
+import tradeHistoryEn from "./locales/en-US/tradeHistory";
+import tradeHistoryZh from "./locales/zh-CN/tradeHistory";
+// W7-2 — Dashboard.tsx i18n migration. Function-valued strings
+// (priceFreshness.{secondsAgo,minutesAgo,...}) are stored as
+// interpolation templates with `{{n}}`; the consumer renders via
+// `t("priceFreshness.secondsAgo", { n })` so the bundle stays
+// JSON-serializable for the W6-3 parity guard.
+import dashboardEn from "./locales/en-US/dashboard";
+import dashboardZh from "./locales/zh-CN/dashboard";
+// W8-3 — MultiFundOverview i18n migration. Small surface (~30
+// keys), no function-valued translations, mirrors the structure
+// of the previously-inline `copy = isEnglish ? {...} : {...}`
+// ternary one-for-one.
+import multiFundOverviewEn from "./locales/en-US/multiFundOverview";
+import multiFundOverviewZh from "./locales/zh-CN/multiFundOverview";
+// W9-3 — FundPerformance i18n migration. Mirrors the previously-
+// inline `COPY: Record<AppLanguage, PageCopy>` table; nested
+// `kpis`, `windowLabels`, `contributorsCols` objects are
+// preserved verbatim so the consumer keeps using the same
+// `copy.kpis.totalReturn` access shape.
+import fundPerformanceEn from "./locales/en-US/fundPerformance";
+import fundPerformanceZh from "./locales/zh-CN/fundPerformance";
+// W10-3 — MemoryCenter i18n migration. Largest surface so far
+// (~50 keys including 4 enum-keyed nested objects: focusOptions,
+// viewModes, layerLabels, layerIcons). Same `as const` pattern
+// as the prior page migrations so the consumer keeps narrow
+// literal-string types when indexing by typed enum.
+import memoryCenterEn from "./locales/en-US/memoryCenter";
+import memoryCenterZh from "./locales/zh-CN/memoryCenter";
+// W11-3 — DecisionCenter i18n migration. New high-water mark for
+// surface size (~150 keys spread across 11 enum-keyed nested
+// objects: traceStepStatus, workflowSteps, summaryLabel,
+// riskVerdict, planStatus, actionType, checkResult,
+// executionStatuses, positionSides, openClose, columns).
+// Function-valued translations (`livePriceDriftWarning(percent)`,
+// `checkName(index)`) are flattened to `{{percent}}` /
+// `{{index}}` interpolation templates.
+import decisionCenterEn from "./locales/en-US/decisionCenter";
+import decisionCenterZh from "./locales/zh-CN/decisionCenter";
 
 export type SupportedLanguage = "zh-CN" | "en-US";
 
@@ -56,10 +112,32 @@ const RESOURCES = {
   "zh-CN": {
     forgotPassword: forgotPasswordZh,
     validation: validationZh,
+    auditLog: auditLogZh,
+    resetPassword: resetPasswordZh,
+    verifyEmail: verifyEmailZh,
+    wallet: walletZh,
+    kyc: kycZh,
+    tradeHistory: tradeHistoryZh,
+    dashboard: dashboardZh,
+    multiFundOverview: multiFundOverviewZh,
+    fundPerformance: fundPerformanceZh,
+    memoryCenter: memoryCenterZh,
+    decisionCenter: decisionCenterZh,
   },
   "en-US": {
     forgotPassword: forgotPasswordEn,
     validation: validationEn,
+    auditLog: auditLogEn,
+    resetPassword: resetPasswordEn,
+    verifyEmail: verifyEmailEn,
+    wallet: walletEn,
+    kyc: kycEn,
+    tradeHistory: tradeHistoryEn,
+    dashboard: dashboardEn,
+    multiFundOverview: multiFundOverviewEn,
+    fundPerformance: fundPerformanceEn,
+    memoryCenter: memoryCenterEn,
+    decisionCenter: decisionCenterEn,
   },
 } as const;
 

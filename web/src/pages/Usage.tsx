@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts";
 import { apiGet, formatApiError } from "../lib/api";
+import { useSWRFetch } from "../lib/useSWRFetch";
 import {
   convertMoneyForDisplay,
   formatDateTimeForLanguage,
@@ -172,12 +173,12 @@ const Usage: React.FC = () => {
   const { language, displayCurrency } = useAppPreferences();
   const [activeTab, setActiveTab] = useState<TabKey>("today");
   const [historyPage, setHistoryPage] = useState(0);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [todayData, setTodayData] = useState<TodayUsageResponse | null>(null);
-  const [monthlyData, setMonthlyData] = useState<MonthlyUsageResponse | null>(null);
-  const [billData, setBillData] = useState<BillResponse | null>(null);
-  const [estimate, setEstimate] = useState<EstimateResponse | null>(null);
+  // Pagination history is fetched imperatively because the offset
+  // changes with user clicks and we want optimistic page-flip UX.
+  // The 4 "static" snapshots (today / monthly / bill / estimate)
+  // are SWR-cached so a tab flip back to /usage doesn't re-trigger
+  // the whole bundle.
   const [historyData, setHistoryData] = useState<UsageHistoryResponse | null>(null);
 
   const copy = useMemo(
@@ -441,35 +442,54 @@ const Usage: React.FC = () => {
     [copy.loadHistoryError],
   );
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const [todayRes, monthlyRes, billRes, estimateRes, historyRes] = await Promise.all([
+  // SWR cache for the static usage bundle. Five endpoints fetched
+  // in parallel; the page treats them as one logical snapshot, so
+  // we wrap them in a single Promise.all and key on a fixed slug.
+  // ttl=60s — Usage figures tick at sub-minute frequency on the
+  // server (after each LLM call), so a 60s window is the right
+  // tradeoff between freshness and "tab-flip" responsiveness.
+  type UsageBundle = {
+    today: TodayUsageResponse;
+    monthly: MonthlyUsageResponse;
+    bill: BillResponse;
+    estimate: EstimateResponse;
+    history: UsageHistoryResponse;
+  };
+  const usageSwr = useSWRFetch<UsageBundle>(
+    "usage/p0",
+    async () => {
+      const [today, monthly, bill, estimate, history] = await Promise.all([
         apiGet<TodayUsageResponse>("/api/usage/today"),
         apiGet<MonthlyUsageResponse>("/api/usage/monthly"),
         apiGet<BillResponse>("/api/usage/bill"),
         apiGet<EstimateResponse>("/api/usage/estimate"),
         apiGet<UsageHistoryResponse>(`/api/usage/history?offset=0&limit=${pageSize}`),
       ]);
+      return { today, monthly, bill, estimate, history };
+    },
+    { ttlMs: 60_000 },
+  );
 
-      setTodayData(todayRes);
-      setMonthlyData(monthlyRes);
-      setBillData(billRes);
-      setEstimate(estimateRes);
-      setHistoryData(historyRes);
-      setHistoryPage(0);
+  const todayData = usageSwr.data?.today ?? null;
+  const monthlyData = usageSwr.data?.monthly ?? null;
+  const billData = usageSwr.data?.bill ?? null;
+  const estimate = usageSwr.data?.estimate ?? null;
+  // effectiveHistory is the source-of-truth for what the History
+  // tab renders. On page 0 we seed from SWR's cached snapshot
+  // (free re-mount, no network); on later pages we read from the
+  // imperatively-managed state, which loadPage updates.
+  const effectiveHistory = historyPage === 0 ? usageSwr.data?.history ?? historyData : historyData;
+  const loading = !usageSwr.data && usageSwr.isLoading;
+  const swrError = usageSwr.error ? formatApiError(usageSwr.error, copy.loadError) : null;
+  const loadData = useCallback(async () => {
+    setError(null);
+    setHistoryPage(0);
+    try {
+      await usageSwr.mutate();
     } catch (err) {
       setError(formatApiError(err, copy.loadError));
-    } finally {
-      setLoading(false);
     }
-  }, [copy.loadError]);
-
-  useEffect(() => {
-    void loadData();
-  }, [loadData]);
+  }, [copy.loadError, usageSwr]);
 
   useEffect(() => {
     if (historyPage === 0) {
@@ -497,9 +517,15 @@ const Usage: React.FC = () => {
       cost: Number(converted.amount.toFixed(2)),
     }));
   }, [displayCurrency, estimate, language, monthlySummary]);
-  const totalHistoryPages = historyData ? Math.max(1, Math.ceil(historyData.total / pageSize)) : 1;
+  const totalHistoryPages = effectiveHistory ? Math.max(1, Math.ceil(effectiveHistory.total / pageSize)) : 1;
   const bill = billData?.bill ?? null;
   const billStatus = billStatusMeta(bill?.status);
+
+  // Combined error: SWR (network) takes precedence on first paint;
+  // local error reflects user-driven actions (loadPage, manual
+  // retry click) and overrides once it fires. Resetting to null
+  // when both clear keeps the banner from sticking around.
+  const displayError = error ?? swrError;
 
   if (loading) {
     return (
@@ -510,12 +536,12 @@ const Usage: React.FC = () => {
     );
   }
 
-  if (error) {
+  if (displayError) {
     return (
       <div className="space-y-4">
         <h1 className="text-2xl font-bold text-gray-900">{copy.title}</h1>
         <div className="rounded-lg border border-red-200 bg-red-50 p-6 text-sm text-red-700">
-          <p>{error}</p>
+          <p>{displayError}</p>
           <button onClick={() => void loadData()} className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
             {copy.retry}
           </button>
@@ -691,11 +717,11 @@ const Usage: React.FC = () => {
 
       {activeTab === "history" ? (
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
-          {historyData && historyData.entries.length > 0 ? (
+          {effectiveHistory && effectiveHistory.entries.length > 0 ? (
             <>
               <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3 text-sm text-gray-500">
-                <span>{copy.historySummary.total} {formatCount(historyData.total)} {copy.historySummary.entries}</span>
-                <span>{copy.historySummary.page} {formatCount(historyData.entries.length)} {copy.historySummary.entries}</span>
+                <span>{copy.historySummary.total} {formatCount(effectiveHistory.total)} {copy.historySummary.entries}</span>
+                <span>{copy.historySummary.page} {formatCount(effectiveHistory.entries.length)} {copy.historySummary.entries}</span>
               </div>
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 text-gray-600">
@@ -708,7 +734,7 @@ const Usage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {historyData.entries.map((row) => (
+                  {effectiveHistory.entries.map((row) => (
                     <tr key={row.id} className="hover:bg-gray-50">
                       <td className="px-4 py-3 text-gray-500">{formatDateTimeForLanguage(row.created_at, language)}</td>
                       <td className="px-4 py-3 text-gray-700">{stepLabel(row.step_name)}</td>
@@ -726,7 +752,7 @@ const Usage: React.FC = () => {
               </table>
               <div className="flex items-center justify-between border-t px-4 py-3">
                 <span className="text-sm text-gray-500">
-                  {copy.historySummary.total} {formatCount(historyData.total)} {copy.historySummary.entries}，{copy.pageIndicator} {formatCount(historyPage + 1)}/{formatCount(totalHistoryPages)}
+                  {copy.historySummary.total} {formatCount(effectiveHistory.total)} {copy.historySummary.entries}，{copy.pageIndicator} {formatCount(historyPage + 1)}/{formatCount(totalHistoryPages)}
                 </span>
                 <div className="flex gap-2">
                   <button

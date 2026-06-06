@@ -2964,6 +2964,136 @@ export async function fetchLLMHealthRecentFallbacks(
   );
 }
 
+// W9-2 — admin JSON view onto the W6-1 memory re-embed queue.
+//
+// Lives next to the LLM-health helpers because both feed admin
+// observability panels rather than the public app surface. The
+// shape mirrors `memReembedStatus` in
+// server/cmd/server/memreembed_handler.go — keep them in sync.
+export interface AdminMemReembedStatus {
+  enabled: boolean;
+  pending: number;
+  embeddedTotal: number;
+  retriedTotal: number;
+  deadLetterTotal: number;
+  // Both are optional because they are omitted server-side when
+  // the queue has never recorded an error (omitempty in Go).
+  lastErrorUnix?: number;
+  lastErrorTime?: string;
+  observedAt: string;
+}
+
+export async function fetchAdminMemReembedStatus(): Promise<AdminMemReembedStatus> {
+  return apiGet<AdminMemReembedStatus>("/api/admin/memreembed/status");
+}
+
+// W13-1 — admin JSON view onto the database connection pool.
+// Mirror of `dbPoolStatus` in
+// server/cmd/server/db_pool_handler.go — keep in sync.
+//
+// `utilizationPct` and `waitAvgSeconds` come back as -1 when the
+// underlying value is undefined (no MaxOpen configured, or no
+// waits observed yet). Render those as "—" rather than "-1%" /
+// "-1.0 s" — the Go side intentionally negative-encodes "unknown"
+// so the JSON shape stays a number for graphing libraries.
+export interface AdminDBPoolStatus {
+  openConnections: number;
+  inUseConnections: number;
+  idleConnections: number;
+  maxOpenConnections: number;
+  maxIdleConnsConfig: number;
+  connMaxLifetimeNs: number;
+  connMaxLifetime: string;
+  utilizationPct: number;
+  waitAvgSeconds: number;
+  waitCount: number;
+  waitDurationNs: number;
+  waitDurationHuman: string;
+  maxIdleClosedTotal: number;
+  maxIdleTimeClosedTotal: number;
+  maxLifetimeClosedTotal: number;
+  observedAt: string;
+}
+
+export async function fetchAdminDBPoolStatus(): Promise<AdminDBPoolStatus> {
+  return apiGet<AdminDBPoolStatus>("/api/admin/db-pool/status");
+}
+
+// W11-1 — admin JSON view onto the embedquota.Limiter.
+// Mirror of `embedQuotaStatus` in
+// server/cmd/server/embed_quota_handler.go — keep in sync.
+//
+// Field names map 1:1 to the Go JSON tags. The histogram-derived
+// fields (acquireWaitP99Seconds / callTokensP99) are estimates
+// snapped to a bucket boundary; treat as "tail trend" indicators,
+// not exact percentiles. For real percentile math the Grafana
+// Prometheus dashboard remains canonical.
+// W12-3 — paired with /api/admin/embed-quota/status's
+// `tokenHistory` field. The Go side guarantees exactly 7
+// entries (or omits the field entirely when the limiter is
+// disabled) sorted ascending by day, with today last and any
+// gaps zero-filled. The UI sparkline reads index n-1 as "today".
+export interface EmbedQuotaTokenDay {
+  day: string;
+  tokens: number;
+}
+
+export interface AdminEmbedQuotaStatus {
+  enabled: boolean;
+  status: string;
+  tokensTodayUsed: number;
+  tokensDailyMax: number;
+  tokensTodayShare: number;
+  callsLastMinute: number;
+  callsPerMinuteMax: number;
+  softLimitFraction: number;
+  throttledTotal: number;
+  exhaustedTotal: number;
+  acquireWaitCount: number;
+  acquireWaitSumSeconds: number;
+  acquireWaitP99Seconds: number;
+  callTokensCount: number;
+  callTokensSum: number;
+  callTokensP99: number;
+  tokenHistory?: EmbedQuotaTokenDay[];
+  observedAt: string;
+}
+
+export async function fetchAdminEmbedQuotaStatus(): Promise<AdminEmbedQuotaStatus> {
+  return apiGet<AdminEmbedQuotaStatus>("/api/admin/embed-quota/status");
+}
+
+// W14-3 — wire shape for /api/admin/embed-quota/per-fund.
+// Mirrors embedQuotaPerFundResponse / embedQuotaFundEntry on
+// the Go side. The bucket arrays are intentionally NOT
+// included — Prometheus owns histogram detail; this surface is
+// optimised for "which fund is the worst offender right now".
+export interface AdminEmbedQuotaFundEntry {
+  fundId: string;
+  throttledTotal: number;
+  exhaustedTotal: number;
+  waitCount: number;
+  acquireWaitSumSeconds: number;
+  acquireWaitP99Seconds: number;
+  callTokensCount: number;
+  callTokensSum: number;
+  callTokensP99: number;
+  tokensTodayUsed: number;
+  lastSeenAt: string;
+}
+
+export interface AdminEmbedQuotaPerFundStatus {
+  enabled: boolean;
+  funds: AdminEmbedQuotaFundEntry[];
+  observedAt: string;
+}
+
+export async function fetchAdminEmbedQuotaPerFund(): Promise<AdminEmbedQuotaPerFundStatus> {
+  return apiGet<AdminEmbedQuotaPerFundStatus>(
+    "/api/admin/embed-quota/per-fund",
+  );
+}
+
 export type {
   LLMHealthSourceRow,
   LLMHealthCategoryRow,
@@ -4348,6 +4478,23 @@ export function buildWorkflowStreamUrl(fundId: string, intervalMs?: number): str
   let url = `/api/funds/${fundId}/workflow/stream`;
   if (typeof intervalMs === "number" && intervalMs > 0) {
     url += `?interval=${intervalMs}ms`;
+  }
+  return buildUrl(url);
+}
+
+// W4-25 multiplex companion. Subscribes to many funds over a
+// single EventSource; the server pushes envelope frames tagged
+// with `fundId` and (when in a terminal state) `terminal: true`.
+// Browsers cap concurrent EventSource handles at ~6 per origin,
+// so dashboards tracking 10+ funds otherwise queue half their
+// streams; this URL is what `useWorkflowStreamMulti` opens.
+export function buildWorkflowStreamMultiUrl(fundIds: string[], intervalMs?: number): string {
+  const ids = fundIds
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+  let url = `/api/funds/workflow/stream?fundIds=${encodeURIComponent(ids.join(","))}`;
+  if (typeof intervalMs === "number" && intervalMs > 0) {
+    url += `&interval=${intervalMs}ms`;
   }
   return buildUrl(url);
 }

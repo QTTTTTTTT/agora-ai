@@ -36,6 +36,14 @@ import AgentReputationSection from "../components/AgentReputationSection";
 import AnalystPanelSection from "../components/AnalystPanelSection";
 import BullBearDebateSection from "../components/BullBearDebateSection";
 import StrategyAttributionPanel from "../components/StrategyAttributionPanel";
+// W9-3 — i18n migration. The runtime bundle comes from
+// `i18n.getResourceBundle()`; the static import is the
+// fallback / type-source so `copy.X` access stays type-safe
+// (the `useTranslation` t() function is fine for top-level
+// keys but loses static typing on nested objects, which this
+// page leans on heavily — kpis.totalReturn, contributorsCols.symbol …).
+import i18n from "../i18n";
+import fundPerformanceEnFallback from "../i18n/locales/en-US/fundPerformance";
 
 // PR-3A9: a dedicated /funds/:id/performance route that compresses
 // everything the operator needs to answer "is this fund actually
@@ -59,174 +67,11 @@ interface WindowOption {
   days: number | null;
 }
 
-interface PageCopy {
-  pageTitle: string;
-  pageSubtitle: string;
-  windowGroupLabel: string;
-  windowLabels: Record<WindowChoice, string>;
-  navCurveTitle: string;
-  navCurveSubtitle: string;
-  kpis: {
-    nav: string;
-    totalReturn: string;
-    totalPnL: string;
-    realizedPnL: string;
-    unrealizedPnL: string;
-    feeDrag: string;
-    beginningAssets: string;
-    endingAssets: string;
-  };
-  contributorsTitle: string;
-  contributorsSubtitle: string;
-  contributorsEmpty: string;
-  detractorsTitle: string;
-  detractorsSubtitle: string;
-  contributorsCols: {
-    symbol: string;
-    realized: string;
-    unrealized: string;
-    total: string;
-    trades: string;
-    exposure: string;
-    weight: string;
-  };
-  assetClassTitle: string;
-  assetClassSubtitle: string;
-  assetClassEmpty: string;
-  dailyReturnsTitle: string;
-  dailyReturnsSubtitle: string;
-  dailyReturnsEmpty: string;
-  loading: string;
-  errorPrefix: string;
-  retry: string;
-  exposureLabel: string;
-  weightLabel: string;
-  pnlLabel: string;
-  navLabel: string;
-  totalAssetsLabel: string;
-  availableCashLabel: string;
-  marketValueLabel: string;
-  noNavData: string;
-}
-
-const COPY: Record<AppLanguage, PageCopy> = {
-  "zh-CN": {
-    pageTitle: "业绩中心",
-    pageSubtitle:
-      "把 NAV 走势、P&L 归因和策略 Sleeve 学习汇集在一个视图，方便你判断这只基金是不是在赚钱、为什么赚、哪些标的是真正的贡献来源。",
-    windowGroupLabel: "回看窗口",
-    windowLabels: {
-      "7d": "近 7 天",
-      "30d": "近 30 天",
-      "90d": "近 90 天",
-      "1y": "近 1 年",
-      all: "全部",
-    },
-    navCurveTitle: "单位净值与总资产",
-    navCurveSubtitle:
-      "蓝线是基金单位净值，灰色面积是日终总资产；面积分成现金（淡色）和持仓市值（深色），方便看仓位水位。",
-    kpis: {
-      nav: "单位净值",
-      totalReturn: "区间总收益率",
-      totalPnL: "区间 P&L",
-      realizedPnL: "已实现",
-      unrealizedPnL: "未实现",
-      feeDrag: "费用拖累",
-      beginningAssets: "期初总资产",
-      endingAssets: "期末总资产",
-    },
-    contributorsTitle: "Top 贡献",
-    contributorsSubtitle: "按区间 Total P&L 排序的前 5 个标的。",
-    contributorsEmpty: "区间内没有已成交的标的。",
-    detractorsTitle: "Top 拖累",
-    detractorsSubtitle: "按区间 Total P&L 倒序的前 5 个标的（负贡献最大）。",
-    contributorsCols: {
-      symbol: "标的",
-      realized: "已实现",
-      unrealized: "未实现",
-      total: "合计",
-      trades: "交易笔数",
-      exposure: "敞口",
-      weight: "权重",
-    },
-    assetClassTitle: "按资产类别归因",
-    assetClassSubtitle: "用 Total P&L 比较不同资产类别（股票 / 加密 / 期货 …）的相对贡献。",
-    assetClassEmpty: "区间内没有按资产类别可统计的数据。",
-    dailyReturnsTitle: "日收益分布",
-    dailyReturnsSubtitle:
-      "把每个交易日的回报放进直方桶里 —— 偏左厚尾说明有大跌、偏右厚尾说明有大涨；红色桶是负日，绿色桶是正日。",
-    dailyReturnsEmpty: "没有足够的日收益数据来画直方图。",
-    loading: "正在加载业绩数据…",
-    errorPrefix: "加载失败：",
-    retry: "重试",
-    exposureLabel: "敞口",
-    weightLabel: "权重",
-    pnlLabel: "P&L",
-    navLabel: "单位净值",
-    totalAssetsLabel: "总资产",
-    availableCashLabel: "现金",
-    marketValueLabel: "持仓市值",
-    noNavData: "暂无净值历史。基金可能尚未开始记账，等第一次结算后再来看。",
-  },
-  "en-US": {
-    pageTitle: "Performance",
-    pageSubtitle:
-      "NAV path, P&L attribution and strategy-sleeve learning in a single view, so you can answer 'is this fund working, and why?' without bouncing between tabs.",
-    windowGroupLabel: "Lookback",
-    windowLabels: {
-      "7d": "Last 7 days",
-      "30d": "Last 30 days",
-      "90d": "Last 90 days",
-      "1y": "Last year",
-      all: "All time",
-    },
-    navCurveTitle: "Unit NAV & total assets",
-    navCurveSubtitle:
-      "Blue line is unit NAV. The grey stacked area is end-of-day total assets, split into cash (light) and market value (dark) so the cash sleeve is visible.",
-    kpis: {
-      nav: "Latest NAV",
-      totalReturn: "Period return",
-      totalPnL: "Period P&L",
-      realizedPnL: "Realised",
-      unrealizedPnL: "Unrealised",
-      feeDrag: "Fee drag",
-      beginningAssets: "Period start AUM",
-      endingAssets: "Period end AUM",
-    },
-    contributorsTitle: "Top contributors",
-    contributorsSubtitle: "Top 5 names by period Total P&L.",
-    contributorsEmpty: "No traded names in this period.",
-    detractorsTitle: "Top detractors",
-    detractorsSubtitle: "Bottom 5 names by period Total P&L (biggest drags first).",
-    contributorsCols: {
-      symbol: "Symbol",
-      realized: "Realised",
-      unrealized: "Unrealised",
-      total: "Total",
-      trades: "Trades",
-      exposure: "Exposure",
-      weight: "Weight",
-    },
-    assetClassTitle: "Asset-class attribution",
-    assetClassSubtitle: "Total P&L compared across asset classes (equity / crypto / futures …).",
-    assetClassEmpty: "No per-asset-class data for this window yet.",
-    dailyReturnsTitle: "Daily return distribution",
-    dailyReturnsSubtitle:
-      "Buckets each trading day's return into a histogram — a fat left tail means big drawdowns, fat right means big up days. Red bars are losing days, green winning days.",
-    dailyReturnsEmpty: "Not enough daily-return rows to draw a histogram yet.",
-    loading: "Loading performance data…",
-    errorPrefix: "Load failed: ",
-    retry: "Retry",
-    exposureLabel: "Exposure",
-    weightLabel: "Weight",
-    pnlLabel: "P&L",
-    navLabel: "Unit NAV",
-    totalAssetsLabel: "Total assets",
-    availableCashLabel: "Cash",
-    marketValueLabel: "Market value",
-    noNavData: "No NAV history yet. The fund probably hasn't booked a settlement — check back after the first daily review.",
-  },
-};
+// W9-3 — `PageCopy` shape is now derived structurally from the
+// English fallback bundle, the single source of truth for the
+// translation surface. Keep the alias so existing JSX type
+// inference (e.g. `copy.kpis.totalReturn`) stays unchanged.
+type PageCopy = typeof fundPerformanceEnFallback;
 
 const WINDOW_OPTIONS: WindowOption[] = [
   { key: "7d", label: "7d", days: 7 },
@@ -384,7 +229,17 @@ const ASSET_CLASS_COLOURS = ["#4f46e5", "#0ea5e9", "#10b981", "#f59e0b", "#ef444
 const FundPerformance: React.FC = () => {
   const { fundId } = useParams<{ fundId: string }>();
   const { language, displayCurrency } = useAppPreferences();
-  const copy = COPY[language];
+  // W9-3 — fetch the full translation bundle so consumer JSX
+  // continues to read `copy.kpis.totalReturn` etc. unchanged.
+  // Falling back to the English bundle keeps the page rendering
+  // even if a future locale ships incomplete (the parity guard
+  // catches that at CI but here we want belt-and-braces).
+  const copy: PageCopy = useMemo(() => {
+    const bundle = i18n.getResourceBundle(language, "fundPerformance") as
+      | PageCopy
+      | undefined;
+    return bundle ?? fundPerformanceEnFallback;
+  }, [language]);
 
   const [windowChoice, setWindowChoice] = useState<WindowChoice>("30d");
   const [loading, setLoading] = useState(true);

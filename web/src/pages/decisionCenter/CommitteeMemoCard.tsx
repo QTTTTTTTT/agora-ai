@@ -1,5 +1,4 @@
 import React from "react";
-import type { AppLanguage } from "../../lib/preferences";
 import type { CommitteeMemo } from "../../lib/api";
 import { MetaBadge } from "./MetaBadge";
 import { humanizeValue } from "./helpers";
@@ -23,13 +22,19 @@ export interface CommitteeMemoCardLabels {
   stance: string;
   portfolioManager: string;
   opposedBy: string;
+  /**
+   * W13-4 — joiner for inline lists (e.g. opposedBy =
+   * ["Risk","Compliance"] → "Risk, Compliance" in en, "Risk、Compliance"
+   * in zh). Lives in copy so the typographic choice is a
+   * translator concern, not a code branch.
+   */
+  listSeparator: string;
   unknown: string;
 }
 
 interface CommitteeMemoCardProps {
   memo: CommitteeMemo | undefined;
   discussionSummary: string;
-  language: AppLanguage;
   labels: CommitteeMemoCardLabels;
   planStatusMeta: (status: string, riskReview?: unknown) => { label: string; badge: string };
   riskVerdictMeta: (value: string) => { label: string; badge: string };
@@ -39,7 +44,6 @@ interface CommitteeMemoCardProps {
 function CommitteeMemoCardInner({
   memo,
   discussionSummary,
-  language,
   labels,
   planStatusMeta,
   riskVerdictMeta,
@@ -179,7 +183,7 @@ function CommitteeMemoCardInner({
                           {item.action ? <span className={`font-medium ${meta.color}`}>{meta.label}</span> : null}
                         </div>
                         <p className="mt-1 text-gray-700">{item.instruction || labels.traceNoExecution}</p>
-                        {item.opposedBy?.length ? <p className="mt-1 text-xs text-red-600">{labels.opposedBy}: {item.opposedBy.join(language === "en-US" ? ", " : "、")}</p> : null}
+                        {item.opposedBy?.length ? <p className="mt-1 text-xs text-red-600">{labels.opposedBy}: {item.opposedBy.join(labels.listSeparator)}</p> : null}
                       </div>
                     );
                   })}

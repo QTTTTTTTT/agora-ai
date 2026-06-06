@@ -6,10 +6,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="AI Fund Company Simulator — Multi-Agent Collaborative Trading Platform" />
     <title>AI Fund Platform</title>
-    <!-- Preload Inter font for better UX -->
+    <!--
+      Resource hints for the Google Fonts pipeline.
+      preconnect      → opens the TLS + HTTP/2 connection up-front
+                        (saves ~150-300 ms TTFB on first font request).
+      dns-prefetch    → fallback for HTTP/1.1 clients / older browsers
+                        that ignore preconnect.
+      The `crossorigin` attribute is REQUIRED on the gstatic.com hint
+      because the actual font files are fetched as crossorigin
+      requests; without it the browser opens a duplicate connection.
+    -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="dns-prefetch" href="https://fonts.gstatic.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <!--
       Pre-React theme bootstrap.
       Reads the persisted theme preference (web/src/lib/theme.tsx
@@ -50,6 +63,14 @@
   </head>
   <body class="antialiased bg-white text-gray-900 dark:bg-slate-900 dark:text-slate-100">
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <!--
+      fetchpriority="high" tells the browser to bump this entry
+      script to the top of its scheduling queue — the canonical
+      "this is the LCP-driving resource" hint. Vite already injects
+      <link rel="modulepreload"> for the chunked entry in
+      production builds, so initial JS arrival lands in parallel
+      with the font CSS instead of after it.
+    -->
+    <script type="module" src="/src/main.tsx" fetchpriority="high"></script>
   </body>
 </html>

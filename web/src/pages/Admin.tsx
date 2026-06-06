@@ -30,6 +30,10 @@ import { AdminWorkflowCheckpointsSection } from "../components/AdminWorkflowChec
 import { AdminModelABSection } from "../components/AdminModelABSection";
 import { AdminModelABPromotionSection } from "../components/AdminModelABPromotionSection";
 import { AdminLLMHealthSection } from "../components/AdminLLMHealthSection";
+import { AdminMemReembedSection } from "../components/AdminMemReembedSection";
+import { AdminEmbedQuotaSection } from "../components/AdminEmbedQuotaSection";
+import { AdminEmbedQuotaPerFundSection } from "../components/AdminEmbedQuotaPerFundSection";
+import { AdminDBPoolSection } from "../components/AdminDBPoolSection";
 import { AdminAlertsSection } from "../components/AdminAlertsSection";
 import { AdminLLMProvidersSection } from "../components/AdminLLMProvidersSection";
 import AdminLLMObservabilitySection from "../components/AdminLLMObservabilitySection";
@@ -1248,6 +1252,32 @@ const Admin: React.FC = () => {
           {/* S11.4 — LLM health dashboard: decision_source / fallback */}
           {/* aggregates + recent fallback rows with raw provider summaries. */}
           <AdminLLMHealthSection language={language} />
+
+          {/* W9-2 — memory re-embed queue depth + lifetime counters. */}
+          {/* Pairs with the Prometheus exporter from W7-1 so an SRE */}
+          {/* with only a browser handy can see backlog growth at 2 AM. */}
+          <AdminMemReembedSection language={language} />
+
+          {/* W11-2 — embedquota.Limiter live state + histogram tails. */}
+          {/* Sibling of the memreembed panel; together they cover the */}
+          {/* whole embed pipeline ("are we throttling?" + "is the */}
+          {/* re-embed worker keeping up with the throttle?"). */}
+          <AdminEmbedQuotaSection language={language} />
+
+          {/* W14-3 — per-fund drill-down for the embed quota */}
+          {/* limiter. Renders the AdminEmbedQuotaSection's */}
+          {/* "throttle is firing" → "which fund is firing it" */}
+          {/* follow-up. Recorder is opt-in; the panel renders */}
+          {/* a clean disabled state until the EMBED_QUOTA_OBS_ENABLED */}
+          {/* flag is flipped on the server. */}
+          <AdminEmbedQuotaPerFundSection language={language} />
+
+          {/* W13-1 — DB connection pool live state. Completes the */}
+          {/* infra triad (memreembed + embedquota + db-pool) the */}
+          {/* runbook §8 enumerates as the "Grafana down? curl this" */}
+          {/* fallback. Three panels together answer "is the */}
+          {/* pipeline healthy from disk to LLM provider?". */}
+          <AdminDBPoolSection language={language} />
 
           {/* S12.3 — alertmanager-ingested events + ack flow. */}
           <AdminAlertsSection language={language} />

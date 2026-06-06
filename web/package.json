@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test:i18n": "node --experimental-strip-types --no-warnings test/lessonRenderer.test.ts",
+    "test:i18n-keys": "node --experimental-strip-types --no-warnings test/i18nNamespaceParity.test.ts",
+    "test:sparkline": "node --experimental-strip-types --no-warnings test/embedQuotaHistory.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:install": "playwright install chromium",

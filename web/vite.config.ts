@@ -15,6 +15,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    // modulePreload.polyfill = true emits a small (~1 KB) inline
+    // shim that turns <link rel="modulepreload"> into a working
+    // preload on Safari < 17 / older Chromium. The default would
+    // be enough for evergreen Chrome / Firefox, but the polyfill
+    // is cheap and the LCP win on iOS 16 is non-trivial.
+    modulePreload: { polyfill: true },
     rollupOptions: {
       output: {
         manualChunks(id) {

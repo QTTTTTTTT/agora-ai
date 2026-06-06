@@ -23,17 +23,24 @@
 //
 // SCOPE — STARTER
 // ---------------
-// Doesn't yet stream daily PnL deltas or workflow state per
-// fund (would need 4 separate /api/funds/{id}/workflow GETs in
-// fan-out — sensible to add as a follow-up once we wire SSE
-// multiplex). Doesn't pull benchmarks. The point of this commit
+// Doesn't yet stream daily PnL deltas (still a polled fetch).
+// Workflow state per fund DOES stream now (W5-2 follow-up): we
+// open one multiplexed SSE connection via `useWorkflowStreamMulti`
+// for every visible fund and surface state + progress percent in
+// a dedicated table column, which avoids the per-fund EventSource
+// fan-out the original comment warned about. Doesn't pull
+// benchmarks. The point of this commit
 // is to give operators ONE PLACE to see "are all my funds OK?".
 
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import i18n from "../i18n";
 import { apiGet, formatApiError } from "../lib/api";
 import { formatMoneyForDisplay, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
 import { ResponsiveTable, type ResponsiveColumn } from "../components/ResponsiveTable";
+import { useWorkflowStreamMulti } from "../lib/useWorkflowStream";
+import multiFundOverviewEnFallback from "../i18n/locales/en-US/multiFundOverview";
 
 interface Fund {
   id: string;
@@ -57,11 +64,20 @@ interface FundRow extends Fund {
   companyName: string;
 }
 
-const tradingModeLabel = (mode: string, isEnglish: boolean): string => {
-  const m = mode.toLowerCase();
-  if (m === "live") return isEnglish ? "Live" : "实盘";
-  if (m === "simulation") return isEnglish ? "Simulation" : "模拟";
-  return mode;
+// tradingModeLabel resolves a fund's trading-mode string (live /
+// simulation / paper) to its localised label. Reads from the
+// active i18n bundle so adding a new mode means adding ONE key
+// per locale, no code change. The original `mode` is returned
+// verbatim for unknown values so we never silently swallow a
+// new backend mode the bundle hasn't caught up with.
+const tradingModeLabel = (mode: string, language: string): string => {
+  const k = mode.toLowerCase();
+  const bundle =
+    (i18n.getResourceBundle(language, "multiFundOverview") as
+      | typeof multiFundOverviewEnFallback
+      | undefined) ?? multiFundOverviewEnFallback;
+  const map = bundle.tradingModes as Record<string, string>;
+  return map[k] ?? mode;
 };
 
 const statusTone = (status: string): string => {
@@ -74,7 +90,7 @@ const statusTone = (status: string): string => {
 
 const MultiFundOverview: React.FC = () => {
   const { language, displayCurrency } = useAppPreferences();
-  const isEnglish = language === "en-US";
+  const { t } = useTranslation("multiFundOverview");
   const [companies, setCompanies] = useState<CompanyWithFunds[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -92,7 +108,7 @@ const MultiFundOverview: React.FC = () => {
       })
       .catch((err) => {
         if (cancelled) return;
-        setError(formatApiError(err, isEnglish ? "Failed to load portfolio overview" : "加载组合总览失败"));
+        setError(formatApiError(err, t("loadError")));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -100,6 +116,10 @@ const MultiFundOverview: React.FC = () => {
     return () => {
       cancelled = true;
     };
+    // The fetch is one-shot per mount; t() is captured at mount
+    // time and language switches re-render the component anyway,
+    // so we deliberately don't add `t` to the dependency array.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const allFunds = useMemo<FundRow[]>(() => {
@@ -111,6 +131,19 @@ const MultiFundOverview: React.FC = () => {
     }
     return out;
   }, [companies]);
+
+  // W5-2 — single multiplexed SSE for every visible fund. We pass
+  // the FULL fund list (not the filtered list) so search / mode
+  // filtering on the client doesn't tear down and reopen the
+  // connection on every keystroke; the backend caps the
+  // subscription set at 50 funds, which is well above the
+  // current portfolio dashboard scale. The hook returns a
+  // `Record<fundId, WorkflowStatusFrame|null>` we look up per row.
+  const fundIds = useMemo(() => allFunds.map((f) => f.id), [allFunds]);
+  const workflow = useWorkflowStreamMulti({
+    fundIds,
+    enabled: fundIds.length > 0,
+  });
 
   const filteredFunds = useMemo<FundRow[]>(() => {
     const trimmed = search.trim().toLowerCase();
@@ -147,59 +180,17 @@ const MultiFundOverview: React.FC = () => {
     };
   }, [allFunds, companies.length]);
 
-  const copy = isEnglish
-    ? {
-        title: "Multi-fund overview",
-        subtitle: "Aggregate state across every fund and company you can see.",
-        loading: "Loading portfolio overview…",
-        retry: "Retry",
-        kFunds: "Funds",
-        kCompanies: "Companies",
-        kLive: "Live",
-        kAum: "Total AUM",
-        kAvgNav: "Avg NAV",
-        searchPh: "Search fund or company name…",
-        modeAll: "All modes",
-        modeLive: "Live only",
-        modeSim: "Simulation only",
-        emptyTitle: "No funds yet",
-        emptyDescription: "Create a fund from the Companies page to see it here.",
-        col: {
-          fund: "Fund",
-          company: "Company",
-          mode: "Mode",
-          status: "Status",
-          totalAssets: "Total assets",
-          nav: "NAV",
-          baseCurrency: "Base ccy",
-        },
-      }
-    : {
-        title: "多基金总览",
-        subtitle: "聚合查看你能看到的所有基金与公司的运行状态。",
-        loading: "正在加载组合总览……",
-        retry: "重试",
-        kFunds: "基金数",
-        kCompanies: "公司数",
-        kLive: "实盘",
-        kAum: "总资产",
-        kAvgNav: "平均净值",
-        searchPh: "搜索基金或公司名称……",
-        modeAll: "全部模式",
-        modeLive: "仅实盘",
-        modeSim: "仅模拟",
-        emptyTitle: "暂无基金",
-        emptyDescription: "请先在公司页面创建一只基金。",
-        col: {
-          fund: "基金",
-          company: "公司",
-          mode: "模式",
-          status: "状态",
-          totalAssets: "总资产",
-          nav: "净值",
-          baseCurrency: "本币",
-        },
-      };
+  // W8-3 — translations now live in the multiFundOverview i18n
+  // namespace. We resolve the bundle once via `getResourceBundle`
+  // to keep the existing `copy.col.foo` / `copy.workflow.bar`
+  // accessor pattern working without per-key churn.
+  const copy = useMemo(() => {
+    const bundle =
+      (i18n.getResourceBundle(language, "multiFundOverview") as
+        | typeof multiFundOverviewEnFallback
+        | undefined) ?? multiFundOverviewEnFallback;
+    return bundle;
+  }, [language]);
 
   const columns: ResponsiveColumn<FundRow>[] = useMemo(
     () => [
@@ -229,7 +220,7 @@ const MultiFundOverview: React.FC = () => {
                 : "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
             }`}
           >
-            {tradingModeLabel(row.tradingMode, isEnglish)}
+            {tradingModeLabel(row.tradingMode, language)}
           </span>
         ),
       },
@@ -241,6 +232,64 @@ const MultiFundOverview: React.FC = () => {
             {row.status}
           </span>
         ),
+      },
+      {
+        // W5-2 — workflow streaming column. Reads the latest
+        // multiplexed SSE frame for this row's fundId. Three
+        // visual paths:
+        //   - forbidden (server told us "no access"): static dash.
+        //   - no frame yet: "idle / not started" placeholder.
+        //   - frame present: state badge + (when running) % done
+        //     + a small pulsing dot iff the connection is live
+        //     and the workflow is non-terminal.
+        key: "workflow",
+        header: copy.col.workflow,
+        cell: (row) => {
+          if (workflow.forbidden.includes(row.id)) {
+            return (
+              <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-500 dark:bg-slate-700 dark:text-slate-300">
+                {copy.workflow.forbidden}
+              </span>
+            );
+          }
+          const frame = workflow.statuses[row.id] ?? null;
+          if (!frame) {
+            return <span className="text-xs text-gray-400 dark:text-slate-500">{copy.workflow.idle}</span>;
+          }
+          const state = (frame.state ?? "").toLowerCase();
+          const stateClass =
+            state === "completed"
+              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200"
+              : state === "failed"
+              ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-200"
+              : state === "running"
+              ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-200"
+              : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200";
+          const stateLabel =
+            state === "completed"
+              ? copy.workflow.stateCompleted
+              : state === "failed"
+              ? copy.workflow.stateFailed
+              : state === "running"
+              ? copy.workflow.stateRunning
+              : copy.workflow.stateQueued;
+          const isTerminal = workflow.terminal[row.id] === true || state === "completed" || state === "failed";
+          const showDot = workflow.connected && !isTerminal;
+          return (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${stateClass}`}>
+                {showDot ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> : null}
+                {stateLabel}
+              </span>
+              {state === "running" && typeof frame.progressPercent === "number" ? (
+                <span className="text-[11px] text-gray-500 dark:text-slate-400">
+                  {Math.round(frame.progressPercent)}%
+                </span>
+              ) : null}
+            </div>
+          );
+        },
+        hideOnMobile: false,
       },
       {
         key: "totalAssets",
@@ -261,7 +310,16 @@ const MultiFundOverview: React.FC = () => {
         hideOnMobile: true,
       },
     ],
-    [copy.col, displayCurrency, isEnglish, language],
+    [
+      copy.col,
+      copy.workflow,
+      displayCurrency,
+      language,
+      workflow.statuses,
+      workflow.forbidden,
+      workflow.terminal,
+      workflow.connected,
+    ],
   );
 
   if (loading) {

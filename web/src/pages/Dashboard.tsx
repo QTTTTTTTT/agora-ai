@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import i18n from "../i18n";
+import dashboardEnFallback from "../i18n/locales/en-US/dashboard";
 import {
   CartesianGrid,
   Legend,
@@ -40,6 +43,7 @@ import { CorpActionTimeline } from "../components/CorpActionTimeline";
 import { BenchmarkChart } from "../components/BenchmarkChart";
 import { HoldingsTrendsGrid } from "../components/HoldingsTrendsGrid";
 import { SkeletonCard } from "../components/Skeleton";
+import { useSWRFetch } from "../lib/useSWRFetch";
 
 interface FundUniverse {
   mode: string;
@@ -294,27 +298,41 @@ function positionMultiplier(position: Position): number {
   return position.contractMultiplier && position.contractMultiplier > 0 ? position.contractMultiplier : 1;
 }
 
+// PriceFreshnessTranslator is the minimal `t` surface the freshness
+// helpers depend on. We accept a structural type instead of importing
+// react-i18next's TFunction directly so unit-test callers can pass a
+// hand-rolled stub without dragging in i18next typings.
+type PriceFreshnessTranslator = (
+  key: string,
+  vars?: Record<string, unknown>,
+) => string;
+
 // formatPriceAge produces a human-readable "5s ago / 12m ago / 3h ago"
 // string from an ISO timestamp. Returns undefined when the input is
 // missing or unparseable so callers can render a neutral "—".
+//
+// W7-2 — translations now live in the dashboard i18n namespace as
+// interpolation templates (`{{n}}s ago` etc.); we accept a `t`
+// function rather than an inline object so the bundle stays purely
+// JSON-serializable for the missing-key parity guard.
 function formatPriceAge(
   priceAsOf: string | undefined,
   now: Date,
-  copy: { justNow: string; secondsAgo: (n: number) => string; minutesAgo: (n: number) => string; hoursAgo: (n: number) => string; daysAgo: (n: number) => string },
+  t: PriceFreshnessTranslator,
 ): string | undefined {
   if (!priceAsOf) return undefined;
   const parsed = Date.parse(priceAsOf);
   if (Number.isNaN(parsed)) return undefined;
   const diffMs = now.getTime() - parsed;
-  if (diffMs < 0) return copy.justNow;
+  if (diffMs < 0) return t("priceFreshness.justNow");
   const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 5) return copy.justNow;
-  if (seconds < 60) return copy.secondsAgo(seconds);
+  if (seconds < 5) return t("priceFreshness.justNow");
+  if (seconds < 60) return t("priceFreshness.secondsAgo", { n: seconds });
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return copy.minutesAgo(minutes);
+  if (minutes < 60) return t("priceFreshness.minutesAgo", { n: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 48) return copy.hoursAgo(hours);
-  return copy.daysAgo(Math.floor(hours / 24));
+  if (hours < 48) return t("priceFreshness.hoursAgo", { n: hours });
+  return t("priceFreshness.daysAgo", { n: Math.floor(hours / 24) });
 }
 
 // PriceFreshnessBadge renders the "live / X minutes ago / stale" indicator
@@ -324,20 +342,11 @@ function formatPriceAge(
 function PriceFreshnessBadge({
   priceAsOf,
   isStale,
-  copy,
+  t,
 }: {
   priceAsOf?: string;
   isStale?: boolean;
-  copy: {
-    live: string;
-    stale: string;
-    unknown: string;
-    justNow: string;
-    secondsAgo: (n: number) => string;
-    minutesAgo: (n: number) => string;
-    hoursAgo: (n: number) => string;
-    daysAgo: (n: number) => string;
-  };
+  t: PriceFreshnessTranslator;
 }): JSX.Element | null {
   const [now, setNow] = useState<Date>(() => new Date());
   useEffect(() => {
@@ -347,11 +356,12 @@ function PriceFreshnessBadge({
   if (!priceAsOf && !isStale) {
     return null;
   }
-  const age = formatPriceAge(priceAsOf, now, copy);
-  const label = isStale ? copy.stale : age ?? copy.live;
+  const age = formatPriceAge(priceAsOf, now, t);
+  const justNow = t("priceFreshness.justNow");
+  const label = isStale ? t("priceFreshness.stale") : age ?? t("priceFreshness.live");
   const tone = isStale
     ? "bg-amber-100 text-amber-800"
-    : age === undefined || age === copy.justNow
+    : age === undefined || age === justNow
       ? "bg-emerald-100 text-emerald-700"
       : "bg-gray-100 text-gray-600";
   return <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tone}`}>{label}</span>;
@@ -505,9 +515,34 @@ function buildDashboardData(
   };
 }
 
+// dashboardCopy mirrors the previously-inline `copy` block one-for-one
+// minus the function-valued priceFreshness fields (which W7-2 promoted
+// to interpolation templates, called via `t()` at the consumer). The
+// shape is exposed as a const-typed alias so the existing call sites
+// (`copy.metrics.totalAssets`, `copy.workflowSteps[step]`, etc.) keep
+// working without per-key churn.
+type DashboardCopy = Omit<
+  typeof import("../i18n/locales/en-US/dashboard").default,
+  "priceFreshness" | "metrics"
+> & {
+  priceFreshness: {
+    live: string;
+    stale: string;
+    unknown: string;
+    justNow: string;
+  };
+  metrics: {
+    totalAssets: string;
+    availableCash: string;
+    todayPnL: string;
+    totalReturn: string;
+  };
+};
+
 export default function Dashboard() {
   const { fundId } = useParams<{ fundId: string }>();
   const { language, displayCurrency } = useAppPreferences();
+  const { t } = useTranslation("dashboard");
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -517,8 +552,21 @@ export default function Dashboard() {
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState<string | null>(null);
   const [newsRequested, setNewsRequested] = useState(false);
-  const [llmUsage, setLLMUsage] = useState<LLMUsageVisibility | null>(null);
-  const [llmUsageLoading, setLLMUsageLoading] = useState(false);
+  // LLM-usage tile uses SWR caching so flipping between Dashboard
+  // sub-tabs / sibling pages doesn't trigger a fresh
+  // /api/funds/{id}/llm/usage hit on every mount. ttl=120s; the
+  // tile shows aggregated cost, which doesn't tick fast enough to
+  // need real-time refresh. We gate on `data !== null` rather than
+  // the later-declared `hasCoreData` const to avoid a temporal
+  // dead-zone reference (this hook fires before `hasCoreData` is
+  // computed in the body).
+  const llmUsageSwr = useSWRFetch<LLMUsageVisibility | null>(
+    fundId && data !== null ? `dashboard/llmUsage/${fundId}` : null,
+    () => fetchFundLLMUsage(fundId!).catch(() => null),
+    { ttlMs: 120_000 },
+  );
+  const llmUsage = llmUsageSwr.data ?? null;
+  const llmUsageLoading = !llmUsageSwr.data && llmUsageSwr.isLoading;
   const [pnlAttribution, setPnlAttribution] = useState<PnLAttribution | null>(null);
   // Server-computed "今日盈亏" (realised today + (current unrealised −
   // prior-close unrealised)). Falls back to client-side NAV-diff
@@ -527,361 +575,40 @@ export default function Dashboard() {
   const [todayPnL, setTodayPnL] = useState<FundTodayPnL | null>(null);
   const [pnlAttributionLoading, setPnlAttributionLoading] = useState(false);
 
-  const copy = useMemo(
-    () =>
-      language === "en-US"
-        ? {
-            missingFundId: "Missing fundId",
-            loadError: "Failed to load dashboard",
-            startWorkflowError: "Failed to start strategy workflow",
-            loading: "Loading dashboard...",
-            errorTitle: "Failed to load dashboard",
-            retry: "Retry",
-            noFundSelected: "No fund selected. Pick a fund from the sidebar to continue.",
-            dashboardUnavailable: "The fund dashboard hasn't loaded yet. Try refreshing.",
-            titles: {
-              nav: "NAV trend",
-              positions: "Open positions",
-              trades: "Recent trades",
-              attribution: "PnL attribution",
-              workflow: "Workflow status",
-              llmUsage: "LLM cost visibility",
-              quickActions: "Quick actions",
-              quotes: "Market snapshots",
-              news: "News digest",
-            },
-            emptyStates: {
-              noNav: {
-                title: "No NAV history yet",
-                description: "The fund has not generated a NAV curve yet. Start the strategy workflow or finish model and subscription checks first.",
-                actionLabel: "Start strategy workflow",
-              },
-              noPositions: {
-                title: "No positions yet",
-                description: "The fund has not established any positions yet. Review the decision center or confirm the strategy workflow is running.",
-                actionLabel: "Go to decision center",
-              },
-              noTrades: {
-                title: "No trade records yet",
-                description: "You usually need a completed strategy run and executable decisions before fills appear here.",
-                actionLabel: "View decision center",
-              },
-            },
-            tradingModes: {
-              live: "Live trading",
-              paper: "Paper trading",
-              simulation: "Simulation",
-            },
-            directions: {
-              stocks: "Stocks",
-              funds: "Funds",
-              crypto: "Crypto",
-              futures: "Futures",
-              multi_asset: "Multi-asset",
-            },
-            metrics: {
-              totalAssets: "Total assets",
-              availableCash: "Available cash",
-              todayPnL: "Today PnL",
-              totalReturn: "Total return",
-            },
-            benchmark: "Benchmark",
-            universe: "Universe",
-            themes: "Themes",
-            sectors: "Sectors",
-            columns: {
-              instrument: "Instrument",
-              profile: "Market profile",
-              direction: "Direction",
-              quantity: "Quantity",
-              costPrice: "Cost",
-              currentPrice: "Current",
-              unrealizedPnL: "Unrealized PnL",
-              margin: "Margin",
-              weight: "Weight",
-              time: "Time",
-              side: "Side",
-              price: "Price",
-              amount: "Amount",
-              status: "Status",
-            },
-            quotePrice: "Latest price",
-            quoteSource: "Source",
-            quoteAsOf: "As of",
-            priceFreshness: {
-              live: "Live",
-              stale: "Stale",
-              unknown: "—",
-              justNow: "just now",
-              secondsAgo: (n: number) => `${n}s ago`,
-              minutesAgo: (n: number) => `${n}m ago`,
-              hoursAgo: (n: number) => `${n}h ago`,
-              daysAgo: (n: number) => `${n}d ago`,
-            },
-            newsPublishedAt: "Published",
-            openArticle: "Open article",
-            newsProviderWarnings: "Provider warnings",
-            newsLoading: "Generating bilingual news digest. This can take a while when the LLM is busy.",
-            newsErrorTitle: "News digest is temporarily unavailable.",
-            retryNews: "Retry digest",
-            newsLanguageZh: "ZH",
-            newsLanguageEn: "EN",
-            loadNews: "Load digest",
-            newsIdleTitle: "News digest is ready on demand.",
-            newsIdleDescription: "Open it only when you need AI-translated news summaries, so the dashboard stays fast.",
-            noQuotes: "No market snapshots yet.",
-            noNews: "No related news yet.",
-            tradeActions: {
-              BUY: "Buy",
-              SELL: "Sell",
-            },
-            tradeStatuses: {
-              filled: "Filled",
-              pending: "Pending",
-              rejected: "Rejected",
-            },
-            workflowStates: {
-              running: "Running",
-              paused: "Paused",
-              rejected: "Rejected",
-              completed: "Completed",
-              failed: "Failed",
-              cancelled: "Cancelled",
-              idle: "Not started",
-            },
-            workflowSteps: {
-              macro_brief: "Macro brief",
-              research_parallel: "Research",
-              quant_signals: "Quant signals",
-              roundtable: "Roundtable",
-              pm_plan: "PM plan",
-              risk_review: "Risk review",
-              user_approval: "User approval",
-              trade_execution: "Trade execution",
-              settlement: "Settlement",
-              daily_review: "Daily review",
-              not_started: "Not started",
-            },
-            currentState: "Current state",
-            tradingDate: "Trading date",
-            latestStart: "Last started",
-            progress: "Progress",
-            duration: "Duration",
-            timeline: "Step timeline",
-            completedSteps: "completed",
-            failedSteps: "failed",
-            startWorkflow: "Start strategy workflow",
-            startingWorkflow: "Starting...",
-            workflowRunning: "Workflow running",
-            attribution: {
-              realized: "Realized",
-              unrealized: "Unrealized",
-              fees: "Fees",
-              returnPct: "Return",
-              bySymbol: "Symbol contribution",
-              empty: "No attribution data is available yet.",
-              loading: "Loading PnL attribution...",
-            },
-            llm: {
-              calls: "Calls",
-              tokens: "Tokens",
-              cost: "Cost",
-              customKey: "custom-key calls",
-              byAgent: "Agent spend",
-              byStep: "Workflow steps",
-              recent: "Recent calls",
-              empty: "No LLM calls have been recorded for this fund in the current range.",
-              loading: "Loading cost visibility...",
-            },
-            quickActions: {
-              decisions: "View decision center",
-              trades: "View trade history",
-              subscription: "Manage subscription",
-              models: "Configure models",
-              usage: "View usage & billing",
-              settings: "Edit fund settings",
-            },
-            spotLong: "Spot / long",
-            unset: "Unset",
-            reduceOnly: "Reduce only",
-          }
-        : {
-            missingFundId: "缺少 fundId",
-            loadError: "加载基金总览失败",
-            startWorkflowError: "启动策略流程失败",
-            loading: "正在加载基金总览...",
-            errorTitle: "加载基金总览失败",
-            retry: "重试",
-            noFundSelected: "尚未选择基金，请先从侧栏选择一个基金。",
-            dashboardUnavailable: "基金总览数据尚未加载，请尝试刷新。",
-            titles: {
-              nav: "净值走势",
-              positions: "当前持仓",
-              trades: "近期成交",
-              attribution: "收益归因",
-              workflow: "策略流程状态",
-              llmUsage: "LLM 成本可见性",
-              quickActions: "常用入口",
-              quotes: "行情快照",
-              news: "资讯摘要",
-            },
-            emptyStates: {
-              noNav: {
-                title: "暂无净值历史",
-                description: "当前基金还没有生成净值曲线。你可以先启动策略流程，或先完成模型配置与订阅检查。",
-                actionLabel: "启动策略流程",
-              },
-              noPositions: {
-                title: "当前没有持仓",
-                description: "基金还没有建立任何仓位。你可以先查看决策中心中的待审批方案，或确认策略流程是否已经开始运行。",
-                actionLabel: "前往决策中心",
-              },
-              noTrades: {
-                title: "暂无成交记录",
-                description: "当前基金还没有成交记录。通常需要先完成策略运行并生成可执行决策，随后才会在这里看到成交明细。",
-                actionLabel: "查看决策中心",
-              },
-            },
-            tradingModes: {
-              live: "实盘交易",
-              paper: "纸面交易",
-              simulation: "模拟交易",
-            },
-            directions: {
-              stocks: "股票",
-              funds: "基金",
-              crypto: "Crypto",
-              futures: "期货",
-              multi_asset: "多资产",
-            },
-            metrics: {
-              totalAssets: "总资产",
-              availableCash: "可用现金",
-              todayPnL: "今日盈亏",
-              totalReturn: "累计收益率",
-            },
-            benchmark: "基准",
-            universe: "标的池",
-            themes: "主题",
-            sectors: "行业",
-            columns: {
-              instrument: "标的",
-              profile: "市场画像",
-              direction: "方向",
-              quantity: "数量",
-              costPrice: "成本价",
-              currentPrice: "现价",
-              unrealizedPnL: "未实现盈亏",
-              margin: "保证金",
-              weight: "仓位",
-              time: "时间",
-              side: "方向",
-              price: "价格",
-              amount: "金额",
-              status: "状态",
-            },
-            quotePrice: "最新价格",
-            quoteSource: "来源",
-            quoteAsOf: "时间",
-            priceFreshness: {
-              live: "实时",
-              stale: "滞后",
-              unknown: "—",
-              justNow: "刚刚",
-              secondsAgo: (n: number) => `${n} 秒前`,
-              minutesAgo: (n: number) => `${n} 分钟前`,
-              hoursAgo: (n: number) => `${n} 小时前`,
-              daysAgo: (n: number) => `${n} 天前`,
-            },
-            newsPublishedAt: "发布时间",
-            openArticle: "查看原文",
-            newsProviderWarnings: "数据源告警",
-            newsLoading: "正在生成双语资讯摘要。大模型繁忙时可能需要更久。",
-            newsErrorTitle: "资讯摘要暂时不可用。",
-            retryNews: "重试摘要",
-            newsLanguageZh: "中",
-            newsLanguageEn: "英",
-            loadNews: "加载摘要",
-            newsIdleTitle: "资讯摘要已改为按需加载。",
-            newsIdleDescription: "只有在你需要 AI 双语资讯时再触发，先保证总览页面更快可用。",
-            noQuotes: "暂无行情快照。",
-            noNews: "暂无相关资讯。",
-            tradeActions: {
-              BUY: "买入",
-              SELL: "卖出",
-            },
-            tradeStatuses: {
-              filled: "已成交",
-              pending: "待成交",
-              rejected: "已拒绝",
-            },
-            workflowStates: {
-              running: "运行中",
-              paused: "已暂停",
-              rejected: "已拒绝",
-              completed: "已完成",
-              failed: "运行失败",
-              cancelled: "已取消",
-              idle: "尚未启动",
-            },
-            workflowSteps: {
-              macro_brief: "宏观简报",
-              research_parallel: "研究并行",
-              quant_signals: "量化信号",
-              roundtable: "圆桌讨论",
-              pm_plan: "组合经理计划",
-              risk_review: "风控复核",
-              user_approval: "用户审批",
-              trade_execution: "交易执行",
-              settlement: "结算落账",
-              daily_review: "日终复盘",
-              not_started: "尚未启动",
-            },
-            currentState: "当前状态",
-            tradingDate: "交易日",
-            latestStart: "最近启动",
-            progress: "运行进度",
-            duration: "耗时",
-            timeline: "步骤时间线",
-            completedSteps: "已完成",
-            failedSteps: "失败",
-            startWorkflow: "启动策略流程",
-            startingWorkflow: "启动中...",
-            workflowRunning: "策略流程运行中",
-            attribution: {
-              realized: "已实现",
-              unrealized: "未实现",
-              fees: "费用拖累",
-              returnPct: "收益率",
-              bySymbol: "标的贡献",
-              empty: "暂无可用的收益归因数据。",
-              loading: "正在加载收益归因...",
-            },
-            llm: {
-              calls: "调用次数",
-              tokens: "Token",
-              cost: "费用",
-              customKey: "自带 Key 调用",
-              byAgent: "Agent 消耗",
-              byStep: "流程步骤",
-              recent: "最近调用",
-              empty: "当前区间内该基金还没有记录到 LLM 调用。",
-              loading: "正在加载成本可见性...",
-            },
-            quickActions: {
-              decisions: "查看决策中心",
-              trades: "查看交易记录",
-              subscription: "管理订阅计划",
-              models: "配置模型策略",
-              usage: "查看用量与账单",
-              settings: "调整基金设置",
-            },
-            spotLong: "现货 / 多头",
-            unset: "未设置",
-            reduceOnly: "仅减仓",
-          },
-    [language],
-  );
+  // W7-2 — translations now come from the `dashboard` i18n namespace.
+  // We pull the entire bundle through `getResourceBundle` and reshape
+  // it into the legacy `copy.X` accessor pattern so the existing JSX
+  // doesn't have to migrate every reference to a `t(...)` call. Any
+  // future page using this pattern only has to flip the namespace name.
+  const copy = useMemo<DashboardCopy>(() => {
+    const bundle = i18n.getResourceBundle(language, "dashboard") as
+      | typeof dashboardEnFallback
+      | undefined;
+    // Fallback to the statically-imported en-US bundle: should never
+    // hit at runtime because i18n bootstrap pre-loads both locales,
+    // but it preserves the legacy "default to English on lookup miss"
+    // behaviour the old code path had.
+    const source = bundle ?? dashboardEnFallback;
+    return {
+      ...source,
+      // Strip the interpolation-template fields so the consumer can't
+      // accidentally render `"{{n}}s ago"` literally — the compiler
+      // pins the cleaned-up shape via DashboardCopy.
+      priceFreshness: {
+        live: source.priceFreshness.live,
+        stale: source.priceFreshness.stale,
+        unknown: source.priceFreshness.unknown,
+        justNow: source.priceFreshness.justNow,
+      },
+      metrics: {
+        totalAssets: source.metrics.totalAssets,
+        availableCash: source.metrics.availableCash,
+        todayPnL: source.metrics.todayPnL,
+        totalReturn: source.metrics.totalReturn,
+      },
+    };
+  }, [language]);
+
 
   const tradingModeLabel = useCallback(
     (value: string) => copy.tradingModes[value.toLowerCase() as keyof typeof copy.tradingModes] ?? humanizeValue(value, copy.unset),
@@ -892,17 +619,25 @@ export default function Dashboard() {
     [copy],
   );
   const positionSideLabel = useCallback(
-    (value?: string) => ({ long: language === "en-US" ? "Long" : "多头", short: language === "en-US" ? "Short" : "空头" }[(value ?? "").toLowerCase()] ?? humanizeValue(value, copy.spotLong)),
+    (value?: string) => {
+      const k = (value ?? "").toLowerCase();
+      const bundle = i18n.getResourceBundle(language, "dashboard") as
+        | typeof dashboardEnFallback
+        | undefined;
+      const map = (bundle ?? dashboardEnFallback).positionSide as Record<string, string>;
+      return map[k] ?? humanizeValue(value, copy.spotLong);
+    },
     [copy.spotLong, language],
   );
   const openCloseLabel = useCallback(
-    (value?: string) =>
-      ({
-        open: language === "en-US" ? "Open" : "开仓",
-        close: language === "en-US" ? "Close" : "平仓",
-        close_today: language === "en-US" ? "Close today" : "平今",
-        roll: language === "en-US" ? "Roll" : "移仓",
-      }[(value ?? "").toLowerCase()] ?? humanizeValue(value, copy.unset)),
+    (value?: string) => {
+      const k = (value ?? "").toLowerCase();
+      const bundle = i18n.getResourceBundle(language, "dashboard") as
+        | typeof dashboardEnFallback
+        | undefined;
+      const map = (bundle ?? dashboardEnFallback).openClose as Record<string, string>;
+      return map[k] ?? humanizeValue(value, copy.unset);
+    },
     [copy.unset, language],
   );
   const workflowStateLabel = useCallback(
@@ -948,7 +683,9 @@ export default function Dashboard() {
     setError(null);
     setNewsError(null);
     setNewsRequested(false);
-    setLLMUsage(null);
+    // llmUsage is now SWR-owned; the cache invalidates itself
+    // through TTL so we don't need to clear it here on a manual
+    // dashboard refresh.
     setPnlAttribution(null);
     setTodayPnL(null);
 
@@ -1100,32 +837,9 @@ export default function Dashboard() {
     };
   }, [hasCoreData, fundId, marketSymbols]);
 
-  useEffect(() => {
-    if (!fundId || !hasCoreData) {
-      return;
-    }
-    let cancelled = false;
-    setLLMUsageLoading(true);
-    void fetchFundLLMUsage(fundId)
-      .then((usage) => {
-        if (!cancelled) {
-          setLLMUsage(usage);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setLLMUsage(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLLMUsageLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [hasCoreData, fundId]);
+  // LLM usage fetch is now driven by useSWRFetch above; this used
+  // to be a manual useEffect that re-fetched on every mount. The
+  // SWR cache replaces it transparently — see llmUsageSwr.
 
   useEffect(() => {
     if (!fundId || !hasCoreData) {
@@ -1334,13 +1048,13 @@ export default function Dashboard() {
                   </p>
                   {todayPnL ? (
                     <p className="mt-1 text-[10px] leading-tight text-gray-500">
-                      {language === "zh-CN" ? "其中今日已实现 " : "Of which realised today: "}
+                      {t("metrics.realisedTodayPrefix")}
                       <span className={todayPnL.realisedPnl >= 0 ? "text-emerald-600" : "text-red-600"}>
                         {(todayPnL.realisedPnl >= 0 ? "+" : "") + formatMoneyForDisplay(todayPnL.realisedPnl, data.fund.baseCurrency, displayCurrency, language)}
                       </span>
                       {!todayPnL.baselineFresh && todayPnL.priorCloseDate ? (
-                        <span className="ml-1 text-amber-700" title={language === "zh-CN" ? "缺少昨日收盘快照，未实现变动按更早的收盘计算" : "Yesterday's close snapshot is missing; unrealised delta is measured from an earlier close."}>
-                          {language === "zh-CN" ? `（基准 ${todayPnL.priorCloseDate} 收盘）` : `(baseline ${todayPnL.priorCloseDate} close)`}
+                        <span className="ml-1 text-amber-700" title={t("metrics.baselineHint")}>
+                          {t("metrics.baselineLabel", { date: todayPnL.priorCloseDate })}
                         </span>
                       ) : null}
                     </p>
@@ -1391,7 +1105,7 @@ export default function Dashboard() {
                     formatter={(value: number) => formatNumberForLanguage(value, language, { minimumFractionDigits: 4, maximumFractionDigits: 4 })}
                   />
                   <Legend verticalAlign="top" height={28} iconType="plainline" wrapperStyle={{ fontSize: 12 }} />
-                  <Line type="monotone" dataKey="nav" name={language === "en-US" ? "Fund NAV" : "基金净值"} stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                  <Line type="monotone" dataKey="nav" name={t("chart.fundNav")} stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -1831,7 +1545,7 @@ export default function Dashboard() {
                   <td className="py-2.5 pr-4 text-right text-gray-800">
                     <div className="flex flex-col items-end gap-0.5">
                       <span>{formatMoneyForDisplay(position.currentPrice, position.priceCurrency, displayCurrency, language)}</span>
-                      <PriceFreshnessBadge priceAsOf={position.priceAsOf} isStale={position.isStale} copy={copy.priceFreshness} />
+                      <PriceFreshnessBadge priceAsOf={position.priceAsOf} isStale={position.isStale} t={t} />
                     </div>
                   </td>
                   <td className={`py-2.5 pr-4 text-right font-medium ${position.pnl > 0 ? "text-emerald-600" : position.pnl < 0 ? "text-red-600" : "text-gray-700"}`}>

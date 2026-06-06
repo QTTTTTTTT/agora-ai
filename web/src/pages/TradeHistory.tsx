@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   apiGet,
   cancelOrder,
@@ -18,6 +19,15 @@ import {
   formatNumberForLanguage,
   useAppPreferences,
 } from "../lib/preferences";
+import { useIsBelow } from "../lib/useBreakpoint";
+// W5-1 — deep i18n migration. The full copy surface lives in
+// web/src/i18n/locales/{en-US,zh-CN}/tradeHistory.ts. We import
+// the en-US bundle as a *type-only* anchor so existing
+// `copy.statusLabels[code as keyof typeof copy.statusLabels]`
+// indexing patterns keep their narrowed types — i18next then
+// returns the matching language at runtime via `getResourceBundle`.
+import type tradeHistoryEn from "../i18n/locales/en-US/tradeHistory";
+type TradeHistoryCopy = typeof tradeHistoryEn;
 
 type TradeStatus = "pending" | "working" | "triggered" | "partial" | "filled" | "cancelled" | "rejected" | "expired" | string;
 
@@ -178,265 +188,20 @@ const TradeHistory: React.FC = () => {
   const [childrenLoadingByParent, setChildrenLoadingByParent] = useState<Record<string, boolean>>({});
   const [childrenErrorByParent, setChildrenErrorByParent] = useState<Record<string, string | null>>({});
 
-  const copy = useMemo(
-    () =>
-      language === "en-US"
-        ? {
-            missingFundId: "Missing fundId",
-            loadError: "Failed to load trade history",
-            loading: "Loading trade history...",
-            retry: "Retry",
-            title: "Trade history",
-            subtitle: "Review filled, pending, and failed orders, and quickly verify notional, fees, trading mode, and execution time.",
-            refresh: "Refresh",
-            ranges: {
-              "7d": "Last 7 days",
-              "30d": "Last 30 days",
-              all: "All",
-            },
-            fromDate: "Start date",
-            toDate: "End date",
-            statusFilter: "Status",
-            allStatuses: "All statuses",
-            summary: {
-              total: "Records",
-              executed: "Executed",
-              pending: "Pending",
-              notional: "Notional",
-              fees: "Fees",
-            },
-            emptyTitle: "No trade history yet",
-            emptyDescription: "Complete plan approval and move into execution to accumulate fills and execution logs here.",
-            goToDecisionCenter: "Go to decision center",
-            filteredEmptyTitle: "No records match the current filters",
-            filteredEmptyDescription: "Adjust the date range or status filter to review the execution details you need.",
-            resetFilters: "Reset filters",
-            details: "Execution details",
-            accumulatedFees: "Accumulated fees",
-            columns: {
-              time: "Time",
-              instrument: "Instrument",
-              side: "Side",
-              quantity: "Quantity",
-              price: "Price",
-              amount: "Amount",
-              fee: "Fee",
-              mode: "Mode",
-              status: "Status",
-              actions: "Actions",
-            },
-            actions: {
-              cancel: "Cancel",
-              replace: "Modify",
-              cancelling: "Cancelling…",
-              replacing: "Saving…",
-              cancelTitle: "Cancel order",
-              replaceTitle: "Modify order",
-              cancelConfirm: "Cancel this order? This action records to the audit trail and cannot be undone.",
-              replaceQuantity: "New quantity",
-              replaceLimit: "New limit price",
-              replaceStop: "New stop trigger",
-              replaceTrailAmount: "New trail amount",
-              replaceTrailPercent: "New trail percent (0-1)",
-              replaceDisplayQty: "New display quantity (iceberg)",
-              replaceNote: "Reason (optional)",
-              replaceLeaveBlankHelp: "Leave blank to keep the current value.",
-              save: "Save changes",
-              cancelButton: "Cancel",
-              dismiss: "Close",
-              error: "Action failed",
-              cancelSuccess: "Order cancelled.",
-              replaceSuccess: "Order updated.",
-            },
-            orderType: "Order type",
-            reduceOnly: "Reduce only",
-            liveQuote: "Live quote",
-            quoteSource: "Quote source",
-            quoteAsOf: "Quote as of",
-            quoteLag: "Freshness",
-            quoteMissing: "No market snapshot",
-            quoteStale: "Stale",
-            quotePriceGap: "Vs fill",
-            notExecuted: "Not executed",
-            notRecorded: "Not recorded",
-            statusLabels: {
-              filled: "Filled",
-              partial: "Partially filled",
-              pending: "Pending",
-              cancelled: "Cancelled",
-              canceled: "Cancelled",
-              submitted: "Submitted",
-              rejected: "Rejected",
-              failed: "Rejected",
-            },
-            sideLabels: {
-              buy: "Buy",
-              sell: "Sell",
-            },
-            tradingModes: {
-              live: "Live",
-              paper: "Paper",
-              simulation: "Simulation",
-            },
-            orderTypes: {
-              market: "Market",
-              limit: "Limit",
-              stop: "Stop",
-              stop_limit: "Stop limit",
-            },
-            positionSides: {
-              long: "Long",
-              short: "Short",
-            },
-            openClose: {
-              open: "Open",
-              close: "Close",
-              close_today: "Close today",
-              roll: "Roll",
-            },
-            unknownStatus: "Unknown status",
-            spotLong: "Spot / long",
-            unset: "Unset",
-            splitter: {
-              expand: "Show slices",
-              collapse: "Hide slices",
-              loading: "Loading slices…",
-              empty: "No child slices for this order.",
-              error: "Failed to load slices",
-              strategyLabel: "Strategy",
-              sliceIndex: "Slice",
-              parentBadge: "TWAP parent",
-            },
-          }
-        : {
-            missingFundId: "缺少 fundId",
-            loadError: "加载交易记录失败",
-            loading: "正在加载交易记录...",
-            retry: "重试",
-            title: "交易记录",
-            subtitle: "查看成交、待执行与失败订单，快速核对成交金额、费用、模式与执行时间。",
-            refresh: "刷新",
-            ranges: {
-              "7d": "近 7 天",
-              "30d": "近 30 天",
-              all: "全部",
-            },
-            fromDate: "开始日期",
-            toDate: "结束日期",
-            statusFilter: "状态筛选",
-            allStatuses: "全部状态",
-            summary: {
-              total: "记录数",
-              executed: "已执行",
-              pending: "待执行",
-              notional: "成交金额",
-              fees: "累计费用",
-            },
-            emptyTitle: "当前还没有交易记录",
-            emptyDescription: "先完成计划审批并进入执行阶段，成交与执行日志会自动沉淀到这里。",
-            goToDecisionCenter: "前往决策中心",
-            filteredEmptyTitle: "当前筛选条件下没有匹配记录",
-            filteredEmptyDescription: "请调整时间范围或状态筛选，重新查看对应执行明细。",
-            resetFilters: "恢复默认筛选",
-            details: "执行明细",
-            accumulatedFees: "累计费用",
-            columns: {
-              time: "时间",
-              instrument: "标的",
-              side: "方向",
-              quantity: "数量",
-              price: "成交价",
-              amount: "金额",
-              fee: "费用",
-              mode: "模式",
-              status: "状态",
-              actions: "操作",
-            },
-            actions: {
-              cancel: "取消",
-              replace: "改单",
-              cancelling: "取消中…",
-              replacing: "保存中…",
-              cancelTitle: "取消订单",
-              replaceTitle: "修改订单",
-              cancelConfirm: "确定取消该订单？此操作会记入审计日志，且无法撤销。",
-              replaceQuantity: "新数量",
-              replaceLimit: "新限价",
-              replaceStop: "新止损触发价",
-              replaceTrailAmount: "新追踪金额",
-              replaceTrailPercent: "新追踪百分比 (0-1)",
-              replaceDisplayQty: "新冰山显示量",
-              replaceNote: "备注（可选）",
-              replaceLeaveBlankHelp: "留空表示不修改该字段。",
-              save: "保存修改",
-              cancelButton: "取消",
-              dismiss: "关闭",
-              error: "操作失败",
-              cancelSuccess: "订单已取消。",
-              replaceSuccess: "订单已更新。",
-            },
-            orderType: "订单类型",
-            reduceOnly: "仅减仓",
-            liveQuote: "实时行情",
-            quoteSource: "行情来源",
-            quoteAsOf: "行情时间",
-            quoteLag: "新鲜度",
-            quoteMissing: "暂无行情快照",
-            quoteStale: "已过期",
-            quotePriceGap: "相对成交价",
-            notExecuted: "未执行",
-            notRecorded: "未记录",
-            statusLabels: {
-              filled: "已成交",
-              partial: "部分成交",
-              pending: "待执行",
-              cancelled: "已取消",
-              canceled: "已取消",
-              submitted: "已提交",
-              rejected: "已拒绝",
-              failed: "已拒绝",
-            },
-            sideLabels: {
-              buy: "买入",
-              sell: "卖出",
-            },
-            tradingModes: {
-              live: "实盘",
-              paper: "纸面",
-              simulation: "模拟",
-            },
-            orderTypes: {
-              market: "市价单",
-              limit: "限价单",
-              stop: "止损单",
-              stop_limit: "止损限价单",
-            },
-            positionSides: {
-              long: "多头",
-              short: "空头",
-            },
-            openClose: {
-              open: "开仓",
-              close: "平仓",
-              close_today: "平今",
-              roll: "移仓",
-            },
-            unknownStatus: "未知状态",
-            spotLong: "现货 / 多头",
-            unset: "未设置",
-            splitter: {
-              expand: "展开分笔",
-              collapse: "收起分笔",
-              loading: "正在加载分笔…",
-              empty: "该订单无子分笔",
-              error: "加载分笔失败",
-              strategyLabel: "策略",
-              sliceIndex: "分笔",
-              parentBadge: "TWAP 父单",
-            },
-          },
-    [language],
-  );
+  // W5-1 — i18n migration. We pull the merged resource bundle
+  // from i18next once per language flip and keep the existing
+  // `copy.X` shape verbatim so the 100+ downstream call sites
+  // in this file (statusMeta, sideMeta, modify-order modal,
+  // mobile-card branch, slice splitter, etc.) need no changes.
+  // The `language` dep on the memo isn't redundant: i18next's
+  // `getResourceBundle` returns the bundle for whatever language
+  // is currently set, and `useAppPreferences -> i18n.changeLanguage`
+  // (see lib/preferences.tsx) flips that synchronously, so the
+  // memo recomputes when the user toggles language.
+  const { i18n } = useTranslation("tradeHistory");
+  const copy = useMemo(() => {
+    return i18n.getResourceBundle(i18n.language, "tradeHistory") as TradeHistoryCopy;
+  }, [i18n, language]);
 
   const statusMeta = useCallback(
     (status: string) => {
@@ -690,6 +455,16 @@ const TradeHistory: React.FC = () => {
 
   const statusOptions = useMemo(() => Array.from(new Set(trades.map((trade) => trade.status))), [trades]);
 
+  // W4-24 ResponsiveTable wiring: below the md breakpoint we
+  // render a stripped-down card view per trade. The desktop
+  // table is preserved verbatim — it carries too much
+  // operationally-essential structure (live-quote chip, child-
+  // slice expander, modify/cancel actions) to be safely
+  // recomposed for mobile, so the card view is intentionally
+  // a "read-only summary" surface and we direct operators
+  // to the desktop view for actions.
+  const isMobile = useIsBelow("md");
+
   if (loading) {
     return <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500">{copy.loading}</div>;
   }
@@ -836,6 +611,63 @@ const TradeHistory: React.FC = () => {
           >
             {copy.resetFilters}
           </button>
+        </div>
+      ) : isMobile ? (
+        <div className="space-y-2">
+          <div className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-xs text-gray-500 shadow-sm">
+            {copy.accumulatedFees} {formatMoneyForDisplay(summary.fees, "USD", displayCurrency, language)}
+          </div>
+          <ul className="space-y-2">
+            {visibleTrades.map((trade) => {
+              const side = sideMeta(trade.side);
+              const status = statusMeta(trade.status);
+              const effectiveQuantity = trade.filledQty || trade.quantity;
+              const effectivePrice = trade.filledPrice || trade.price;
+              const effectiveAmount =
+                trade.amount || effectiveQuantity * effectivePrice;
+              const priceCurrency = trade.quoteCurrency || "USD";
+              const amountCurrency =
+                trade.settlementCurrency || trade.quoteCurrency || "USD";
+              return (
+                <li
+                  key={trade.id}
+                  className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-900">{trade.symbol}</p>
+                      <p className="text-[11px] text-gray-400">
+                        {formatDateTimeForLanguage(trade.executedAt ?? trade.createdAt, language)}
+                      </p>
+                    </div>
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${side.bg} ${side.color}`}>
+                      {side.label}
+                    </span>
+                  </div>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+                    <dt className="text-gray-500">{copy.columns.quantity}</dt>
+                    <dd className="text-right text-gray-800">
+                      {formatNumberForLanguage(effectiveQuantity, language)}
+                    </dd>
+                    <dt className="text-gray-500">{copy.columns.price}</dt>
+                    <dd className="text-right text-gray-800">
+                      {formatMoneyForDisplay(effectivePrice, priceCurrency, displayCurrency, language)}
+                    </dd>
+                    <dt className="text-gray-500">{copy.columns.amount}</dt>
+                    <dd className="text-right text-gray-800">
+                      {formatMoneyForDisplay(effectiveAmount, amountCurrency, displayCurrency, language)}
+                    </dd>
+                    <dt className="text-gray-500">{copy.columns.status}</dt>
+                    <dd className="text-right">
+                      <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium ${status.badge}`}>
+                        {status.label}
+                      </span>
+                    </dd>
+                  </dl>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       ) : (
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
