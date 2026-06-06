@@ -145,6 +145,16 @@ jobs:
       - name: Run lint
         run: npm run lint
 
+      - name: Run i18n key parity guard
+        # W6-3 — refuse a merge if a translation key is added to one
+        # locale and not the other, or if the placeholder field set
+        # drifts between locales (an English `{amount}` silently
+        # disappearing from the Chinese copy is the failure mode this
+        # catches). The renderer test (test:i18n) covers the lessonRenderer
+        # template surface; this one covers the inline namespace bundles
+        # we migrated in W4-26 / W5-1.
+        run: npm run test:i18n-keys
+
   android:
     name: Android RN typecheck, lint, jest
     runs-on: ubuntu-latest

@@ -129,6 +129,16 @@ go run ./cmd/server
 - 本地 PostgreSQL: localhost:5432
 - SPA 首页（由后端静态托管时）: http://localhost:8080/
 
+### 可选：安装 git 预提交钩子
+
+仓库内置 `.githooks/pre-commit`，会在涉及 `web/src/i18n/locales/**` 的提交上跑一次 i18n key 对齐校验（CI 中的同名步骤是真正的 gate）。一次性激活：
+
+```bash
+bash scripts/install-git-hooks.sh
+```
+
+后续可用 `git config --unset core.hooksPath` 关闭。Backend-only 的贡献者可以不开，CI 仍会兜底。
+
 ## 推荐配置路径
 
 默认推荐走 env-first：复制 `.env.example` 到 `.env`，填好数据库、一个默认 LLM、以及至少一个可用市场数据/新闻来源后即可启动。若某个 team agent 没有在数据库里单独配置模型，它会按以下顺序自动继承：
