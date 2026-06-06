@@ -88,6 +88,21 @@ section so the deeper rationale is one click away.
 | SV3 | Per-fund / per-instrument session calendars — exchange-calendar lookup vs hard-coded 20:00 UTC | active | L  | [SURVEILLANCE_FRAMEWORK.md §Future work #3](SURVEILLANCE_FRAMEWORK.md#future-work) |
 | SV4 | Real-time hot-path — bolt self-trade rule onto order-entry as synchronous block             | blocked | M      | [SURVEILLANCE_FRAMEWORK.md §Future work #4](SURVEILLANCE_FRAMEWORK.md#future-work) (needs months of shadow signal) |
 
+## Observability / SRE infra
+
+Tracks follow-ups recorded across the embed-pipeline observability
+arc (W6 → W14): the embed-quota limiter, memory re-embed queue,
+DB pool surface, and the per-fund side-car. The shipped state
+lives in `docs/PROMETHEUS_QUERIES.md` (alert thresholds + admin
+endpoints) and `docs/PER_FUND_EMBEDQUOTA_OBSERVABILITY.md` (ADR).
+
+| ID  | Item                                                                                          | Status | Effort | Source                                                                                                                  |
+| --- | --------------------------------------------------------------------------------------------- | ------ | ------ | ----------------------------------------------------------------------------------------------------------------------- |
+| OBS1 | `memreembed.Request.FundID` — propagate fundID from consolidation enqueue path so the re-embed worker's Embed call can populate per-fund metrics | active  | S | [PER_FUND_EMBEDQUOTA_OBSERVABILITY.md §7 follow-ups](PER_FUND_EMBEDQUOTA_OBSERVABILITY.md#7-what-ships-per-wave) |
+| OBS2 | Per-fund `_overflow` cardinality recording rule + alert (paged when MaxFunds budget exhausted) | active  | S      | [PER_FUND_EMBEDQUOTA_OBSERVABILITY.md §7 follow-ups](PER_FUND_EMBEDQUOTA_OBSERVABILITY.md#7-what-ships-per-wave)        |
+| OBS3 | `INSTRUMENTATION_ROADMAP.md` — decide whether to switch the hand-rolled atomic histograms to `prometheus/client_golang` | active  | M      | [PER_FUND_EMBEDQUOTA_OBSERVABILITY.md §9](PER_FUND_EMBEDQUOTA_OBSERVABILITY.md#9-prior-art--why-we-didnt-reuse-prometheuss-own) |
+| OBS4 | i18n parity allowlist hygiene — review `web/test/i18nNamespaceParity.allowlist.ts` quarterly so flagged identical strings don't accumulate stale exemptions | active | XS | [W13-5 commit message + `i18nNamespaceParity.test.ts` preamble] |
+
 ## Model A/B & experimentation
 
 | ID  | Item                                                                                | Status | Effort | Source                                                                                  |

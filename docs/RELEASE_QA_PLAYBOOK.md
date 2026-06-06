@@ -40,6 +40,27 @@ docker compose down -v
 
 CI mirrors all of the above and gates merges; this is the local rehearsal.
 
+### 0.0.1 Observability readiness (Admin panels)
+
+After the docker compose comes up, log in as `super_admin` and open
+`/admin`. Confirm the four W11-2 / W13-1 / W14-3 infrastructure
+panels all render without "load failed" banners — they are the
+on-call's first stop when an alert fires, and a panel that 500s on
+release night is exactly the kind of issue this gate catches:
+
+| Panel                                | Endpoint                                | Introduced |
+| ------------------------------------ | --------------------------------------- | ---------- |
+| Memory re-embed queue (W9-2)         | `/api/admin/memreembed/status`          | W9-2       |
+| Embed quota limiter (W11-2)          | `/api/admin/embed-quota/status`         | W11-1 / W11-2 |
+| Embed quota · per fund (W14-3)       | `/api/admin/embed-quota/per-fund`       | W14-3      |
+| DB connection pool (W13-1)           | `/api/admin/db-pool/status`             | W13-1      |
+
+The per-fund panel will render an "observability disabled" state
+unless `EMBED_QUOTA_OBS_ENABLED=true` is set on the server; in that
+case the disabled-state banner itself is the pass criterion. See
+`docs/PROMETHEUS_QUERIES.md §8` for the curl-only fallback if the
+UI is broken on a release-day fire.
+
 ---
 
 ## 0.1. govulncheck pinning + bump SLA

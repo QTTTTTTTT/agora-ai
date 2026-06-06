@@ -1267,6 +1267,256 @@ sum(rate(fundai_wsfeed_events_total{event="quote_stale_served_on_error"}[15m]))
 
 ---
 
+## 异步嵌入管线观测 — Embed quota / SSE mux / Re-embed queue
+
+> 引入版本: Wave 6 → Wave 10 · 受众: 后台/平台 SRE
+>
+> 这一组指标围绕「memory 嵌入 + 多基金 workflow 直播 + 记忆重嵌入」三条
+> 后台管线展开，回答的是 "**memory pipeline 健康吗？**" 和 "**LLM
+> 提供商有没有把我们卡在限流上？**" 这种 4 大类问题，所有信号都通过
+> `GET /api/metrics` 暴露，都从 `fundai_embed_quota_*` /
+> `fundai_workflow_sse_mux_*` / `fundai_memreembed_*` 三个前缀分支。
+>
+> 指标列表（节选）：
+>
+> | 指标                                                    | 类型      | 含义                                              |
+> | ---                                                     | ---       | ---                                               |
+> | `fundai_embed_quota_status`                             | gauge     | 1=ok / 2=throttled / 3=near_limit / 4=exhausted   |
+> | `fundai_embed_quota_calls_last_minute`                  | gauge     | 最近 60s 嵌入调用计数（点位）                     |
+> | `fundai_embed_quota_calls_per_minute_max`               | gauge     | 配置上限                                          |
+> | `fundai_embed_quota_tokens_today_used`                  | gauge     | 今日 (UTC) 已耗 token                             |
+> | `fundai_embed_quota_tokens_daily_max`                   | gauge     | 配置上限                                          |
+> | `fundai_embed_quota_throttled_total`                    | counter   | 触发 per-minute 限流的 Acquire 次数（W8-1）       |
+> | `fundai_embed_quota_exhausted_total`                    | counter   | 配额已耗尽被直接拒绝的 Acquire 次数（W8-1）       |
+> | `fundai_embed_quota_acquire_wait_seconds`               | histogram | Acquire 推荐 wait 时长分布（W9-1）                |
+> | `fundai_embed_quota_call_tokens`                        | histogram | RecordUsage 单次 token 量分布（W10-1）            |
+> | `fundai_workflow_sse_mux_active_connections`            | gauge     | 当前活跃多基金 SSE 连接                           |
+> | `fundai_workflow_sse_mux_connections_total`             | counter   | 累计 SSE 连接（W6-2）                             |
+> | `fundai_workflow_sse_mux_subscriptions_total`           | counter   | 累计基金订阅（一个连接订多只基金时多次）          |
+> | `fundai_workflow_sse_mux_forbidden_frames_total`        | counter   | 因鉴权被拒的订阅帧（W6-2）                        |
+> | `fundai_memreembed_pending`                             | gauge     | re-embed 队列待处理量                             |
+> | `fundai_memreembed_embedded_total`                      | counter   | 累计已嵌入（W7-1）                                |
+> | `fundai_memreembed_dead_letter_total`                   | counter   | 累计进死信（W7-1）                                |
+> | `fundai_memreembed_status`                              | gauge     | 0=disabled / 1=ok / 2=degraded                    |
+
+### 1) Embed 限流是不是在「真发生」
+
+**场景**: 我们什么时候在被限流？是低频偶发还是持续踩线？
+
+```promql
+sum(rate(fundai_embed_quota_throttled_total[5m])) * 60
+```
+
+**解读**: 每分钟 throttled 次数。
+- `0` 长时间持平 → 健康。
+- `> 0` 但 < 3/min → 偶发 burst，可接受。
+- `> 10/min` 且持续 > 10min → 上调 `MaxCallsPerMinute` 或者降低
+  上游触发频率（`memreembed` 的入队节流 / consolidation 频率）。
+
+### 2) Embed token 配额「今天烧到第几格」
+
+**场景**: 每日 UTC token 预算还剩多少？什么时候会触发 exhausted？
+
+```promql
+fundai_embed_quota_tokens_today_used / fundai_embed_quota_tokens_daily_max
+```
+
+**解读**: 今日已耗占比 (0.0 ~ 1.0)。
+- 超过 `softLimitFraction`（默认 0.80）时 `status` gauge 会跳到
+  `near_limit`（=3）；告警建议在 0.85 通知，0.95 升级。
+- 把它和 `rate(fundai_embed_quota_tokens_today_used[5m])` 叠图，
+  能看出今天剩多少时间会撞天花板。
+
+### 3) Throttle 等待时长尾部 (W9-1 SLO)
+
+**场景**: 限流到底有多疼？同样一次 throttled，是 50ms 让一让，
+还是 30s 把整个工作流都卡死？这是 **W9-1 直方图存在的核心理由**。
+
+```promql
+histogram_quantile(0.99,
+  sum(rate(fundai_embed_quota_acquire_wait_seconds_bucket[10m])) by (le))
+```
+
+**解读**: 过去 10 分钟内 99% 的 Acquire 在多久之内能放行。
+- p99 < `0.5s` → 健康；
+- p99 `0.5s ~ 5s` → 正在被持续 throttling，看 `throttled_total` 是否同步上涨；
+- p99 `> 5s` 持续 10 分钟 → **告警**，要么调大上游 quota，要么减少
+  并发；这一档下游用户体感会明显变差。
+
+> SLO 写法：
+>
+> ```yaml
+> - alert: EmbedQuotaTailWaitHigh
+>   expr: histogram_quantile(0.99,
+>           sum(rate(fundai_embed_quota_acquire_wait_seconds_bucket[10m])) by (le)) > 5
+>   for: 10m
+>   labels: { severity: warning }
+>   annotations:
+>     summary: "embedquota Acquire p99 wait > 5s"
+> ```
+
+### 4) Throttle 是「次数多」还是「单次大」(W10-1 配对)
+
+**场景**: throttle 数字在升 ↑，但底层原因是？这就是把
+W9-1 的 wait 直方图与 W10-1 的 token 直方图放一起看的理由。
+
+```promql
+# 单次 call 的 token p99
+histogram_quantile(0.99,
+  sum(rate(fundai_embed_quota_call_tokens_bucket[10m])) by (le))
+```
+
+**解读**:
+- `wait p99` ↑ + `tokens p99` 持平 → 调用频次激增（worker 太多 / 上游
+  consolidation 触发太密）。
+- `wait p99` ↑ + `tokens p99` 同步 ↑ → 单次调用变胖（chunk 切分变粗 /
+  长文档进来），看 `recall.Embedder` 的 input。
+- `wait p99` 持平 + `tokens p99` ↑ → 容量富余但花得快，今天可能
+  提前撞 daily quota；和第 2 节的耗用占比一起看。
+
+> **Batch-too-large 复合 SLO (W13-3)**: 上面的解读规则里，「wait p99 ↑ +
+> tokens p99 同步 ↑」是唯一**自动可识别**的故障形态——OCR / chunker
+> 改动让单次 batch 变胖，配额因此被烧得过快，下游持续被 throttling。
+> 单看任一直方图都判不出这个故障，要把两条放一起：
+>
+> ```yaml
+> - alert: EmbedQuotaBatchTooLarge
+>   expr: |
+>     histogram_quantile(0.99,
+>       sum(rate(fundai_embed_quota_call_tokens_bucket[10m])) by (le)) > 32000
+>     and
+>     histogram_quantile(0.99,
+>       sum(rate(fundai_embed_quota_acquire_wait_seconds_bucket[10m])) by (le)) > 5
+>   for: 15m
+>   labels: { severity: warning, runbook: embed-batch-too-large }
+>   annotations:
+>     summary: "embedquota: 单次 batch p99 > 32k token 且 wait p99 > 5s 持续 15m"
+>     description: |
+>       同时满足两个直方图尾部恶化通常意味着：上游切片器（splitter /
+>       chunker）刚改过 / OCR 入库刚换 provider / 长文档 batch 上来。
+>       第一手排查清单：
+>         1. 看 deployment-history：embedquota 调用方代码 / config 在
+>            过去 24h 是否有变更（git log -- recall/ memreembed/）。
+>         2. 看 callTokensSum / callTokensCount 的比值（`/api/admin/embed-quota/status`
+>            里有 `callTokensCount` + `callTokensSum`，相除就是平均
+>            batch 大小）。如果均值跟着上去了，证实是「单次变胖」
+>            而不是「冷冷头部薅了 p99」。
+>         3. 短期降配方案：把 chunker 的 max_chars 调小再上线，
+>            比起调大 daily quota 更便宜。
+> ```
+>
+> **阈值由来**:
+>
+> - `32000 token` —— `recordTokenBuckets` 中第 5 档（参见
+>   `embedquota.go`），对应一次 ~12-15 个段落的长文档。健康产线
+>   的 p99 应该 < 8k；32k 是真正的「单次太胖」起点。
+> - `wait p99 > 5s` —— 与 §3 的 `EmbedQuotaTailWaitHigh` 同阈值，
+>   但这里**不**单独 fire；只在与 token p99 同时越线时触发。
+> - `for: 15m` —— 比 §3 的 10m 更宽。配对失活更不容易抖动，
+>   抗短时长文档导入毛刺。
+
+### 5) Re-embed 队列积压 (W7-1)
+
+**场景**: `memreembed.Queue` 在不在动？
+
+```promql
+fundai_memreembed_pending
+```
+
+**解读**:
+- 健康基线 < 50（依工作负载）；
+- 持续 > 200 → **告警**，worker 没在消费 / leader lease 没在我们手里 / 嵌入器全军覆没；
+- 与 `rate(fundai_memreembed_embedded_total[5m])` 配合：pending 升 +
+  embedded 增速降 = worker 卡死；pending 升 + embedded 同步升 = 上游灌得快。
+
+死信:
+
+```promql
+sum(increase(fundai_memreembed_dead_letter_total[1h]))
+```
+
+> 1h > 0 → 一定有持续 embed 失败的 entity，先看 `last_err_time`
+> （Admin UI W9-2 面板上直读，或 `GET /api/admin/memreembed/status`）。
+
+### 6) 多基金 SSE 直播是否还活着
+
+**场景**: 多基金 workflow stream 现在有多少人接？
+
+```promql
+fundai_workflow_sse_mux_active_connections
+```
+
+**解读**: 即时活跃连接数。突然清零（且
+`rate(fundai_workflow_sse_mux_connections_total[5m]) == 0`）= 前端
+全断 / SSE 路由挂了。
+
+```promql
+sum(rate(fundai_workflow_sse_mux_forbidden_frames_total[10m]))
+```
+
+**解读**: 鉴权拒绝率。短期 > 0 通常意味着 RBAC 边缘 case，
+**持续** > 0 是排错信号——客户端在以错的 fund_id 集订阅。
+
+### 7) 报警阈值清单（建议起点）
+
+| 告警                        | 表达式                                                                                                | 严重度   |
+| ---                         | ---                                                                                                   | ---      |
+| Embed throttled 持续         | `sum(rate(fundai_embed_quota_throttled_total[10m])) * 60 > 10`                                        | warning  |
+| Embed daily quota 接近耗尽   | `fundai_embed_quota_tokens_today_used / fundai_embed_quota_tokens_daily_max > 0.85`                   | warning  |
+| Embed daily quota 已耗尽     | `rate(fundai_embed_quota_exhausted_total[5m]) > 0`                                                    | critical |
+| Acquire p99 wait > 5s       | `histogram_quantile(0.99, sum(rate(fundai_embed_quota_acquire_wait_seconds_bucket[10m])) by (le)) > 5`| warning  |
+| **Embed batch-too-large** (W13-3) | `tokens_p99 > 32k AND wait_p99 > 5s`（详见 §4 复合 SLO）                                  | warning  |
+| Re-embed 积压               | `fundai_memreembed_pending > 200`                                                                     | warning  |
+| Re-embed worker 卡死        | `rate(fundai_memreembed_embedded_total[10m]) == 0 and fundai_memreembed_pending > 50`                 | critical |
+| Re-embed 死信新增            | `increase(fundai_memreembed_dead_letter_total[1h]) > 0`                                               | warning  |
+| SSE mux 鉴权拒绝持续         | `sum(rate(fundai_workflow_sse_mux_forbidden_frames_total[15m])) > 0.05`                               | warning  |
+
+> 建议把 (1)、(3)、(5) 三条放进同一个 Grafana panel，
+> 因为它们一起回答「memory pipeline 现在健康吗」。
+
+### 8) 不打开 Grafana 也能看：Admin JSON 端点 (W8-2 / W9-2 / W11-1)
+
+> 引入版本: Wave 8 / Wave 9 / Wave 11 · 受众: SRE 半夜手机端 / 没装 Prometheus 的演示环境
+>
+> 同样的数字在 Grafana 之外有第二个出口：超管登录后直接 `curl`
+> 三个 JSON 端点。它们和 Prometheus 是 1:1 的，不会出现「两边数不一致」
+> —— 后端的 `HealthSnapshot()` / `Stats()` 是单一事实源。
+>
+> 该入口的存在意义：
+>
+> 1. **Grafana 挂了也能拿数**。Prometheus / Grafana 链路自身可能宕机，
+>    JSON 端点直接读应用进程内存，不依赖 metrics scrape。
+> 2. **Admin UI 直读这三条**。`/admin` 页面上的三个面板分别由这三个
+>    端点驱动 —— `AdminMemReembedSection` (`/memreembed/status`)、
+>    `AdminEmbedQuotaSection` (`/embed-quota/status`) 和
+>    `AdminDBPoolSection` (`/db-pool/status`)，SRE 只需登录就能看到，
+>    不必装客户端。
+>
+> | 端点                                  | 引入  | 等价 Prometheus 指标                                 | 推荐用法                                              |
+> | ---                                   | ---   | ---                                                  | ---                                                   |
+> | `GET /api/admin/memreembed/status`    | W8-2  | `fundai_memreembed_*`                                | 「队列还在动吗？」`pending` / `embeddedTotal` 一眼看  |
+> | `GET /api/admin/embed-quota/status`   | W11-1 | `fundai_embed_quota_*`                               | 「现在被限流了吗？」状态 + 直方图 p99 估计            |
+> | `GET /api/admin/embed-quota/per-fund` | W14-3 | `fundai_embed_quota_per_fund_*` (label `fund_id`)    | 「正在被 throttle 的是哪只基金？」按 fundID 拆分      |
+> | `GET /api/admin/db-pool/status`       | W1-2  | `fundai_db_*`                                        | 「连接池是不是要爆？」使用率 + 等待事件 + 关闭原因      |
+>
+> `/embed-quota/per-fund` 是 W14 之后聚合面板的下钻入口：聚合层告诉
+> SRE 「正在 throttle」，per-fund 层告诉他**是谁**。该端点要求服务端
+> 设置环境变量 `EMBED_QUOTA_OBS_ENABLED=true` 才会有数据；未启用时
+> 返回 `{"enabled": false, "funds": []}`，UI 渲染为「Per-fund 观测
+> 未启用」面板，不会 404。Cardinality 上限 200 (默认)，超出汇入
+> `fund_id="_overflow"` 作为告警信号。详见 ADR
+> `docs/PER_FUND_EMBEDQUOTA_OBSERVABILITY.md`。
+>
+> 直方图 p99 估计是 server 端从累积桶里现算的（`histogramP99WaitSeconds`
+> 和 `histogramP99Tokens`），桶边界粒度有限——把它当**尾部趋势指示**用，
+> 真正的 SLO 计算还是走 Prometheus 的 `histogram_quantile`。
+>
+> 鉴权: 这三条都是 `requireSuperAdmin` 闸门；普通用户拿 token 调会 403。
+> 把它写进 runbook 是因为告警发出来时 SRE 第一反应通常是「能不能在
+> 浏览器/手机里直接看一眼」，而不是「先 SSH 上去 grep Prometheus 文本」。
+
+---
+
 ## 附 A. 命名约定备忘
 
 | 前缀                              | 含义                                       |
@@ -1292,6 +1542,9 @@ sum(rate(fundai_wsfeed_events_total{event="quote_stale_served_on_error"}[15m]))
 | `fundai_lockup_events_total`      | IPO / 受限股 lock-up 门控（S6.3 引入）              |
 | `fundai_borrow_events_total`      | 借券 locate gate + 日终计费（S6.4 引入）             |
 | `fundai_lot_ledger_failures_total`| FIFO lot ledger 写入失败（Phase 3A-1 引入）|
+| `fundai_embed_quota_*`           | 嵌入提供商配额 / 限流 / wait & token 直方图（Wave 6 → 10 引入）|
+| `fundai_workflow_sse_mux_*`      | 多基金 workflow SSE 多路复用（Wave 6 引入）|
+| `fundai_memreembed_*`            | 记忆重嵌入队列状态（Wave 7 引入）|
 
 ## 附 B. 后续可加的指标 (TODO)
 

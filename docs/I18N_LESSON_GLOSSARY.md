@@ -85,6 +85,31 @@ see `shared/api-client/src/i18n.ts` for the full grammar.
 5. If the new template introduces a new domain term, extend the table
    above before merging.
 
+## Additional namespace-level i18n guards (W12-1 / W13-5)
+
+`web/test/i18nNamespaceParity.test.ts` runs against every namespace
+under `web/src/i18n/locales/{lang}/*.ts`, not just lesson templates.
+Two checks are particularly likely to fire on a glossary-driven
+translation PR:
+
+1. **non-empty guard** — every leaf string must be non-empty after
+   trim. Empty Chinese values for an English string (or vice versa)
+   are flagged before review.
+2. **suspicious-identical** — flags pairs where the en-US and zh-CN
+   strings are byte-for-byte identical AND the value looks like an
+   English phrase (multi-word, no CJK characters). The intent is
+   to catch copy-paste regressions where a translator left the
+   English in by mistake. Identifier-shaped strings (single tokens,
+   code paths) are exempt automatically.
+
+If a justified pair would trip the suspicious-identical check —
+e.g. a brand name that's intentionally untranslated — add an entry
+to `web/test/i18nNamespaceParity.allowlist.ts` with a one-line
+`reason`. The allowlist file's hygiene check will then ensure the
+entry stays valid (key still exists in both bundles, reason
+present). See OBS4 in `FUTURE_WORK_INVENTORY.md` for the quarterly
+allowlist review cadence.
+
 ## Bumping the payload schema
 
 When the server-side `Payload` field set changes in a non-additive
