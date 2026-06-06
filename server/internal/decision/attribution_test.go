@@ -111,6 +111,36 @@ func TestBuildContributionsRecognisesAdditionalChinesePhrases(t *testing.T) {
 	)
 }
 
+// PM prose mentioning volume / support / resistance vocabulary
+// must attribute back to the quantSnapshots block — these are
+// downstream of the technical analyst's hard-vote signals
+// (`relative_volume`, `breakout`, `support_distance_pct`,
+// `resistance_distance_pct`) added in W15.
+func TestBuildContributionsRecognisesVolumeAndSupportVocabulary(t *testing.T) {
+	cases := []struct {
+		name      string
+		reasoning string
+	}{
+		{"english_relative_volume", "AAPL relative volume 2.1x; respect the volume surge."},
+		{"english_breakout", "MU just printed a breakout above the 20-day high."},
+		{"english_support", "Holding above key support level keeps the trend alive."},
+		{"english_resistance", "Watch the resistance line at 198 — rejection is plausible."},
+		{"chinese_volume", "AAPL 放量上行，成交量是平均的两倍，量能配合突破。"},
+		{"chinese_breakdown", "MU 跌破了前期低点，止损要紧。"},
+		{"chinese_support", "支撑位在 95 一线，破位再考虑减仓。"},
+		{"chinese_resistance", "阻力位 200 附近压力较大，先观望。"},
+	}
+	tr := Fingerprint(DecisionInput{
+		QuantSnapshots: []SymbolQuantSnapshot{{}},
+	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildContributions(tr, tc.reasoning)
+			mustContain(t, got.Cited, "quantSnapshots")
+		})
+	}
+}
+
 func TestBuildContributionsEmptyReasoningHasNoCited(t *testing.T) {
 	tr := Fingerprint(DecisionInput{
 		QualityScores: []SymbolQualityScore{{Symbol: "A"}},

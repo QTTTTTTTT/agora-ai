@@ -507,6 +507,185 @@ func TestTechnicalAnalyst_NoData_NeutralFloor(t *testing.T) {
 	}
 }
 
+// Volume surge confirming an existing bullish setup must INCREASE
+// confidence vs. the same setup without volume — RV ≥ 1.5 is a
+// confirmation vote.
+func TestTechnicalAnalyst_VolumeSurgeAmplifiesConviction(t *testing.T) {
+	a := NewTechnicalAnalyst("ta-1", "Bot", "f-1", nil, newClockOption())
+	base := AnalystInput{
+		Symbol: "SPY", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: "TrendUp", Close: 500, ATR14: 5, ATRPct: 1.0},
+			Signals:  map[string]float64{"ma50_over_ma200": 1, "macd_hist": 0.3, "rsi14": 55},
+		},
+	}
+	withSurge := AnalystInput{
+		Symbol: "SPY", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: "TrendUp", Close: 500, ATR14: 5, ATRPct: 1.0},
+			Signals: map[string]float64{
+				"ma50_over_ma200": 1, "macd_hist": 0.3, "rsi14": 55,
+				"relative_volume": 2.0,
+			},
+		},
+	}
+	repBase, _ := a.Analyze(context.Background(), base)
+	repSurge, _ := a.Analyze(context.Background(), withSurge)
+
+	if repBase.Direction != DirectionBullish || repSurge.Direction != DirectionBullish {
+		t.Fatalf("both should be bullish; got base=%v surge=%v", repBase.Direction, repSurge.Direction)
+	}
+	if repSurge.Confidence < repBase.Confidence {
+		t.Errorf(
+			"volume surge should not REDUCE conviction: base=%d surge=%d",
+			repBase.Confidence, repSurge.Confidence,
+		)
+	}
+	hasVolFinding := false
+	for _, f := range repSurge.KeyFindings {
+		if strings.Contains(f, "volume") && strings.Contains(f, "surge") {
+			hasVolFinding = true
+		}
+	}
+	if !hasVolFinding {
+		t.Errorf("expected volume-surge finding; got %v", repSurge.KeyFindings)
+	}
+}
+
+// Low relative volume should DRAG conviction down vs. the same
+// directional signals at "normal" volume.
+func TestTechnicalAnalyst_LowVolumeDragsConviction(t *testing.T) {
+	a := NewTechnicalAnalyst("ta-1", "Bot", "f-1", nil, newClockOption())
+	base := AnalystInput{
+		Symbol: "SPY", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: "TrendUp", Close: 500, ATR14: 5},
+			Signals:  map[string]float64{"ma50_over_ma200": 1, "macd_hist": 0.3, "rsi14": 55},
+		},
+	}
+	withThin := AnalystInput{
+		Symbol: "SPY", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: "TrendUp", Close: 500, ATR14: 5},
+			Signals: map[string]float64{
+				"ma50_over_ma200": 1, "macd_hist": 0.3, "rsi14": 55,
+				"relative_volume": 0.3,
+			},
+		},
+	}
+	repBase, _ := a.Analyze(context.Background(), base)
+	repThin, _ := a.Analyze(context.Background(), withThin)
+
+	if repThin.Confidence >= repBase.Confidence {
+		t.Errorf(
+			"thin-volume case should LOWER conviction; base=%d thin=%d",
+			repBase.Confidence, repThin.Confidence,
+		)
+	}
+	hasLowVolRisk := false
+	for _, r := range repThin.Risks {
+		if strings.Contains(r, "low participation") {
+			hasLowVolRisk = true
+		}
+	}
+	if !hasLowVolRisk {
+		t.Errorf("expected low-participation risk; got %v", repThin.Risks)
+	}
+}
+
+// Volume alone (no other directional signals) must NOT vote a
+// direction — it's a confirmation/dilution input only.
+func TestTechnicalAnalyst_VolumeAloneDoesNotVoteDirection(t *testing.T) {
+	a := NewTechnicalAnalyst("ta-1", "Bot", "f-1", nil, newClockOption())
+	input := AnalystInput{
+		Symbol: "ZZZ", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: ""}, // no regime vote
+			Signals:  map[string]float64{"relative_volume": 3.0},
+		},
+	}
+	rep, _ := a.Analyze(context.Background(), input)
+	if rep.Direction != DirectionNeutral {
+		t.Errorf("volume alone should not produce a direction; got %v", rep.Direction)
+	}
+}
+
+// Breakout above prior range is a hard +1 directional vote.
+func TestTechnicalAnalyst_BreakoutAboveVotesBullish(t *testing.T) {
+	a := NewTechnicalAnalyst("ta-1", "Bot", "f-1", nil, newClockOption())
+	input := AnalystInput{
+		Symbol: "ZZZ", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: "Range"}, // neutral regime
+			Signals:  map[string]float64{"breakout": 1},
+		},
+	}
+	rep, _ := a.Analyze(context.Background(), input)
+	if rep.Direction != DirectionBullish {
+		t.Errorf("breakout=+1 should drive bullish direction; got %v", rep.Direction)
+	}
+	hasBreakoutFinding := false
+	for _, f := range rep.KeyFindings {
+		if strings.Contains(f, "breakout") {
+			hasBreakoutFinding = true
+		}
+	}
+	if !hasBreakoutFinding {
+		t.Errorf("expected breakout finding; got %v", rep.KeyFindings)
+	}
+}
+
+// Breakdown below prior range is a hard -1 directional vote.
+func TestTechnicalAnalyst_BreakdownBelowVotesBearish(t *testing.T) {
+	a := NewTechnicalAnalyst("ta-1", "Bot", "f-1", nil, newClockOption())
+	input := AnalystInput{
+		Symbol: "ZZZ", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: "Range"},
+			Signals:  map[string]float64{"breakout": -1},
+		},
+	}
+	rep, _ := a.Analyze(context.Background(), input)
+	if rep.Direction != DirectionBearish {
+		t.Errorf("breakout=-1 should drive bearish direction; got %v", rep.Direction)
+	}
+	hasBreakdownRisk := false
+	for _, r := range rep.Risks {
+		if strings.Contains(r, "breakdown") {
+			hasBreakdownRisk = true
+		}
+	}
+	if !hasBreakdownRisk {
+		t.Errorf("expected breakdown risk; got %v", rep.Risks)
+	}
+}
+
+// Close hugging the 20-bar resistance from below should surface
+// as a "near 20-bar resistance" risk even if no breakout fires.
+func TestTechnicalAnalyst_NearResistanceFlagsRisk(t *testing.T) {
+	a := NewTechnicalAnalyst("ta-1", "Bot", "f-1", nil, newClockOption())
+	input := AnalystInput{
+		Symbol: "ZZZ", AsOf: testClock,
+		Technical: &TechnicalBlock{
+			Snapshot: QuantSnapshotLite{Regime: "TrendUp", Close: 100, ATR14: 1},
+			Signals: map[string]float64{
+				"resistance_distance_pct": 0.005, // 0.5% under resistance
+				"support_distance_pct":    0.10,  // far from support
+			},
+		},
+	}
+	rep, _ := a.Analyze(context.Background(), input)
+	hasNearRes := false
+	for _, r := range rep.Risks {
+		if strings.Contains(r, "20-bar resistance") {
+			hasNearRes = true
+		}
+	}
+	if !hasNearRes {
+		t.Errorf("expected near-resistance risk; got %v", rep.Risks)
+	}
+}
+
 // --- AnalystReport.ToBrief -------------------------------------------------
 
 func TestAnalystReport_ToBrief_FocusMapping(t *testing.T) {

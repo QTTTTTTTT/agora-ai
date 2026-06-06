@@ -297,6 +297,193 @@ func TestSnapshotComputeShortInput(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Support / resistance + breakout state
+// ---------------------------------------------------------------------------
+
+// Compute fills SupportLevel / ResistanceLevel from the prior
+// SRLookback bars (NOT including the current bar). On a flat
+// fixture where the last bar's close pierces above all prior
+// highs, BreakoutState should be "above_resistance".
+func TestSnapshotSupportResistanceBreakoutAbove(t *testing.T) {
+	// 21 bars: 20 prior bars in [99, 101], then a final bar that
+	// closes at 110 (clearly above the prior 20-bar high of ~101).
+	bars := make([]ohlc.Bar, 21)
+	for i := 0; i < 20; i++ {
+		bars[i] = ohlc.Bar{
+			Open: 100, Close: 100, High: 101, Low: 99, Volume: 1_000,
+		}
+	}
+	bars[20] = ohlc.Bar{Open: 105, Close: 110, High: 112, Low: 104, Volume: 5_000}
+	snap := Compute(bars)
+
+	if snap.SRWindow != SRLookback {
+		t.Fatalf("SRWindow = %d, want %d", snap.SRWindow, SRLookback)
+	}
+	if !approxEqual(snap.ResistanceLevel, 101, 1e-9) {
+		t.Errorf("ResistanceLevel = %v, want 101 (prior 20-bar high)", snap.ResistanceLevel)
+	}
+	if !approxEqual(snap.SupportLevel, 99, 1e-9) {
+		t.Errorf("SupportLevel = %v, want 99 (prior 20-bar low)", snap.SupportLevel)
+	}
+	if snap.BreakoutState != "above_resistance" {
+		t.Errorf("BreakoutState = %q, want above_resistance", snap.BreakoutState)
+	}
+	// SupportDistancePct = (110 - 99) / 110 ≈ 0.10
+	if !approxEqual(snap.SupportDistancePct, 11.0/110.0, 1e-6) {
+		t.Errorf("SupportDistancePct = %v, want ~0.10", snap.SupportDistancePct)
+	}
+	// ResistanceDistancePct = (101 - 110) / 110 ≈ -0.0818 (below
+	// resistance is negative because price is above it).
+	if snap.ResistanceDistancePct >= 0 {
+		t.Errorf(
+			"ResistanceDistancePct = %v, want negative (price above resistance)",
+			snap.ResistanceDistancePct,
+		)
+	}
+}
+
+// A close strictly below the prior 20-bar low classifies as
+// "below_support".
+func TestSnapshotSupportResistanceBreakoutBelow(t *testing.T) {
+	bars := make([]ohlc.Bar, 21)
+	for i := 0; i < 20; i++ {
+		bars[i] = ohlc.Bar{
+			Open: 100, Close: 100, High: 101, Low: 99, Volume: 1_000,
+		}
+	}
+	bars[20] = ohlc.Bar{Open: 95, Close: 90, High: 96, Low: 89, Volume: 5_000}
+	snap := Compute(bars)
+
+	if snap.BreakoutState != "below_support" {
+		t.Errorf("BreakoutState = %q, want below_support", snap.BreakoutState)
+	}
+	if snap.SupportDistancePct >= 0 {
+		t.Errorf(
+			"SupportDistancePct = %v, want negative (close below support)",
+			snap.SupportDistancePct,
+		)
+	}
+}
+
+// A close inside the prior range with no other proximity should
+// classify as "" (empty / range-bound). The fixture uses a tight
+// daily range with two short-lived spikes so resistance is well
+// above and support well below the latest close, while ATR stays
+// small enough that the "near" thresholds don't fire.
+func TestSnapshotSupportResistanceRangeBound(t *testing.T) {
+	bars := make([]ohlc.Bar, 21)
+	for i := 0; i < 20; i++ {
+		bars[i] = ohlc.Bar{Open: 100, Close: 100, High: 101, Low: 99, Volume: 1_000}
+	}
+	// One-bar high spike to 120 → resistance = 120.
+	bars[5] = ohlc.Bar{Open: 100, Close: 100, High: 120, Low: 99, Volume: 1_000}
+	// One-bar low spike to 80 → support = 80.
+	bars[12] = ohlc.Bar{Open: 100, Close: 100, High: 101, Low: 80, Volume: 1_000}
+	bars[20] = ohlc.Bar{Open: 100, Close: 100, High: 101, Low: 99, Volume: 1_000}
+	snap := Compute(bars)
+
+	if !approxEqual(snap.ResistanceLevel, 120, 1e-9) {
+		t.Fatalf("ResistanceLevel = %v, want 120 (one-bar spike)", snap.ResistanceLevel)
+	}
+	if !approxEqual(snap.SupportLevel, 80, 1e-9) {
+		t.Fatalf("SupportLevel = %v, want 80 (one-bar spike)", snap.SupportLevel)
+	}
+	if snap.BreakoutState != "" {
+		t.Errorf(
+			"BreakoutState = %q, want empty (range-bound) on a comfortably interior close (close=%v ATR14=%v dist-to-res=%v dist-to-sup=%v)",
+			snap.BreakoutState, snap.LastClose, snap.ATR14,
+			snap.ResistanceLevel-snap.LastClose, snap.LastClose-snap.SupportLevel,
+		)
+	}
+	if !(snap.SupportDistancePct > 0 && snap.ResistanceDistancePct > 0) {
+		t.Errorf(
+			"both distances should be positive inside the range; got support=%v resistance=%v",
+			snap.SupportDistancePct, snap.ResistanceDistancePct,
+		)
+	}
+}
+
+// "near_resistance" is the soft variant: within 1×ATR of the
+// prior 20-bar high, but not yet broken out.
+func TestSnapshotSupportResistanceNearResistance(t *testing.T) {
+	bars := make([]ohlc.Bar, 21)
+	for i := 0; i < 20; i++ {
+		bars[i] = ohlc.Bar{Open: 100, Close: 100, High: 110, Low: 90, Volume: 1_000}
+	}
+	bars[20] = ohlc.Bar{Open: 109, Close: 109.5, High: 109.8, Low: 108, Volume: 1_000}
+	snap := Compute(bars)
+
+	if snap.ResistanceLevel != 110 {
+		t.Fatalf("ResistanceLevel = %v, want 110", snap.ResistanceLevel)
+	}
+	if snap.BreakoutState != "near_resistance" {
+		t.Errorf(
+			"BreakoutState = %q, want near_resistance (close=%v res=%v ATR14=%v)",
+			snap.BreakoutState, snap.LastClose, snap.ResistanceLevel, snap.ATR14,
+		)
+	}
+}
+
+// AsAnalystSignals exposes the canonical key set the
+// TechnicalAnalyst hard-votes on.
+func TestSnapshotAsAnalystSignals(t *testing.T) {
+	bars := buildSampleBars(220) // enough for SMA200
+	snap := Compute(bars)
+	sig := snap.AsAnalystSignals()
+
+	// rsi14, macd_hist, support/resistance distances should be
+	// present on a 220-bar series.
+	for _, key := range []string{
+		"rsi14",
+		"macd_hist",
+		"support_distance_pct",
+		"resistance_distance_pct",
+	} {
+		if _, ok := sig[key]; !ok {
+			t.Errorf("AsAnalystSignals missing %q; got keys=%v", key, keysOf(sig))
+		}
+	}
+	// ma50_over_ma200 is +1 / -1 only — never returned as 0.
+	if v, ok := sig["ma50_over_ma200"]; ok && v != 1 && v != -1 {
+		t.Errorf("ma50_over_ma200 = %v, want ±1 only", v)
+	}
+	// relative_volume is omitted only when no volume data; the
+	// fixture has volume so it must be present.
+	if _, ok := sig["relative_volume"]; !ok {
+		t.Errorf("relative_volume should be present on a fixture with non-zero volume")
+	}
+}
+
+// AsAnalystSignals on a known breakout fixture emits breakout=+1.
+func TestSnapshotAsAnalystSignalsBreakoutKey(t *testing.T) {
+	bars := make([]ohlc.Bar, 21)
+	for i := 0; i < 20; i++ {
+		bars[i] = ohlc.Bar{Open: 100, Close: 100, High: 101, Low: 99, Volume: 1_000}
+	}
+	bars[20] = ohlc.Bar{Open: 105, Close: 110, High: 112, Low: 104, Volume: 5_000}
+	snap := Compute(bars)
+	sig := snap.AsAnalystSignals()
+
+	v, ok := sig["breakout"]
+	if !ok {
+		t.Fatalf("breakout key missing; got keys=%v", keysOf(sig))
+	}
+	if v != 1 {
+		t.Errorf("breakout = %v, want +1", v)
+	}
+}
+
+// keysOf is a small helper used only by snapshot tests to make
+// failure messages readable.
+func keysOf(m map[string]float64) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // buildSampleBars produces a synthetic OHLCV series with both up
 // and down phases so RSI/MACD/etc have something to chew on.
 func buildSampleBars(n int) []ohlc.Bar {

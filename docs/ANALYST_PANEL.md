@@ -81,11 +81,36 @@ S8.1 splits that into four roles, each with its own:
   },
   "technical": {
     "snapshot": {"regime": "TrendUp", "close": 198.3, "atr14": 3.1, "atr_pct": 1.6, "position_size_ceiling_pct": 6.0},
-    "signals": {"ma50_over_ma200": 1, "macd_hist": 0.21, "rsi14": 58}
+    "signals": {
+      "ma50_over_ma200": 1,
+      "macd_hist": 0.21,
+      "rsi14": 58,
+      "breakout": 1,
+      "relative_volume": 1.8,
+      "support_distance_pct": 0.06,
+      "resistance_distance_pct": -0.01
+    }
   },
   "persist": true
 }
 ```
+
+#### Technical signal vocabulary
+
+The technical analyst hard-votes on the following well-known
+keys; missing keys are silently skipped, so a partial map is
+fine. Use `indicator.Snapshot.AsAnalystSignals()` on the server
+side to fill it consistently.
+
+| Key | Type | Vote | Notes |
+| --- | --- | --- | --- |
+| `ma50_over_ma200` | ±1 | directional | Sign of (SMA50 − SMA200). |
+| `macd_hist` | float | directional | Sign of MACD histogram. |
+| `rsi14` | 0–100 | reversal | ≥70 → bearish vote (overbought); ≤30 → bullish vote (oversold). |
+| `breakout` | ±1 | directional | +1 = close above prior 20-bar high; -1 = close below prior 20-bar low. Range-bound bars omit this key. |
+| `relative_volume` | float | confirmation/dilution | ≥1.5 amplifies the existing direction; ≤0.5 drags conviction without voting. Volume alone never sets a direction. |
+| `support_distance_pct` | float | informational | (close − support) / close. Surfaces a finding when within 1.5% of support. |
+| `resistance_distance_pct` | float | informational | (resistance − close) / close. Surfaces a risk when within 1.5% of resistance. |
 
 Response:
 

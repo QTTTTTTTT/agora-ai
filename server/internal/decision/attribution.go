@@ -116,7 +116,7 @@ var citationVocabulary = map[string][]string{
 	"sleeveScorecard":    {`sleeve\s*scorecard`, `attribution scorecard`, `归因\s*记分卡`, `策略\s*记分卡`},
 	"lessonReplay":       {`lesson\s*replay`, `replay window`, `复盘`, `教训\s*回放`},
 	"instrumentHints":    {`instrument\s*hints?`, `标的\s*hint`, `工具\s*提示`},
-	"quantSnapshots":     {`quant\s*snapshots?`, `\bATR\b`, `\bMACD\b`, `\bKDJ\b`, `\bRSI\b`, `regime`, `量化\s*快照`, `量化快照`, `仓位.?上限`, `positionSizeCeiling`, `atrPct`},
+	"quantSnapshots":     {`quant\s*snapshots?`, `\bATR\b`, `\bMACD\b`, `\bKDJ\b`, `\bRSI\b`, `regime`, `量化\s*快照`, `量化快照`, `仓位.?上限`, `positionSizeCeiling`, `atrPct`, `relative\s*volume`, `vol(?:ume)?\s*surge`, `成交量`, `量能`, `放量`, `缩量`, `breakout`, `breakdown`, `support(?:\s*level|\s*line)?\b`, `resistance(?:\s*level|\s*line)?\b`, `突破`, `跌破`, `支撑(?:位|线)?`, `阻力(?:位|线)?`, `压力(?:位|线)?`},
 	"universeRanking":    {`universe\s*ranking`, `cross-?sectional rank`, `动量\s*排名`, `横截面\s*排名`, `宇宙\s*排名`, `Q[1-4]\s*排名`, `排名\s*Q[1-4]`, `quartile`, `compositeZ`},
 	"qualityScores":      {`quality\s*scores?`, `\bQMJ\b`, `profitabilityZ`, `safetyZ`, `质量\s*得分`, `质量\s*因子`},
 	"valueScores":        {`value\s*scores?`, `\bHML\b`, `book.?to.?price`, `earnings.?to.?price`, `价值\s*得分`, `价值\s*因子`, `市净率\s*z`, `市盈率\s*z`},

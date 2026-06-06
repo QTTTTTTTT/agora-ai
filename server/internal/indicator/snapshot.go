@@ -53,6 +53,24 @@ type Snapshot struct {
 	VolMA20       float64
 	RelativeVolume float64 // last bar / VolMA20; >1 == above average
 
+	// Support / resistance over the prior SRLookback bars (excluding
+	// the current bar so the "close above resistance" / "close below
+	// support" semantics make sense — the current bar can break out
+	// of its own range only against history). When fewer than
+	// SRLookback+1 bars are available, all S/R fields stay zero.
+	SupportLevel          float64
+	ResistanceLevel       float64
+	SRWindow              int     // SRLookback when computed; 0 otherwise
+	SupportDistancePct    float64 // (close - support) / close; negative = closed below support
+	ResistanceDistancePct float64 // (resistance - close) / close; negative = closed above resistance
+	// BreakoutState describes price's relation to the prior range:
+	//   "above_resistance" — close strictly above the prior 20-bar high
+	//   "below_support"    — close strictly below the prior 20-bar low
+	//   "near_resistance"  — close within 1×ATR (or 0.5% fallback) of resistance
+	//   "near_support"     — close within 1×ATR (or 0.5% fallback) of support
+	//   ""                 — comfortably inside the prior range
+	BreakoutState string
+
 	// Summary tags the prompt can render as bullets.
 	Tags []string
 }
@@ -60,6 +78,12 @@ type Snapshot struct {
 // MinBarsForFullSnapshot is the lookback the analyst really wants;
 // when fewer bars are passed, some fields will stay zero.
 const MinBarsForFullSnapshot = 60
+
+// SRLookback is the rolling window the support/resistance fields
+// scan over. 20 bars matches the de facto "20-day high/low" the
+// retail trading platforms display and the existing Donchian
+// strategy sleeve.
+const SRLookback = 20
 
 // Compute produces a Snapshot for the latest bar. Returns an empty
 // Snapshot when bars is too short to compute anything useful (<5
@@ -129,8 +153,67 @@ func Compute(bars []ohlc.Bar) Snapshot {
 		snap.RelativeVolume = bars[last].Volume / volMA[last]
 	}
 
+	// Support / resistance: scan the prior SRLookback bars
+	// (NOT including the current bar) for the min low and max
+	// high. Excluding the current bar is what lets us classify
+	// the latest close as a breakout / breakdown — a Donchian-
+	// style INclusive window would always have the current bar
+	// touching one extreme.
+	if last >= SRLookback {
+		start := last - SRLookback
+		support := lows[start]
+		resistance := highs[start]
+		for i := start; i < last; i++ {
+			if lows[i] < support {
+				support = lows[i]
+			}
+			if highs[i] > resistance {
+				resistance = highs[i]
+			}
+		}
+		snap.SupportLevel = support
+		snap.ResistanceLevel = resistance
+		snap.SRWindow = SRLookback
+		if snap.LastClose != 0 {
+			snap.SupportDistancePct = (snap.LastClose - support) / snap.LastClose
+			snap.ResistanceDistancePct = (resistance - snap.LastClose) / snap.LastClose
+		}
+		snap.BreakoutState = classifyBreakoutState(snap.LastClose, support, resistance, snap.ATR14)
+	}
+
 	snap.Tags = buildTags(snap, closes)
 	return snap
+}
+
+// classifyBreakoutState labels the current close against the prior
+// support / resistance band. "near" is defined as within 1×ATR14
+// when ATR is available, otherwise within 0.5% of price — that
+// fallback keeps the classifier useful on synthetic / low-vol test
+// fixtures where ATR may not yet be valid.
+func classifyBreakoutState(lastClose, support, resistance, atr14 float64) string {
+	if support <= 0 || resistance <= 0 || lastClose <= 0 {
+		return ""
+	}
+	switch {
+	case lastClose > resistance:
+		return "above_resistance"
+	case lastClose < support:
+		return "below_support"
+	}
+	near := atr14
+	if near <= 0 {
+		near = 0.005 * lastClose
+	}
+	if near <= 0 {
+		return ""
+	}
+	if (resistance - lastClose) <= near {
+		return "near_resistance"
+	}
+	if (lastClose - support) <= near {
+		return "near_support"
+	}
+	return ""
 }
 
 // detectMACDCross checks the last two bars for a sign change of
@@ -218,6 +301,35 @@ func buildTags(s Snapshot, closes []float64) []string {
 		}
 		tags = append(tags, fmt.Sprintf("Volume %.2fx vs 20d avg (%s)", s.RelativeVolume, desc))
 	}
+	// Support / resistance
+	if s.SupportLevel > 0 && s.ResistanceLevel > 0 {
+		tags = append(tags, fmt.Sprintf(
+			"S/R(%dd): support %.2f, resistance %.2f",
+			s.SRWindow, s.SupportLevel, s.ResistanceLevel,
+		))
+		switch s.BreakoutState {
+		case "above_resistance":
+			tags = append(tags, fmt.Sprintf(
+				"breakout: close %.2f > prior %dd high %.2f",
+				s.LastClose, s.SRWindow, s.ResistanceLevel,
+			))
+		case "below_support":
+			tags = append(tags, fmt.Sprintf(
+				"breakdown: close %.2f < prior %dd low %.2f",
+				s.LastClose, s.SRWindow, s.SupportLevel,
+			))
+		case "near_resistance":
+			tags = append(tags, fmt.Sprintf(
+				"price within 1×ATR of %dd resistance %.2f",
+				s.SRWindow, s.ResistanceLevel,
+			))
+		case "near_support":
+			tags = append(tags, fmt.Sprintf(
+				"price within 1×ATR of %dd support %.2f",
+				s.SRWindow, s.SupportLevel,
+			))
+		}
+	}
 	// Short-term momentum (5-bar return)
 	if len(closes) >= 6 {
 		ret := closes[len(closes)-1]/closes[len(closes)-6] - 1
@@ -250,4 +362,56 @@ func (s Snapshot) FormatForPrompt(symbol string) string {
 		return ""
 	}
 	return header + " — " + strings.Join(s.Tags, "; ")
+}
+
+// AsAnalystSignals returns the well-known signal keys the
+// agent.TechnicalAnalyst hard-votes on. Wiring layers that have an
+// indicator.Snapshot in hand can use this to fill the
+// agent.TechnicalBlock.Signals map without re-deriving the canonical
+// key names.
+//
+// Returned keys (canonical, lower-snake-case):
+//   - rsi14: raw RSI (0–100)
+//   - macd_hist: raw MACD histogram value
+//   - ma50_over_ma200: +1 / -1 — sign of (SMA50 − SMA200)
+//   - breakout: +1 (close above prior 20-bar high), -1 (below prior
+//     20-bar low), 0 omitted when range-bound
+//   - relative_volume: latest bar volume / 20-bar average volume
+//   - support_distance_pct: (close − support) / close
+//   - resistance_distance_pct: (resistance − close) / close
+//
+// Keys for which the snapshot has no data (e.g. SMA200 not yet
+// computed because <200 bars) are omitted. The TechnicalAnalyst
+// skips unrecognised / missing keys, so a partial map is safe to
+// pass through.
+func (s Snapshot) AsAnalystSignals() map[string]float64 {
+	out := make(map[string]float64, 7)
+	if s.RSI14 > 0 {
+		out["rsi14"] = s.RSI14
+	}
+	if s.MACDHist != 0 || s.MACDLine != 0 {
+		out["macd_hist"] = s.MACDHist
+	}
+	if s.SMA50 > 0 && s.SMA200 > 0 {
+		switch {
+		case s.SMA50 > s.SMA200:
+			out["ma50_over_ma200"] = 1
+		case s.SMA50 < s.SMA200:
+			out["ma50_over_ma200"] = -1
+		}
+	}
+	switch s.BreakoutState {
+	case "above_resistance":
+		out["breakout"] = 1
+	case "below_support":
+		out["breakout"] = -1
+	}
+	if s.RelativeVolume > 0 {
+		out["relative_volume"] = s.RelativeVolume
+	}
+	if s.SRWindow > 0 {
+		out["support_distance_pct"] = s.SupportDistancePct
+		out["resistance_distance_pct"] = s.ResistanceDistancePct
+	}
+	return out
 }

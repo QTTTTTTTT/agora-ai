@@ -4,11 +4,30 @@
 // and produces a chart-pattern / regime-based call. The
 // directional anchor is the regime classifier output (TrendUp /
 // TrendDown / Range / Chop) combined with the MA cascade /
-// RSI / MACD signals.
+// RSI / MACD / breakout / volume signals.
 //
 // Where the FundamentalsAnalyst answers "is this company
 // worth X?", the TechnicalAnalyst answers "is this price
 // going up or down in the next N bars?".
+//
+// Well-known Signals keys this analyst hard-votes on (each is a
+// float64; missing keys are silently skipped):
+//
+//   - "ma50_over_ma200"           — +1 / -1 directional vote
+//   - "macd_hist"                 — sign drives directional vote
+//   - "rsi14"                     — extremes (≥70 / ≤30) vote
+//     against / with reversion
+//   - "breakout"                  — +1 (close above prior 20-bar
+//     high), -1 (close below prior 20-bar low) directional vote
+//   - "relative_volume"           — confirmation / dilution
+//     post-pass: ≥1.5 amplifies the existing direction; ≤0.5
+//     drags conviction without voting
+//   - "support_distance_pct"      — informational (findings)
+//   - "resistance_distance_pct"   — informational (risks)
+//
+// indicator.Snapshot.AsAnalystSignals() is the canonical builder
+// for this map; wiring layers should prefer it over hand-rolled
+// key strings to avoid drift.
 
 package agent
 
@@ -148,6 +167,43 @@ func scoreTechnicalDirection(input AnalystInput) (Direction, int) {
 		}
 	}
 
+	// Breakout vote: +1 = close above the prior 20-bar high;
+	// -1 = close below the prior 20-bar low. Range-bound bars
+	// pass through 0 and are dropped from the tally entirely
+	// (no totalVotes++) — being inside the range isn't a
+	// directional fact, just the absence of one.
+	if v, ok := t.Signals["breakout"]; ok {
+		switch {
+		case v > 0:
+			totalVotes++
+			votes++
+		case v < 0:
+			totalVotes++
+			votes--
+		}
+	}
+
+	// Volume confirmation / dilution post-pass. Volume is not
+	// directional on its own — a surge confirms the direction the
+	// other signals already found, while thin volume drags
+	// conviction down regardless of which way price moved. We
+	// therefore apply RV ONLY after the directional votes are in.
+	if v, ok := t.Signals["relative_volume"]; ok && v > 0 {
+		switch {
+		case v >= 1.5 && votes > 0:
+			votes++
+			totalVotes++
+		case v >= 1.5 && votes < 0:
+			votes--
+			totalVotes++
+		case v <= 0.5:
+			// Low-participation tape: count it as "data we have"
+			// but cast no directional vote, so |votes|/totalVotes
+			// → conviction shrinks.
+			totalVotes++
+		}
+	}
+
 	if totalVotes == 0 {
 		return DirectionNeutral, 20
 	}
@@ -212,6 +268,33 @@ func summariseTechnical(input AnalystInput) (findings, risks []string) {
 					findings = append(findings, "MA50 > MA200 (golden cross territory)")
 				} else if v < 0 {
 					risks = append(risks, "MA50 < MA200 (death cross territory)")
+				}
+			case "breakout":
+				if v > 0 {
+					findings = append(findings, "breakout above prior 20-bar high")
+				} else if v < 0 {
+					risks = append(risks, "breakdown below prior 20-bar low")
+				}
+			case "relative_volume":
+				switch {
+				case v >= 1.5:
+					findings = append(findings, fmt.Sprintf("volume %.2fx 20d avg (surge confirms move)", v))
+				case v <= 0.5 && v > 0:
+					risks = append(risks, fmt.Sprintf("volume %.2fx 20d avg (low participation)", v))
+				}
+			case "support_distance_pct":
+				// Within ~1.5% of support and not yet broken
+				// down → mean-revert long territory.
+				if v > 0 && v <= 0.015 {
+					findings = append(findings, fmt.Sprintf(
+						"price within %.2f%% of 20-bar support", v*100))
+				}
+			case "resistance_distance_pct":
+				// Within ~1.5% of resistance from below →
+				// rejection risk.
+				if v > 0 && v <= 0.015 {
+					risks = append(risks, fmt.Sprintf(
+						"price within %.2f%% of 20-bar resistance", v*100))
 				}
 			}
 		}
