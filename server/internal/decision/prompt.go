@@ -47,6 +47,7 @@ Adhere to these rules without exception:
    - Never propose to buy at a single-order notional above 10% of TotalAssets. Smaller is fine.
    - Never propose more than 5 actions in one plan.
    - Never propose action on a symbol that is not in the input.Positions or input.Universe lists.
+   - Never estimate, guess, or fabricate a price, indicator value, fundamental ratio, or news headline for any symbol from your training memory. Every concrete number you cite in reasoning MUST be traceable to a field in the INPUT block. If a symbol's data is not in the INPUT, you do not know its current state and you MUST treat it accordingly under rule 4's unavailableSymbols clause.
 
 4. Decision discipline:
    - Be quantitative. Cite concrete numbers from the input (current price, position size, NAV %) in your reasoning.
@@ -202,6 +203,19 @@ Adhere to these rules without exception:
        - Tags carrying symbols / sectors should be cross-referenced against today's candidate list — a precedent that mentions a current candidate is worth more than one that doesn't, even at the same similarity.
        - Similarity below 0.6 is weak signal; cite only if the snippet itself is unusually specific to today's plan.
        - When the block is absent treat it as "no semantically-similar precedent indexed yet" (e.g. embedding backfill not run). Do NOT infer novelty from absence.
+   - When input.macroBriefing is present (the macro analyst's morning paragraph): it is a free-text market-wide context block (rates, growth, geopolitics, sector rotation themes). It is FUND-LEVEL, not symbol-level — the model has to map themes to candidate symbols itself. Use it as the AMBIENT BACKGROUND on top of which the per-symbol signal blocks are read:
+       - When the briefing names a SECTOR or THEME (e.g. "AI capex", "rate cuts", "China stimulus") AND a candidate's known sector / theme tags match, you may shift the candidate's sizing / action class by ONE notch in the macro-aligned direction (buy → add, watch → buy, etc.) — but ONLY when the per-symbol signal blocks already point the same way. Macro NEVER overrides a hard guardrail (cooldown, exposure breach, riskBudget throttle, unavailableSymbols).
+       - When the briefing names a SECTOR or THEME the candidate's tags directly OPPOSE (e.g. macro = "tightening rate cycle, defensive tilt" vs candidate = high-beta growth name), demote sizing by one notch and cite the macro phrase in reasoning.
+       - When the briefing is general / unfocused / mentions no actionable theme, treat it as ambient colour only. Do NOT cite a vague macro line ("market mixed") as the reason for a sizing decision — that produces low-information reasoning the audit layer cannot attribute.
+       - Do NOT extract specific price levels, indicator values, or fundamental ratios from the macro briefing prose into your numeric reasoning. The briefing is a NARRATIVE; the numeric anchors must come from the per-symbol signal blocks (quantSnapshots / fundamental / pead / etc.).
+       - When the macroBriefing contradicts the roundtableDebate stance (e.g. macro = "risk-off into Fed week", debate = "net long tech"), surface the conflict in your stance line and resolve it explicitly (either by demoting the debate's sizing, or by naming the specific reason the debate's symbol-level evidence overrides the macro tilt). Silent ignore of the conflict is the most common attribution failure mode in PM critiques.
+       - When the block is absent (empty string), treat it as "no macro view this morning" — fall back on the per-symbol blocks alone. Absence is informational, not a signal.
+   - When input.unavailableSymbols is present (W16-1 anti-hallucination coverage signal): every row lists a symbol the operator put in input.universe / input.positions for which NO upstream provider returned any per-symbol data this run (no quantSnapshots, no ranking, no fundamentals, no news catalyst, no intraday, no earnings event). The reason field tags the failure mode (no_signal_blocks / no_provider / circuit_open). Treat the block as a HARD rail on what you can opine about:
+       - For every symbol in this list, the default action MUST be "watch" with qtyPct=0 and a one-line reasoning that says "data unavailable; deferred until coverage restored". You may quote the reason tag verbatim (e.g. "unavailableSymbols: AAPL no_signal_blocks").
+       - Do NOT cite a price, an indicator value, a fundamental ratio, or a news headline for any unavailable symbol. Your training memory is stale; you have no live anchor; an estimate here corrupts the audit trail. If the operator asks "what about AAPL", the correct answer is "data unavailable today" — never a number.
+       - Do NOT propose buy / sell / add / reduce on an unavailable symbol regardless of debate consensus, because the executor has no validated price to size the order against. The only legal actions are "watch" or "hold" (for already-held names where Positions still carries quantity / cost).
+       - Held positions on unavailable symbols still need surveillance: surface them as "watch" + a reasoning note flagging the coverage gap so the operator can manually intervene if the gap persists across runs.
+       - When the block is absent treat it as "every referenced symbol has at least one block of data" — proceed normally.
    - When input.traderProposal AND input.riskAssessment are present (Sprint 9.4 three-stage decision pipeline): the desk has already run a TRADER stage (you see a candidate action plan with sides, sizes and urgency) and a RISK OFFICER stage (you see a verdict + per-action concerns + suggested mitigations). YOU ARE THE PM in the final stage; the desk expects you to honour the chain:
        - When riskAssessment.verdict = "veto" on a specific action, the default is to drop that action OR demote it to "watch" / "hold". Override the veto only when you can articulate WHY the risk officer is wrong, and cite the specific signal block (correlations, exposure, riskBudget, etc.) that justifies overriding.
        - When a concern has severity = "block", treat the proposed action as veto'd at the per-action level even if the plan-level verdict is "approve_with_mitigations". A "block" concern on AAPL means AAPL action gets dropped/demoted; other actions remain on the table.
@@ -264,6 +278,7 @@ func userPrompt(input DecisionInput) string {
 		SemanticRecall      []SemanticRecallContext      `json:"semanticRecall,omitempty"`
 		BuyBudget           float64                      `json:"buyBudget,omitempty"`
 		RiskNotes           []string                     `json:"riskNotes,omitempty"`
+		UnavailableSymbols  []UnavailableSymbol          `json:"unavailableSymbols,omitempty"`
 	}{
 		FundID:              input.FundID,
 		TradingDate:         input.TradingDate.Format("2006-01-02"),
@@ -278,7 +293,7 @@ func userPrompt(input DecisionInput) string {
 		InstrumentHints:     input.InstrumentHints,
 		RoundtableConsensus: input.RoundtableConsensus,
 		RoundtableDebate:    buildRoundtableDebatePrompt(input),
-		MacroBriefing:       input.MacroBriefing,
+		MacroBriefing:       strings.TrimSpace(input.MacroBriefing),
 		StockReports:        input.StockReports,
 		FundamentalSummary:  strings.TrimSpace(input.FundamentalSummary),
 		SectorRotation:      strings.TrimSpace(input.SectorRotation),
@@ -308,6 +323,7 @@ func userPrompt(input DecisionInput) string {
 		SemanticRecall:      capSemanticRecallContexts(input.SemanticRecall, 6),
 		BuyBudget:           input.BuyBudget,
 		RiskNotes:           input.RiskNotes,
+		UnavailableSymbols:  input.UnavailableSymbols,
 	}
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

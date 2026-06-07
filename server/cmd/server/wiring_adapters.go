@@ -15500,6 +15500,33 @@ func (a *runtimePMAgent) buildDecisionInput(ctx context.Context, fund *repositor
 		}
 	}
 
+	// W16-1 — anti-hallucination coverage signal. Inspect the fully
+	// assembled input AFTER all per-symbol builders have run and tag
+	// any symbol the operator referenced for which every block came
+	// back empty. Pure scan, no I/O. The PM prompt enforces a "watch
+	// only / do not estimate" rule for each entry so the LLM cannot
+	// fabricate prices for symbols the upstream pipeline failed to
+	// cover. Empty result means every referenced symbol has at least
+	// one block — the prompt omits the field via omitempty.
+	input.UnavailableSymbols = decision.ComputeUnavailableSymbols(input)
+	if len(input.UnavailableSymbols) > 0 {
+		// Stamp a single human-readable RiskNote so the coverage
+		// gap lands in Plan.Reasoning audit. Cap rendered list at
+		// 10 symbols to keep the note bounded; the prompt JSON
+		// still carries the full slice.
+		const maxRender = 10
+		render := make([]string, 0, maxRender)
+		for i, u := range input.UnavailableSymbols {
+			if i >= maxRender {
+				render = append(render, fmt.Sprintf("+%d more", len(input.UnavailableSymbols)-maxRender))
+				break
+			}
+			render = append(render, u.Symbol)
+		}
+		input.RiskNotes = append(input.RiskNotes,
+			"unavailable_symbols: "+strings.Join(render, ", "))
+	}
+
 	// Sprint C #3 — decision-input fingerprint observability.
 	// Emit a structured slog line on every PM call so the audit
 	// trail can be grepped by signal presence ("which blocks

@@ -573,6 +573,21 @@ type DecisionInput struct {
 	// is unpopulated or pgvector isn't installed — silent degrade.
 	SemanticRecall []SemanticRecallContext
 
+	// W16-1 — anti-hallucination coverage signal. Lists every symbol the
+	// operator put in Universe / Positions for which NO upstream
+	// per-symbol signal block returned data (no quantSnapshots, no
+	// universeRanking, no fundamentals row, no intraday, no news
+	// catalyst, no earnings event, etc.). The PM prompt surfaces this
+	// list with an explicit "do not estimate / do not fabricate"
+	// directive so the LLM does NOT invent prices or indicators from
+	// stale training memory for a symbol it has no live anchor on.
+	//
+	// Populated by the wiring layer via ComputeUnavailableSymbols
+	// AFTER all the per-symbol signal-builders have run. Empty slice
+	// = every referenced symbol has at least one block with data; the
+	// prompt block is omitted entirely.
+	UnavailableSymbols []UnavailableSymbol
+
 	// Operational constraints.
 	BuyBudget float64  // max absolute buy notional this plan can propose; 0 = no cap
 	RiskNotes []string // contextual notes (e.g., "A-share T+1 active") that the engine must respect

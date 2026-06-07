@@ -129,6 +129,13 @@ var citationVocabulary = map[string][]string{
 	"exposure":           {`exposure\s*snapshot`, `concentration`, `sector cap`, `敞口`, `集中度`, `单票\s*上限`, `行业\s*上限`},
 	"correlations":       {`correlations?\b`, `\brho\b`, `high-?corr`, `相关性`, `相关\s*矩阵`, `高相关`},
 	"pairSpreads":        {`pair\s*spreads?`, `spread.?Z`, `pairs trade`, `配对\s*价差`, `价差\s*z`, `配对\s*交易`},
+	// W16-3 — macro briefing vocabulary. The PM previously had a
+	// macroBriefing block in DecisionInput and a present/absent flag
+	// in the trace, but no citation regex — so when the LLM wrote
+	// "rate-cut tailwind raises AAPL conviction" the attribution
+	// layer silently failed to credit the macroBriefing block. Adds
+	// English + Chinese phrases that operators see in real PM output.
+	"macroBriefing": {`macro\s*briefing`, `macro\s*brief\b`, `macro\s*view`, `macro\s*context`, `macro\s*tilt`, `macro\s*headwinds?`, `macro\s*tailwinds?`, `macro\s*regime`, `rate\s*cuts?`, `rate\s*hikes?`, `\bdovish\b`, `\bhawkish\b`, `risk-?off`, `risk-?on`, `宏观`, `宏观\s*简报`, `宏观\s*背景`, `宏观\s*环境`, `宏观\s*情绪`, `加息`, `降息`, `央行`, `美联储`, `避险\s*情绪`, `风险偏好`},
 }
 
 // compiledCitationPatterns is the lazily-built regex per block.

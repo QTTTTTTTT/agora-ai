@@ -141,6 +141,37 @@ func TestBuildContributionsRecognisesVolumeAndSupportVocabulary(t *testing.T) {
 	}
 }
 
+// W16-3 — macroBriefing citation vocabulary. Pre-fix the
+// macroBriefing block had a presence flag in the trace but no
+// regex in citationVocabulary, so PM prose like "rate-cut
+// tailwind" could never be attributed back. These cases exercise
+// the new English + Chinese phrases.
+func TestBuildContributionsRecognisesMacroBriefingVocabulary(t *testing.T) {
+	cases := []struct {
+		name      string
+		reasoning string
+	}{
+		{"english_macro_brief", "Macro brief is risk-off into Fed week — defer the AAPL add."},
+		{"english_rate_cuts", "Rate cuts in the macro briefing reinforce the long-duration tilt."},
+		{"english_dovish", "Dovish macro view supports a tactical add on QQQ."},
+		{"english_risk_on", "Risk-on macro tilt; size the buy at the per-symbol ceiling."},
+		{"english_macro_headwinds", "Macro headwinds (rate hikes) cap the growth-stock conviction."},
+		{"chinese_macro", "宏观简报偏避险，先观察。"},
+		{"chinese_rate_cut", "降息周期下加仓优质成长。"},
+		{"chinese_central_bank", "美联储维持利率，宏观环境偏中性。"},
+		{"chinese_risk_aversion", "避险情绪上升，降低高Beta敞口。"},
+	}
+	tr := Fingerprint(DecisionInput{
+		MacroBriefing: "Fed weights rate cuts; growth basket bid.",
+	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildContributions(tr, tc.reasoning)
+			mustContain(t, got.Cited, "macroBriefing")
+		})
+	}
+}
+
 func TestBuildContributionsEmptyReasoningHasNoCited(t *testing.T) {
 	tr := Fingerprint(DecisionInput{
 		QualityScores: []SymbolQualityScore{{Symbol: "A"}},
