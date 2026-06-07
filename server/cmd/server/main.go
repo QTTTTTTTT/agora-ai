@@ -1081,11 +1081,15 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// advocates fall back to their deterministic skeletons.
 	services.DebateProvider = newDefaultDebateProvider(services)
 
-	// S8.4 — install the agent reputation backfill loop. The
-	// realised-return function defaults to a no-op (every fund
-	// produces zero outcomes until a real price source is
-	// wired) so the loop can run safely on every deployment;
-	// the reputation tables stay queryable in the read API.
+	// S8.4 — install the agent reputation backfill loop.
+	//
+	// W16-2 audit: the realised-return source is now wired to the
+	// shared OHLC fetcher (same chain the rest of the runtime uses
+	// for indicators / regime / ranking) and falls back to the no-op
+	// only when the fetcher is unbuildable (OHLC_DISABLED=1 or no
+	// providers configured). Pre-fix, every fund silently produced
+	// zero outcomes which left the alpha-aware-memory pipeline
+	// (AgentTrackRecord prompt block) permanently empty.
 	if services.AgentReputationRepo != nil && db != nil {
 		repFundRepo := repository.NewFundRepo(db)
 		fundLister := func(ctx context.Context) ([]string, error) {
@@ -1099,11 +1103,23 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 			}
 			return ids, nil
 		}
+		var returnsFn = nullRealisedReturn
+		if reputationOHLC := buildOHLCFetcherFromEnv(); reputationOHLC != nil {
+			lookup := func(ctx context.Context, fundID string) (string, string, bool) {
+				fund, err := repFundRepo.GetByID(ctx, fundID)
+				if err != nil || fund == nil {
+					return "", "", false
+				}
+				profile := decodeFundMarketProfile(fund.Config)
+				return profile.Market, profile.BenchmarkSymbol, true
+			}
+			returnsFn = realisedReturnFromOHLC(reputationOHLC, lookup)
+		}
 		services.AgentReputationLoop = newAgentReputationLoop(
 			services.AgentReputationRepo,
 			newAnalystPanelSource(services.AnalystReportRepo),
 			newDebateTranscriptSource(services.DebateRepo),
-			nullRealisedReturn,
+			returnsFn,
 			agentReputationLoopOptions{
 				FundLister:    fundLister,
 				LessonWriter:  services.AlphaLessonRepo,

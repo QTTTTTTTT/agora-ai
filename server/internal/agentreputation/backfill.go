@@ -30,6 +30,42 @@ import (
 // data yet", and the outcome row is skipped.
 type RealisedReturnFn func(ctx context.Context, fundID, symbol string, asof time.Time, horizonDays int) (realised, benchmark float64, ok bool, err error)
 
+// AlphaForDirection converts (realisedReturn, benchmarkReturn,
+// direction) into the agent's "skill alpha" — the excess return
+// the fund would have earned by acting on the agent's call versus
+// the benchmark hold.
+//
+//   - bullish: long the symbol vs long the benchmark.
+//     alpha = realised - benchmark.
+//   - bearish: short the symbol vs long the benchmark. A 5%
+//     drop in the symbol with a flat benchmark is +5% credit
+//     to the bearish caller, so alpha = -realised - benchmark
+//     (equivalently, benchmarkLong + symbolShort excess return).
+//   - neutral: the agent declined to commit; no position would
+//     have been opened, so alpha is zero. The hits/misses
+//     aggregation already excludes neutrals from both buckets;
+//     this keeps avg_alpha consistent with that semantic.
+//
+// W16-2 audit: previously the backfill emitted alpha = realised -
+// benchmark for every direction including bearish, which made a
+// correct bearish call (e.g. symbol -5%, benchmark 0%) emit
+// alpha = -5%. The leaderboard ORDER BY avg_alpha DESC then
+// ranked accurate bearish researchers at the BOTTOM and the
+// alpha-tagged lesson formatter ("lesson: positive alpha →
+// keep weight on this agent's calls") never fired for them. The
+// direction-aware mapping below restores the intended skill
+// reading without changing realised_return / benchmark_return on
+// the row (those stay as raw observed numbers for the audit log).
+func AlphaForDirection(direction Direction, realised, benchmark float64) float64 {
+	switch direction {
+	case DirBullish:
+		return realised - benchmark
+	case DirBearish:
+		return -realised - benchmark
+	}
+	return 0
+}
+
 // PanelSource feeds the backfill with persisted panel reports.
 type PanelSource interface {
 	ListPanelsForBackfill(ctx context.Context, fundID string, since time.Time, limit int) ([]PanelRow, error)
@@ -171,12 +207,14 @@ func (b *Backfill) Run(ctx context.Context, fundID string, cfg BackfillConfig) (
 					if !ok {
 						continue
 					}
+					dir := Direction(r.Direction)
 					outs = append(outs, Outcome{
 						FundID: fundID, AgentID: r.AgentID, AgentName: r.AgentName,
 						AgentKind: KindAnalyst, Category: r.Category,
 						Symbol: p.Symbol, AsOf: p.AsOf,
-						Direction: Direction(r.Direction), Confidence: r.Confidence,
-						RealisedReturn: realised, BenchmarkReturn: bench, Alpha: realised - bench,
+						Direction: dir, Confidence: r.Confidence,
+						RealisedReturn: realised, BenchmarkReturn: bench,
+						Alpha:       AlphaForDirection(dir, realised, bench),
 						HorizonDays: h,
 						SourcePanelID: sql.NullString{String: p.ID, Valid: p.ID != ""},
 					})
@@ -201,12 +239,14 @@ func (b *Backfill) Run(ctx context.Context, fundID string, cfg BackfillConfig) (
 					if !ok {
 						continue
 					}
+					dir := Direction(a.Direction)
 					outs = append(outs, Outcome{
 						FundID: fundID, AgentID: a.AgentID, AgentName: a.AgentName,
 						AgentKind: KindAdvocate, Category: cat,
 						Symbol: d.Symbol, AsOf: d.AsOf,
-						Direction: Direction(a.Direction), Confidence: a.Confidence,
-						RealisedReturn: realised, BenchmarkReturn: bench, Alpha: realised - bench,
+						Direction: dir, Confidence: a.Confidence,
+						RealisedReturn: realised, BenchmarkReturn: bench,
+						Alpha:       AlphaForDirection(dir, realised, bench),
 						HorizonDays: h,
 						SourceDebateID: sql.NullString{String: d.ID, Valid: d.ID != ""},
 						Note:           fmt.Sprintf("round=%d", a.Round),

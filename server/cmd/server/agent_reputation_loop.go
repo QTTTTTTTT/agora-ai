@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/fundai/server/internal/agentreputation"
+	"github.com/fundai/server/internal/ohlc"
 )
 
 // agentReputationLoopOptions configures the scheduler.
@@ -208,6 +209,137 @@ func (l *agentReputationLoop) nextWaitWithJitter() time.Duration {
 // a real price source is wired.
 func nullRealisedReturn(_ context.Context, _, _ string, _ time.Time, _ int) (float64, float64, bool, error) {
 	return 0, 0, false, nil
+}
+
+// fundProfileLookupFn is the minimal contract
+// realisedReturnFromOHLC needs to know (a) which OHLC market a
+// symbol belongs to and (b) the fund's benchmark symbol.
+// Production wires it to the FundRepo + decodeFundMarketProfile
+// pair; tests inject a static map. ok=false when the fund is not
+// found or has no benchmark configured — both cases skip the row.
+type fundProfileLookupFn func(ctx context.Context, fundID string) (market, benchmarkSymbol string, ok bool)
+
+// realisedReturnFromOHLC builds an agentreputation.RealisedReturnFn
+// closing over the shared OHLC fetcher and a thin fund-profile
+// lookup.
+//
+// W16-2 audit: the production wiring previously plugged
+// nullRealisedReturn here, which silently disabled the entire
+// alpha-aware-memory pipeline (every backfill produced zero
+// outcomes; the agent_reputation_stats table stayed empty;
+// AgentTrackRecord in the PM prompt was always empty). This
+// constructor wires the existing daily-bar OHLC fetcher and
+// the fund repo so the reputation loop actually computes
+// realised returns going forward.
+//
+// Per-call work:
+//
+//  1. Look up the fund's market profile (market + benchmark
+//     symbol) via the injected lookup.
+//  2. Fetch enough daily bars on BOTH symbol and benchmark to
+//     bracket [asof, asof + horizonDays]. We pull lookback +
+//     horizon + a small buffer so weekend / holiday gaps don't
+//     starve the entry/exit search.
+//  3. Resolve entry close = the most recent close ≤ asof on the
+//     symbol's bars; exit close = the most recent close ≤ (asof
+//     + horizonDays). Same alignment for the benchmark, so
+//     realised and benchmark returns are computed against an
+//     internally consistent pair of trading days even when the
+//     symbol and benchmark trade on different calendars.
+//  4. Return decimal returns ((exit - entry) / entry); ok=false
+//     when any bar is missing or the entry close is non-positive
+//     (a corp-action artifact — skip rather than synthesise a
+//     500% number).
+//
+// All errors degrade to ok=false, never propagated. Agent
+// reputation is a soft learning loop — a transient OHLC outage
+// must not block the wave, and the next pass will retry the
+// same (symbol, asof, horizon) row idempotently.
+func realisedReturnFromOHLC(fetcher ohlc.Fetcher, lookup fundProfileLookupFn) agentreputation.RealisedReturnFn {
+	return func(ctx context.Context, fundID, symbol string, asof time.Time, horizonDays int) (float64, float64, bool, error) {
+		if fetcher == nil || lookup == nil {
+			return 0, 0, false, nil
+		}
+		symbol = strings.TrimSpace(symbol)
+		fundID = strings.TrimSpace(fundID)
+		if symbol == "" || fundID == "" || horizonDays <= 0 {
+			return 0, 0, false, nil
+		}
+		market, benchmark, ok := lookup(ctx, fundID)
+		if !ok {
+			return 0, 0, false, nil
+		}
+		market = strings.ToLower(strings.TrimSpace(market))
+		benchmark = strings.TrimSpace(benchmark)
+		if benchmark == "" {
+			return 0, 0, false, nil
+		}
+		// Pull enough bars to comfortably bracket the horizon.
+		// 30-day buffer absorbs Chinese New Year / Easter /
+		// Thanksgiving gaps without falsely failing.
+		lookback := horizonDays + 30
+		endTime := asof.AddDate(0, 0, horizonDays+5)
+		symBars, err := fetcher.Fetch(ctx, ohlc.FetchRequest{
+			Symbol:    symbol,
+			Market:    market,
+			Interval:  ohlc.IntervalDay,
+			LookbackN: lookback,
+			EndTime:   endTime,
+		})
+		if err != nil || len(symBars) == 0 {
+			return 0, 0, false, nil
+		}
+		benchBars, err := fetcher.Fetch(ctx, ohlc.FetchRequest{
+			Symbol:    benchmark,
+			Market:    market,
+			Interval:  ohlc.IntervalDay,
+			LookbackN: lookback,
+			EndTime:   endTime,
+		})
+		if err != nil || len(benchBars) == 0 {
+			return 0, 0, false, nil
+		}
+		exitTarget := asof.AddDate(0, 0, horizonDays)
+		symEntry, ok1 := closeAtOrBefore(symBars, asof)
+		symExit, ok2 := closeAtOrBefore(symBars, exitTarget)
+		benchEntry, ok3 := closeAtOrBefore(benchBars, asof)
+		benchExit, ok4 := closeAtOrBefore(benchBars, exitTarget)
+		if !ok1 || !ok2 || !ok3 || !ok4 {
+			return 0, 0, false, nil
+		}
+		if symEntry <= 0 || benchEntry <= 0 {
+			return 0, 0, false, nil
+		}
+		// Skip rows where entry == exit (no horizon elapsed yet —
+		// the symbol's bars haven't caught up). Equivalent to
+		// "the window has not closed" rather than "alpha is
+		// exactly zero".
+		if symExit == symEntry && benchExit == benchEntry {
+			return 0, 0, false, nil
+		}
+		realised := (symExit - symEntry) / symEntry
+		bench := (benchExit - benchEntry) / benchEntry
+		return realised, bench, true, nil
+	}
+}
+
+// closeAtOrBefore returns the close of the most recent bar whose
+// Time is ≤ target. ok=false when no bar predates target (target
+// is before every bar in the series — typically a brand-new
+// listing or a missing-history gap upstream).
+func closeAtOrBefore(bars []ohlc.Bar, target time.Time) (float64, bool) {
+	if len(bars) == 0 {
+		return 0, false
+	}
+	// Bars are in chronological ascending order per the OHLC
+	// Fetcher contract; iterate backwards for fast typical-case
+	// match (target is usually near the end).
+	for i := len(bars) - 1; i >= 0; i-- {
+		if !bars[i].Time.After(target) {
+			return bars[i].Close, true
+		}
+	}
+	return 0, false
 }
 
 // helper for log lines — keeps the loop testable by avoiding
