@@ -2,38 +2,113 @@
 
 **简体中文** · [English](./README.en.md)
 
-> 一个基金公司/基金管理原型仓库。当前已真正接线的后端能力以 subscription、model config、usage/billing、company/fund 最小 CRUD，以及 plan 最小审批流为主；团队、交易、workflow、记忆、A/B 测试等链路仍存在占位与渐进式接线状态，需要按生产化要求继续补齐韧性、观测与测试。
+> 仓库当前同时承载两条产品线 ——
+>
+> 1. **Master Team Research（默认开启）**：合规第一的 LLM 投研产品。每日 picks、个股深度顾问、Most Active 榜单、技术面快照、Stage-4 公开 paper-trading track-record，全部按 SEC Publisher's Exclusion 框架做"客观市场观察"披露，可对未登录访客开放。
+> 2. **AI Agent Team Trading（可选开启，默认隐藏）**：完整的 AI 基金管理沙盒——多 agent 圆桌、workflow checkpoint、A/B 实验、记忆/反思闭环、模拟交易、组合归因。需要 super-admin 把 `agent_team_mode` feature flag 翻开后才会暴露给普通用户。
+>
+> Master Team 是面向真实用户的"产品出货线"；Agent Team 是平台内部的"研究+演示线"。两条线共用同一份后端基础设施（订阅 / LLM router / 行情 / 合规 / 审计），但前端入口与默认导航完全分流。
 
 ## 当前实现概览
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     Web / Miniapp                       │
-│  React SPA routes │ WeChat miniapp mock pages          │
-├─────────────────────────────────────────────────────────┤
-│                    Go REST API                          │
-│  Health/Version │ Subscription │ Models │ Usage         │
-│  Company/Fund CRUD │ SPA Fallback │ CORS                │
-├─────────────────────────────────────────────────────────┤
-│               PostgreSQL 16 + migrations                │
-├─────────────────────────────────────────────────────────┤
-│         Optional MCP containers via docker compose      │
-│  china-stock / akshare always on; others via profile    │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                      Web (React SPA) / Miniapp                 │
+│  /masters Hub        ← 默认登录后落地（Master Team Research）  │
+│  /daily-picks /advisor /papertrading /trending …               │
+│  /companies /funds/* ← 仅 agent_team_mode=TRUE 时对普通用户可见│
+├────────────────────────────────────────────────────────────────┤
+│                       Go REST API                              │
+│  ┌─ Master Team 产品面 ───────────────────────────────────┐    │
+│  │  /api/advisor /api/daily-picks /api/trending           │    │
+│  │  /api/papertrading/public/track-record (anonymous OK)  │    │
+│  └────────────────────────────────────────────────────────┘    │
+│  ┌─ Agent Team / Fund 产品面（agent_team_mode 控制）────────┐  │
+│  │  /api/companies /api/funds/:id/{team,trades,memory,…}  │    │
+│  │  /api/abtests /api/marketplace …                        │    │
+│  └────────────────────────────────────────────────────────┘    │
+│  ┌─ 平台横切 ────────────────────────────────────────────┐    │
+│  │  Auth/JWT 轮换 │ Subscription/BYOK │ Models / Usage     │    │
+│  │  Compliance scanner + geo │ Audit chain │ Outbox flusher│    │
+│  │  LLM 9-layer router + Resolver tracing │ Feature flags │    │
+│  └────────────────────────────────────────────────────────┘    │
+├────────────────────────────────────────────────────────────────┤
+│              PostgreSQL 16 + numbered migrations               │
+│  001 … 112_outbox_events                                       │
+├────────────────────────────────────────────────────────────────┤
+│         Optional MCP containers via docker compose             │
+│  china-stock / akshare always on; others via --profile         │
+└────────────────────────────────────────────────────────────────┘
 ```
+
+## 产品双线与默认行为
+
+| 维度 | Master Team Research（默认开启） | AI Agent Team Trading（默认关闭） |
+|------|----------------------------------|-----------------------------------|
+| **入口** | `/masters` Hub（登录后默认跳转） | `/companies` + `/funds/:fundId/*` |
+| **目标用户** | 散户 / 研究者 / 没买进阶套餐的访客 | super-admin + 内部演示 |
+| **合规姿态** | SEC Publisher's Exclusion + Marketing Rule 客观市场观察框架，可匿名访问 `/api/papertrading/public/track-record` | 内部沙盒，不对外宣传"建议" |
+| **gating** | `RouteGate` 仅做未登录跳转；任意已登录用户可见 | `AgentTeamGate` + `agent_team_mode` feature flag（默认 FALSE） |
+| **数据策略** | 免费层 14 天滞后，付费层实时；披露明确 | 不分层，super-admin 全量 |
+| **可关闭性** | 不可关 — 是默认产品 | super-admin 在 `/admin` 翻开 flag 才显示 |
+
+> **想隐藏 fund-team 子页面又不想关掉整个 Agent Team Trading？** 还有第二个 flag `fund_team`（默认 FALSE）只控制每只基金详情页里的"团队管理"二级入口；翻开 `agent_team_mode` 但保持 `fund_team` 关闭 = 露出 `/funds/:fundId` 主页但不露团队管理子页。
 
 ## 当前真实能力
 
 | 模块 | 当前状态 |
 |------|-----------|
-| **订阅套餐** | 已接线，可查询套餐、订阅、取消订阅、查询当前订阅状态 |
-| **模型配置** | 已接线，可列出平台模型、保存/删除用户模型配置、测试连接 |
-| **用量与账单** | 已接线，可查询今日用量、月度汇总、历史明细、账单与费用预估 |
-| **基金公司 / 基金** | 已接线，支持 company 与 fund 的最小 CRUD |
-| **计划审批** | 已接线最小能力，可读取计划列表/详情，并执行 approve / reject 基本流转 |
-| **前端 React** | 已有页面框架与路由，包含 companies、fund dashboard、team、decisions、compare、memory、trades、settings、subscription、models、usage |
-| **微信小程序** | 已有页面壳与 mock 数据结构，但 README 不将其视为完整业务端 |
-| **基金 team / trade / workflow / memory / abtest** | 路由部分存在，但仍包含占位实现、渐进接线或 demo 级行为，不能直接视为生产完整能力 |
+| **Master Team Hub** | 已上线，默认登录后落地 `/masters`，含策略 preset 切换器 + 多个 hero card |
+| **每日 Picks（含技术面快照）** | 已上线，date-grouped 折叠 UI；每条 pick 在 `result_json` 内附 `MasterTechnicalBlock`（RSI/MACD/MA 对齐/支撑阻力/多窗口收益率/成交量同比） |
+| **个股深度顾问 `/advisor`** | 已上线，多大师 panel 圆桌；prompt Rule 9 强制 TA 数据"只引不预测"；BYOK + 每月配额 |
+| **Most Active 榜单** | 已上线，`GET /api/trending/most-active`；以已有 daily picks watchlist 为 universe，OHLC 数据复用，15min 进程级 cache |
+| **公开 Track Record（新）** | 已上线，`GET /api/papertrading/public/track-record[/{id}]` 匿名可访问，附方法学披露 + SEC 引用 + 7 项性能指标 |
+| **订阅 / BYOK / 用量** | 已接线，订阅状态、用户 BYOK 密钥（AES-GCM 加密）、今日/月度/历史用量 / 账单预估 |
+| **LLM Router（9 层 + 追踪，新）** | 已上线，`GET /api/admin/llm-resolve` super-admin dry-run；Prometheus `llm_resolution_source_total{layer}` 计数器 |
+| **Outbox 事务发件箱（新）** | 已上线，`outbox_events` 表 + 后台 flusher（默认 LoggingHandler，每 10s 拉一批）；lineage 边写入已落入同一事务 |
+| **合规扫描器** | 已上线，覆盖 TA 红线、价格预测、止损止盈、目标价等中英 ~15 条规则；中文 / 英文双语 |
+| **地理合规** | 已上线，OFAC + EU 屏蔽 IP / BIN 校验，硬阻返回 451 |
+| **Feature Flags / 公告** | 已上线，admin 面板可控；`agent_team_mode` / `fund_team` / `advisor_byok` / `advisor_mode` 等 |
+| **审计哈希链** | 已上线，access + mutation 双链路 tx-safe；super-admin `/audit/chain` 可验证 |
+| **基金公司 / 基金 CRUD** | 已接线，但仅 `agent_team_mode=TRUE` 时对普通用户暴露 |
+| **基金 team / trade / workflow / memory / abtest** | 已接线、可演示；产品上默认隐藏，super-admin 通过 flag 开启 |
+| **微信小程序** | 页面壳与 mock 数据结构存在；当前不视为完整业务端 |
+
+## 本次三个基础设施升级（migrations 111 / 112 + LLM Resolver Trace）
+
+### 1) 公开 Paper-Trading Track Record（SEC Publisher's Exclusion）
+
+**问题域**：要让营销页面合规地展示历史业绩，必须满足 §202(a)(11)(D) 的"非个性化、对所有访客一致"硬约束，否则就会被认定为投顾。
+
+**实现要点**：
+- **Migration 111** — `paper_portfolios` 新增三列：`public_track_record BOOLEAN`（opt-in）、`methodology TEXT`（强制披露）、`inception_date DATE`。空 `methodology` 的行会被列表端点过滤掉，即"披露不完整 == 对外不可见"。
+- **API**：
+  - `GET /api/papertrading/public/track-record` — 列出所有公开的策略卡片
+  - `GET /api/papertrading/public/track-record/{portfolioId}` — 详情（NAV 曲线 + 7 项 metrics + methodology + 4 段固定 disclosure + SEC 规则引用）
+- **匿名访问**：两个端点都被加进 `isPublicRoute` 白名单，不带任何身份信息也能拉到完全相同的 JSON——这是 Publisher's Exclusion 的核心硬约束。
+- **指标计算**：纯函数 `computePerformanceMetrics(initialCapital, navRows)` 在 `internal/papertrading/public_track_record.go`，输出 `cumulativeReturn / annualizedReturn (252d 复利) / maxDrawdown / volatility / sharpe / bestDay / worstDay / positiveDayRatio`。
+- **错误等同化**：未知 ID 与"存在但未公开"都返回 404 + 完全相同的 body，防止通过公开面探测内部 portfolio 空间。
+
+### 2) LLM Resolver Trace + Admin Dry-Run + Prometheus 计数器
+
+**问题域**：模型路由器有 **9 层优先级**（explicit_model → A/B hook → user BYOK hook → fund override → agent default → user-tier override → user custom endpoint → platform default → fallback_standard）。线上来工单"为什么 agent X 选了模型 Y"时，过去只能靠日志和源码反推。
+
+**实现要点**：
+- `internal/llm/resolve_trace.go` 引入 `Layer` 枚举 + `ResolutionStep{Layer, Hit, Detail}` 类型。
+- `ModelRouter.ResolveModelWithTrace(ctx, req)` 返回 `(*ModelConfig, []ResolutionStep, error)`；hot path 上的 `ResolveModel` 内部委托给新加的 `resolveModelInternal(ctx, req, trace *traceRecorder)`，未开启 trace 时是零开销 no-op。
+- **Admin dry-run**：`GET /api/admin/llm-resolve?user_id=&agent_id=&step=&model=&tier=&fund_id=` 让 super-admin 模拟一次解析、查看每层走 / 没走的理由，不消耗任何 token 也不落 DB 行。API key 在响应里只保留 `xxxx...yyyy` 形式的 hint。
+- **Prometheus 计数器**：`llm_resolution_source_total{layer="..."}` lazily 注册，9 个 label series 上限。已挂到 `GET /api/metrics`（`llm.ExportResolverPrometheus()` 写到 metrics 响应尾部）。
+
+### 3) Transactional Outbox（fan-out 防丢消息）
+
+**问题域**：audit / lineage / attribution 现有 `*Tx` 变体能保证"业务事务回滚则审计也回滚"。但一旦要把这些事件 fan-out 到外部系统（Kafka / S3 公开 provenance feed / 风控数据湖），传统 dual-write 又会出现"业务提交了但外部投递失败"的丢消息窗口。
+
+**实现要点**：
+- **Migration 112** — `outbox_events(id, event_type, aggregate_type, aggregate_id, payload jsonb, created_at, consumed_at, attempts, last_error)` + 两个 partial index（`consumed_at IS NULL` 工作集与按 aggregate 复盘）。
+- **Producer**：`outbox.Enqueue(ctx, tx, Event{...})` 用调用方提供的 `*sql.Tx` 写入 outbox 行——业务事务一旦回滚，事件行也跟着没了，零丢失零重复。
+- **Flusher**：`outbox.NewFlusher(db, handler, opts).Run(ctx)` 在 main.go 启动时拉起一个 goroutine。每个 tick `SELECT … FOR UPDATE SKIP LOCKED LIMIT n`，多副本部署天然安全；handler 返回 `nil` → 成功打 `consumed_at`，返回 `outbox.ErrDead` → 死信落地，其它错误 → 自增 `attempts` 等下次重试。
+- **演示集成**：`LineageRepo.AddEdgeWithTx` 在写入 `agent_lineage` 边的**同一事务**里 enqueue `lineage.edge.added` 事件。v1 处理器是 `outbox.LoggingHandler`（仅写 slog），方便未来一行代码切换到 `MultiHandler(Logging, Kafka, S3)`。
+- **现有 audit chain 不动**：审计哈希链已经是 tx-safe 的，没有重写需求；outbox 是新增的 fan-out 通道而不是替代品。
 
 ## 技术栈
 
@@ -226,41 +301,74 @@ go run ./server/cmd/server
 ai-fund-platform-v3-full/
 ├── Dockerfile                    # 多阶段构建（web + server）
 ├── docker-compose.yml            # app / postgres / MCP 编排
-├── .env.example                  # 环境变量模板
+├── .env.example                  # 环境变量模板（15 分区，单一可信清单）
 ├── scripts/
 │   ├── init-db.sql               # 初始化 SQL（仓库现有文件）
-│   ├── start.sh                  # 一键启动脚本
+│   ├── start.sh                  # 一键启动脚本（本地开发/验收）
 │   └── stop.sh                   # 停止 compose 服务
 ├── server/                       # Go 后端
-│   ├── cmd/server/main.go        # 入口、健康检查、版本、SPA fallback
-│   ├── cmd/server/wiring_adapters.go
+│   ├── cmd/server/               # 入口 + HTTP 装配
+│   │   ├── main.go               # 启动、健康检查、SPA fallback、metrics 聚合
+│   │   ├── router.go             # 所有 /api/* 路由的集中注册点
+│   │   ├── admin_handler.go      # super-admin 面板（含 llm-resolve dry-run）
+│   │   ├── admin_llm_resolve.go  # ← 新：LLM 9 层路由 dry-run
+│   │   ├── paper_trading_public_handler.go  # ← 新：公开 track-record API
+│   │   ├── trending_handler.go   # Most Active 榜单
+│   │   ├── daily_picks_*.go      # 每日 picks（cron + handler）
+│   │   ├── advisor_handler.go    # /advisor 多大师 panel
+│   │   ├── feature_flags.go      # 公共 feature-flag 读端
+│   │   ├── announcements.go      # 公共公告读端
+│   │   └── wiring_*.go           # 各业务领域装配
 │   ├── migrations/
-│   │   ├── 001_init.sql
-│   │   └── 002_subscription_and_models.sql
+│   │   ├── 001_init.sql … 110_feature_flag_agent_team_mode.sql
+│   │   ├── 111_paper_portfolios_public_track.sql  # ← 新
+│   │   └── 112_outbox_events.sql                  # ← 新
 │   └── internal/
-│       ├── api/
-│       │   ├── fund_handler.go           # company/fund 及占位路由
-│       │   └── subscription_handler.go   # subscription/models/usage API
-│       ├── repository/
-│       ├── subscription/
-│       ├── llm/
-│       ├── workflow/
-│       ├── agent/
-│       └── abtest/
+│       ├── api/                  # HTTP 适配层（fund_handler / subscription_handler / …）
+│       ├── advisor/              # 个股顾问 + TechnicalLoader 注入
+│       ├── agent/                # 多 agent 圆桌 + MasterTechnicalBlock
+│       ├── audit/                # 哈希链 tx-safe 写入
+│       ├── compliance/           # 文本扫描器 + geo（OFAC/EU）
+│       ├── dailypicks/           # 每日推荐主逻辑
+│       ├── indicator/            # RSI / MACD / KDJ / BBands / SR / volume
+│       ├── lineage/              # agent 衍生关系图
+│       ├── llm/                  # 9 层 router + cache + failover
+│       │   └── resolve_trace.go  # ← 新：ResolutionStep + Prometheus counter
+│       ├── metrics/              # 进程内 Prometheus 容器
+│       ├── modelab/              # A/B 实验框架
+│       ├── ohlc/                 # OHLC 拉取（多 provider）
+│       ├── outbox/               # ← 新：transactional outbox 原语 + flusher
+│       ├── papertrading/         # Stage-4 模拟交易
+│       │   └── public_track_record.go  # ← 新：公开披露 + metrics
+│       ├── repository/           # 全部 SQL 读写
+│       ├── subscription/         # 套餐 + BYOK 加密
+│       └── workflow/             # 多步工作流编排
 ├── web/                          # React 前端
 │   ├── package.json
 │   └── src/
-│       ├── App.tsx               # companies 与 funds/* 路由
+│       ├── App.tsx               # /masters + /companies + /funds/* 路由
 │       ├── components/
-│       └── pages/
-│           ├── Dashboard.tsx
-│           ├── TeamManagement.tsx
-│           ├── DecisionCenter.tsx
-│           ├── ABTestCompare.tsx
-│           ├── MemoryCenter.tsx
-│           ├── Subscription.tsx
-│           ├── ModelConfig.tsx
-│           └── Usage.tsx
+│       │   ├── AgentTeamGate.tsx      # ← 新：agent_team_mode 守门
+│       │   ├── TechnicalSnapshotCard.tsx
+│       │   ├── AdminFeatureFlagsSection.tsx
+│       │   ├── AdminAnnouncementsSection.tsx
+│       │   ├── AdminUserRolesSection.tsx
+│       │   └── AnnouncementCenter.tsx
+│       ├── lib/
+│       │   ├── api.ts             # 全部 fetch 封装 + 类型
+│       │   ├── featureFlags.tsx   # useFeatureFlag(key)
+│       │   └── preferences.tsx    # i18n / 货币偏好
+│       ├── pages/
+│       │   ├── MastersHub.tsx     # ← 新：登录后默认落地
+│       │   ├── DailyPicks.tsx     # ?preset=KEY URL 同步
+│       │   ├── Advisor.tsx
+│       │   ├── TrendingMostActive.tsx
+│       │   ├── Companies.tsx      # admin 多一个 "Back to Master Team" 链接
+│       │   ├── TeamManagement.tsx # 被 fund_team flag 二级 gating
+│       │   ├── Dashboard.tsx / DecisionCenter.tsx / ABTestCompare.tsx
+│       │   ├── MemoryCenter.tsx / Subscription.tsx / ModelConfig.tsx
+│       │   └── Login.tsx / Welcome.tsx / KYC.tsx / Admin.tsx
+│       └── theme/                # ← 新：theme 变量集中
 └── miniapp/                      # 微信小程序工程骨架
 ```
 
@@ -349,6 +457,33 @@ ai-fund-platform-v3-full/
 | POST | `/api/plans/{planId}/approve` | 审批通过计划 |
 | POST | `/api/plans/{planId}/reject` | 驳回计划 |
 
+#### Master Team 产品面（默认开放）
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/daily-picks` | 已登录（按订阅层级分发） | 多 preset 每日推荐，含 `MasterTechnicalBlock` |
+| GET | `/api/daily-picks/{date}/{symbol}` | 已登录 | 单条 pick 详情 |
+| POST | `/api/daily-picks/_admin/run-once` | super-admin | 手动触发当日跑批 |
+| GET | `/api/trending/most-active` | 已登录 | "成交量榜单"客观市场观察 |
+| POST | `/api/advisor/consult` | 已登录 + 配额 | 多大师 panel 个股顾问 |
+| GET | `/api/papertrading/public/track-record` | **匿名** | 公开 paper-trading 策略列表（SEC Publisher's Exclusion） |
+| GET | `/api/papertrading/public/track-record/{portfolioId}` | **匿名** | 单策略详情（NAV 曲线 + 7 项指标 + methodology + 4 段固定 disclosure） |
+| GET | `/api/compliance/disclosure` | **匿名** | 平台合规披露文本，给 ComplianceAckModal 渲染 |
+
+#### 平台 Admin 面（super-admin）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/admin/llm-resolve?user_id=&agent_id=&step=&model=&tier=&fund_id=` | 9 层 LLM 路由 dry-run，无 token 消耗；返回 `{request, resolved, trace[]}` |
+| GET | `/api/admin/feature-flags` | 列出全部 feature flags |
+| PUT | `/api/admin/feature-flags/{key}` | 翻动单个 flag（影响 `agent_team_mode` / `fund_team` / `advisor_byok` 等） |
+| GET | `/api/admin/announcements` | 列出公告 |
+| POST | `/api/admin/announcements` | 发布新公告 |
+| GET | `/api/admin/marketdata/health` | 行情数据源熔断 / 累计成败 |
+| GET | `/api/admin/workflow/scheduler` | 工作流调度器 snapshot |
+| POST | `/api/admin/workflow/scheduler/trigger/{fundId}` | 立即触发某只基金的日工作流 |
+| GET | `/api/admin/audit/chain/verify` | 验证审计哈希链完整性 |
+
 ### 2) 路由已保留，但当前仍不应按生产能力验收
 
 以下路径在 `fund_handler.go` 中定义，但目前仍处于占位、部分接线或未完成生产化 hardening 状态；其中一部分会直接返回 `501 not implemented`，另一部分虽然已有前端页面或最小数据链路，但仍不能视为已完整可用能力：
@@ -383,22 +518,39 @@ ai-fund-platform-v3-full/
 
 ### React SPA
 
-后端会把非 API 路径 fallback 到 `web/dist/index.html`，因此生产态由 Go 服务统一托管前端页面。当前 `web/src/App.tsx` 中可见的主要路由为：
+后端会把非 API 路径 fallback 到 `web/dist/index.html`，因此生产态由 Go 服务统一托管前端页面。当前 `web/src/App.tsx` 中可见的主要路由分两条带：
+
+**Master Team 产品面（默认开放，所有已登录用户可见）：**
 
 | Path | Description |
 |------|-------------|
-| `/` | 重定向到 `/companies` |
-| `/companies` | 公司列表页 |
-| `/funds/:fundId` | 基金仪表盘首页 |
-| `/funds/:fundId/team` | 团队页（前端页面存在，后端未完整接线） |
-| `/funds/:fundId/decisions` | 决策页 |
-| `/funds/:fundId/compare` | A/B 对比页 |
-| `/funds/:fundId/memory` | 记忆页 |
-| `/funds/:fundId/trades` | 交易页 |
-| `/funds/:fundId/settings` | 基金设置页 |
-| `/funds/:fundId/subscription` | 订阅页 |
-| `/funds/:fundId/models` | 模型配置页 |
-| `/funds/:fundId/usage` | 用量页 |
+| `/` 与 `/*`（fallback） | 全部重定向到 `/masters` |
+| `/masters` | Master Team Hub — 默认登录后落地；含策略 preset 切换器 + hero card 网格 |
+| `/daily-picks` | 每日推荐列表，支持 `?preset=KEY` URL 同步、date-grouped 折叠 |
+| `/advisor` | 多大师 panel 个股顾问 |
+| `/trending` / `/trending/most-active` | "成交量榜单"客观市场观察 |
+| `/papertrading` | Stage-4 paper-trading 仪表盘 |
+| `/login` / `/welcome` / `/kyc` / `/verify-email` / `/account` | 鉴权 / KYC / 账户安全 |
+
+**AI Agent Team 产品面（被 `AgentTeamGate` + `agent_team_mode` flag 守门）：**
+
+> 普通用户翻不开就跳 `/masters`；super-admin 始终可见。
+
+| Path | Description | Flag 备注 |
+|------|-------------|-----------|
+| `/companies` | 公司列表页（admin 顶部多一个"Back to Master Team"链接） | `agent_team_mode` |
+| `/funds/:fundId` | 基金仪表盘首页 | `agent_team_mode` |
+| `/funds/:fundId/team` | 团队管理（被 `fund_team` flag 二级 gating） | `agent_team_mode` + `fund_team` |
+| `/funds/:fundId/decisions` | 决策页 | `agent_team_mode` |
+| `/funds/:fundId/compare` | A/B 对比页 | `agent_team_mode` |
+| `/funds/:fundId/memory` | 记忆页 | `agent_team_mode` |
+| `/funds/:fundId/trades` | 交易页 | `agent_team_mode` |
+| `/funds/:fundId/settings` | 基金设置页 | `agent_team_mode` |
+| `/funds/:fundId/subscription` | 订阅页 | `agent_team_mode` |
+| `/funds/:fundId/models` | 模型配置页 | `agent_team_mode` |
+| `/funds/:fundId/usage` | 用量页 | `agent_team_mode` |
+
+> **打开 Agent Team Trading 产品**：以 super-admin 身份登录 `/admin` → 找到 `agent_team_mode` → 设为 `enabled=true`。下一次普通用户请求即生效（feature flag 缓存 TTL 5s）。
 
 ### 微信小程序
 
@@ -682,6 +834,32 @@ SERPAPI_KEYS=your_serpapi_key
 TAVILY_API_KEYS=your_tavily_key
 WEB_SEARCH_FEED_URL=https://news.google.com/rss/search
 ```
+
+## Feature Flag 总览
+
+全部 flags 存在 `feature_flags` 表，super-admin 通过 `/admin` 面板（或直接 PUT `/api/admin/feature-flags/{key}`）翻动。SPA 端用 `useFeatureFlag(key, fallback)` hook 消费，缓存 TTL 5 秒，翻动后下一次请求即生效。
+
+| Key | 默认 | 控制 |
+|-----|------|------|
+| `agent_team_mode` | `FALSE` | 整条 AI Agent Team 产品线（`/companies` + 全部 `/funds/*`）是否对普通用户可见。super-admin 永远可见。 |
+| `fund_team` | `FALSE` | 基金详情页里的"团队管理"二级入口（被 `agent_team_mode` 套娃）。 |
+| `advisor_mode` | `TRUE` | `/advisor` 路由 + 后端 `/api/advisor/*`。关掉等于把"个股深度顾问"产品下线。 |
+| `advisor_byok` | `TRUE` | 用户能否在 `/advisor` 里使用自己的 LLM API Key。关掉则强制走平台池。 |
+
+> 升级提示：flag 表跑 `INSERT … ON CONFLICT DO NOTHING` 不会覆盖已有值，所以 deploy 新版本不会意外把客户已经翻开的 flag 重置回默认。
+
+## Observability 速查
+
+| 想看的事 | 做法 |
+|---------|------|
+| 进程总体健康 | `GET /api/health` / `GET /api/version` |
+| 全部 Prometheus 指标 | `GET /api/metrics`（行情 provider / SSE mux / 内存 re-embed / **LLM 9 层路由** / 嵌入配额 / 运行时） |
+| LLM 9 层路由命中分布 | `llm_resolution_source_total{layer="..."}`，9 个固定 series |
+| 某个 user/agent 应该走哪个模型 | super-admin GET `/api/admin/llm-resolve?user_id=…&agent_id=…&step=…&tier=…`（无 token 消耗） |
+| 行情数据源熔断 / 累计成败 | super-admin GET `/api/admin/marketdata/health` 或 `/admin` 页"行情数据源健康"卡片，15s 自动刷新 |
+| Outbox flusher 是否在干活 | 在 app 容器日志里看 `"outbox event handled"` slog 行；DB 端 `SELECT COUNT(*) FROM outbox_events WHERE consumed_at IS NULL` 应该长期接近 0 |
+| 审计哈希链完整性 | super-admin GET `/api/admin/audit/chain/verify` |
+| 合规扫描器拦截到了什么 | `compliance_violations` 表（按 `created_at DESC` 看最近的）+ admin `/api/admin/compliance/violations` |
 
 ## 常见问题排查
 
