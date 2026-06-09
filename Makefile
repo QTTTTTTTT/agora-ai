@@ -1,4 +1,4 @@
-.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline ha-failover-smoke test-visual-baseline test-visual-baseline-update bundle-budget
+.PHONY: help build start stop rebuild rebuild-app test test-server test-web secret-rotate-dev perf-load-baseline ha-failover-smoke test-visual-baseline test-visual-baseline-update bundle-budget check-migrations
 
 # Default target prints help so a fresh clone explorer learns the toolbox.
 help:
@@ -22,6 +22,9 @@ help:
 	@echo "Performance:"
 	@echo "  make perf-load-baseline Run 30s load against /api/health and capture p50/p95/p99 + 5xx rate"
 	@echo "  make bundle-budget      Enforce frontend bundle size caps against web/bundle-budget.json"
+	@echo ""
+	@echo "Schema:"
+	@echo "  make check-migrations   Refuse any new migration that ships without a matching .down.sql"
 	@echo ""
 	@echo "Reliability:"
 	@echo "  make ha-failover-smoke  Kill app + bounce postgres, verify recovery within 60s"
@@ -102,3 +105,12 @@ test-visual-baseline-update:
 # (run `cd web && npm run build` first). CI invokes the same script.
 bundle-budget:
 	bash scripts/bundle-budget.sh
+
+# Enforce that every migrations/*.sql ships with a paired
+# *.down.sql so any deploy can be rolled back without restoring
+# from backup. Grandfathered historical files live in
+# server/migrations/.no-down-allow-list and are exempted from
+# this check (each entry must justify itself in the PR that
+# adds it). See scripts/check-migration-down-pairs.sh.
+check-migrations:
+	bash scripts/check-migration-down-pairs.sh

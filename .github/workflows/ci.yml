@@ -285,6 +285,24 @@ jobs:
       - name: Validate alert rules
         run: python3 scripts/validate-prometheus-alerts.py prometheus/alerts.yml
 
+  migrations:
+    name: Migration down-pair gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify every up-migration has a paired down (modulo allow-list)
+        # Refuses any PR that lands a new server/migrations/NNN_foo.sql
+        # without a matching NNN_foo.down.sql, with a narrow allow-list
+        # for the grandfathered historical files. See
+        # scripts/check-migration-down-pairs.sh + server/migrations/.no-down-allow-list
+        # for the rationale and instructions on how to add an
+        # exception when a mechanical rollback is genuinely
+        # impossible.
+        run: bash scripts/check-migration-down-pairs.sh
+
   release-hygiene:
     name: Release hygiene validation
     runs-on: ubuntu-latest
@@ -304,7 +322,7 @@ jobs:
     name: Docker build and Compose smoke
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: [hygiene, backend, frontend, miniapp, api-contract, observability, release-hygiene]
+    needs: [hygiene, backend, frontend, miniapp, api-contract, observability, release-hygiene, migrations]
     env:
       BUILD_VERSION: ${{ github.ref_name }}
       BUILD_COMMIT: ${{ github.sha }}

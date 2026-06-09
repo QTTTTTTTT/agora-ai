@@ -1,0 +1,72 @@
+# server/migrations/.no-down-allow-list
+#
+# Migrations on this list are intentionally shipped without a
+# matching .down.sql. The CI gate at scripts/check-migration-down-pairs.sh
+# skips them so a green pipeline is achievable without rewriting
+# the history of every migration that landed before the policy
+# took effect (P0-4, R03 / W1).
+#
+# Rules for adding a new entry:
+#
+#   1. Every new entry MUST be justified in the PR description
+#      that adds it. "Foundational schema bootstrap, no
+#      mechanical rollback possible" is the only accepted reason
+#      for migrations newer than 100; for anything more recent
+#      than that, write the .down.sql instead.
+#
+#   2. The entry is the migration stem WITHOUT the .sql suffix.
+#      Comments use # at column 0. Blank lines are ignored.
+#
+#   3. The script complains if an entry no longer maps to a real
+#      .sql file (stale rows are removed-but-someone-forgot-to-
+#      clean-up bugs). Keep this file tracking current state.
+#
+# Cohort A — foundational schema (001-013). These migrations
+# bootstrap the platform tables (users, accounts, agents,
+# decisions, workflows, etc.). A mechanical .down.sql would have
+# to DROP TABLE every base table in the right FK order, which is
+# both a full schema rebuild and a guaranteed prod-data wipe.
+# Rollback for these is "restore from backup", not "run the
+# down". Documented in docs/RELEASE_QA_PLAYBOOK.md §rollback.
+001_init
+002_subscription_and_models
+003_agent_scoped_model_configs
+003_human_auth_bootstrap
+004_multi_market_trading
+005_admin_platform_settings
+006_wallets
+007_agent_marketplace
+008_analysis_memory_layer
+009_plan_action_watch
+010_agent_ownership_inventory
+011_decision_trace_snapshot
+012_workflow_run_terminal_states
+013_workflow_run_daily_uniqueness
+
+# Cohort B — early feature migrations (015-025). Shipped before
+# the .down.sql discipline was added. Most of these add tables /
+# columns that other later migrations now depend on; producing a
+# safe down without coordinated cascading rollbacks is more risk
+# than the rollback would buy. Same "restore from backup" stance.
+015_marketplace_reconcile
+016_scheduler_leases
+017_marketplace_modes
+018_forward_test_eligibility
+019_agent_lineage
+020_memory_acl_and_audit
+021_kyc_compliance
+022_abtest_shadow_variants
+023_usage_agent_visibility
+024_marketplace_auction_and_holds
+025_abtest_promotion_rollback_metadata
+
+# Cohort C — attribution memory layer (039). Same era + reasoning
+# as cohort B; left here so the cohort divisions are visible in
+# diff history rather than buried in one big block.
+039_attribution_memory_layer
+
+# Cohort D — seed-only files. seed_trading_calendar is a one-off
+# data import, not a schema change. Rollback is "delete the seeded
+# calendar rows" which is a maintenance script (scripts/db-purge-seed-calendar.sh)
+# rather than a migration step.
+seed_trading_calendar
