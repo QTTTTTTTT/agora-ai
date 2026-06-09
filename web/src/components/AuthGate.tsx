@@ -9,7 +9,11 @@ export const RequireRole: React.FC<{ children: React.ReactNode; roles: string[] 
   const role = session?.role?.trim() ?? "";
 
   if (!roles.includes(role)) {
-    return <Navigate to="/companies" replace state={{ from: location }} />;
+    // Send insufficient-role visitors to the new Master Team hub
+    // rather than /companies — the latter is itself gated behind
+    // agent_team_mode and would just bounce them through a second
+    // redirect on the way to /masters.
+    return <Navigate to="/masters" replace state={{ from: location }} />;
   }
 
   return <>{children}</>;

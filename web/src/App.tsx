@@ -9,11 +9,15 @@ import {
   isRouteErrorResponse,
 } from "react-router-dom";
 import AuthGate, { AdminGate } from "./components/AuthGate";
+import AgentTeamGate from "./components/AgentTeamGate";
 import FundLayout from "./components/FundLayout";
 import PreferenceDock from "./components/PreferenceDock";
 import SessionExpiryWatcher from "./components/SessionExpiryWatcher";
 import RouteFallback from "./components/RouteFallback";
 import CommandPalette from "./components/CommandPalette";
+import AnnouncementCenter from "./components/AnnouncementCenter";
+import { FeatureFlagsProvider } from "./lib/featureFlags";
+import { ComplianceProvider, type ComplianceLocale } from "./lib/compliance";
 import { useAppPreferences } from "./lib/preferences";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { ToastViewport, toast } from "./lib/toast";
@@ -58,6 +62,29 @@ const Marketplace = lazyWithRetry(() => import("./pages/Marketplace"));
 const Auctions = lazyWithRetry(() => import("./pages/Auctions"));
 const Promotions = lazyWithRetry(() => import("./pages/Promotions"));
 const FundWorkflow = lazyWithRetry(() => import("./pages/FundWorkflow"));
+// /style-preview is the design-system showcase that mirrors the
+// 2026 cream / sage / black-pill refresh. Auth-gated so we don't
+// leak it to anonymous landing visitors, but otherwise free of
+// fund / company context — safe to open anywhere.
+const StylePreview = lazyWithRetry(() => import("./pages/StylePreview"));
+const PaperTrading = lazyWithRetry(() => import("./pages/PaperTrading"));
+const CNIntraday = lazyWithRetry(() => import("./pages/CNIntraday"));
+// /welcome + /advisor — the new "master team consultation" mode
+// introduced alongside migration 098. Both lazy-loaded so the main
+// /companies bundle stays the same size for existing users who
+// don't navigate to the new flow.
+const Welcome = lazyWithRetry(() => import("./pages/Welcome"));
+const Advisor = lazyWithRetry(() => import("./pages/Advisor"));
+const DailyPicks = lazyWithRetry(() => import("./pages/DailyPicks"));
+// MastersHub is the new authenticated landing page that consolidates
+// the per-stock advisor, daily picks, paper trading, and trending
+// surfaces under a single navigable shell. See pages/MastersHub.tsx
+// for the layout rationale. Replaces /companies as the post-login
+// default; /companies + the /funds/* subtree are now gated behind
+// AgentTeamGate (see components/AgentTeamGate.tsx).
+const MastersHub = lazyWithRetry(() => import("./pages/MastersHub"));
+const TrendingMostActive = lazyWithRetry(() => import("./pages/TrendingMostActive"));
+const SettingsByok = lazyWithRetry(() => import("./pages/SettingsByok"));
 
 interface ErrorBoundaryCopy {
   unexpectedError: string;
@@ -196,7 +223,7 @@ const ErrorPanel: React.FC<ErrorPanelProps> = ({
             {copy.copyError}
           </button>
           <Link
-            to="/companies"
+            to="/masters"
             className="rounded-md border border-gray-300 bg-white px-4 py-2 text-center text-sm font-medium text-gray-700 hover:bg-gray-50"
           >
             {copy.backToCompanies}
@@ -308,7 +335,7 @@ const AppRoutes: React.FC = () => {
             unexpectedError: "An unexpected error occurred.",
             pageError: "Page error",
             routeError: "Route error",
-            backToCompanies: "Back to companies",
+            backToCompanies: "Back to Master Team",
             unknownError: "Unknown error",
             loading: "Loading…",
             retry: "Retry",
@@ -322,7 +349,7 @@ const AppRoutes: React.FC = () => {
             unexpectedError: "发生了未预期的异常。",
             pageError: "页面发生错误",
             routeError: "路由异常",
-            backToCompanies: "返回公司列表",
+            backToCompanies: "返回大师团队",
             unknownError: "未知错误",
             loading: "正在加载…",
             retry: "重试",
@@ -337,6 +364,11 @@ const AppRoutes: React.FC = () => {
 
   return (
     <BrowserRouter>
+      {/* AnnouncementCenter sits at the very top so any sticky
+          banner is always above the rest of the app shell. It is
+          self-gating: when there's no session or no unread items
+          it renders nothing. */}
+      <AnnouncementCenter />
       <PreferenceDock />
       {/* Single global listener for `fundai:session-expired` events
           dispatched from api.ts whenever a request hits a 401. Lives
@@ -362,14 +394,29 @@ const AppRoutes: React.FC = () => {
       <ErrorBoundary copy={copy}>
         <Suspense fallback={<RouteFallback loadingText={copy.loading} />}>
           <Routes>
-            <Route path="/" element={<Navigate to="/companies" replace />} />
+            {/* Post-login default lands on /masters (the new
+                Master Team Hub). The legacy /companies surface is
+                gated behind AgentTeamGate below — direct hits
+                redirect to /masters unless the user is super_admin
+                or the agent_team_mode flag is flipped ON. */}
+            <Route path="/" element={<Navigate to="/masters" replace />} />
             <Route path="/login" element={<Login />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/verify-email" element={<AuthGate><VerifyEmail /></AuthGate>} />
             <Route path="/account/security" element={<AuthGate><AccountSecurity /></AuthGate>} />
-            <Route path="/companies" element={<AuthGate><Companies /></AuthGate>} />
+            <Route path="/welcome" element={<AuthGate><Welcome /></AuthGate>} />
+            <Route path="/masters" element={<AuthGate><MastersHub /></AuthGate>} />
+            <Route path="/advisor" element={<AuthGate><Advisor /></AuthGate>} />
+            <Route path="/daily-picks" element={<AuthGate><DailyPicks /></AuthGate>} />
+            <Route path="/trending" element={<Navigate to="/trending/most-active" replace />} />
+            <Route path="/trending/most-active" element={<AuthGate><TrendingMostActive /></AuthGate>} />
+            <Route path="/settings/byok" element={<AuthGate><SettingsByok /></AuthGate>} />
+            <Route path="/companies" element={<AuthGate><AgentTeamGate><Companies /></AgentTeamGate></AuthGate>} />
             <Route path="/portfolio-overview" element={<AuthGate><MultiFundOverview /></AuthGate>} />
+            <Route path="/style-preview" element={<AuthGate><StylePreview /></AuthGate>} />
+            <Route path="/papertrading" element={<AuthGate><PaperTrading /></AuthGate>} />
+            <Route path="/cnintraday" element={<AuthGate><CNIntraday /></AuthGate>} />
             <Route path="/wallet" element={<AuthGate><Wallet /></AuthGate>} />
             <Route path="/kyc" element={<AuthGate><KYC /></AuthGate>} />
             <Route path="/marketplace" element={<AuthGate><Marketplace /></AuthGate>} />
@@ -378,7 +425,7 @@ const AppRoutes: React.FC = () => {
             <Route path="/admin/skills/inbox" element={<AuthGate><AdminGate><SkillInbox /></AdminGate></AuthGate>} />
             <Route
               path="/funds/:fundId"
-              element={<AuthGate><FundLayout /></AuthGate>}
+              element={<AuthGate><AgentTeamGate><FundLayout /></AgentTeamGate></AuthGate>}
               errorElement={<RouteErrorElement copy={copy} />}
             >
               <Route index element={<Dashboard />} />
@@ -402,7 +449,7 @@ const AppRoutes: React.FC = () => {
               <Route path="usage" element={<Usage />} />
               <Route path="audit" element={<AuditLog />} />
             </Route>
-            <Route path="*" element={<Navigate to="/companies" replace />} />
+            <Route path="*" element={<Navigate to="/masters" replace />} />
           </Routes>
         </Suspense>
       </ErrorBoundary>
@@ -410,6 +457,26 @@ const AppRoutes: React.FC = () => {
   );
 };
 
-const App: React.FC = () => <AppRoutes />;
+const App: React.FC = () => {
+  // The compliance locale matches whatever the rest of the app
+  // resolved via the preferences hook. We can't useAppPreferences
+  // here without re-implementing the resolution, so we read the
+  // localStorage value directly with a safe en-US fallback. The
+  // ComplianceProvider re-fetches its bundles whenever locale
+  // changes — flipping language in the PreferenceDock will rotate
+  // every disclosure block.
+  const locale: ComplianceLocale =
+    typeof window !== "undefined" &&
+    window.localStorage.getItem("fundai.language") === "en-US"
+      ? "en-US"
+      : "zh-CN";
+  return (
+    <FeatureFlagsProvider>
+      <ComplianceProvider locale={locale}>
+        <AppRoutes />
+      </ComplianceProvider>
+    </FeatureFlagsProvider>
+  );
+};
 
 export default App;

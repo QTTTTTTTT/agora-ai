@@ -128,7 +128,7 @@ const KYC: React.FC = () => {
     <div className="min-h-screen bg-gray-50 px-4 py-8">
       <main className="mx-auto max-w-5xl space-y-6">
         <section className="rounded-2xl border border-gray-200 bg-white px-6 py-6 shadow-sm">
-          <Link to="/companies" className="text-sm font-medium text-indigo-600 hover:text-indigo-700">← {t("back")}</Link>
+          <Link to="/masters" className="text-sm font-medium text-indigo-600 hover:text-indigo-700">← {t("back")}</Link>
           <h1 className="mt-4 text-3xl font-bold text-gray-900">{t("title")}</h1>
           <p className="mt-2 max-w-3xl text-sm text-gray-500">{t("subtitle")}</p>
         </section>

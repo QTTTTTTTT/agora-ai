@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { apiDelete, apiGet, apiPost, apiPut, formatApiError } from "../lib/api";
 import {
   formatDateForLanguage,
@@ -8,6 +8,7 @@ import {
   useAppPreferences,
 } from "../lib/preferences";
 import TeamActivityPanel from "../components/TeamActivityPanel";
+import { useFeatureFlag } from "../lib/featureFlags";
 
 type AgentRole = "pm" | "researcher" | "trader" | "risk";
 type ResearchFocus = "stock" | "fundamental" | "macro";
@@ -181,7 +182,42 @@ function buildEditorState(agent: TeamAgent | null): AgentEditorState {
   };
 }
 
+// FeatureFlagGate is a tiny wrapper that runs the flag check at
+// the outermost level so the inner TeamManagementInner only mounts
+// (and only fires its ~10 data loaders) when the feature is on.
+// React's rules-of-hooks forbid an early return *inside* a component
+// that calls more hooks after it, so we split this into two pieces.
 const TeamManagement: React.FC = () => {
+  const { fundId } = useParams<{ fundId: string }>();
+  const { language } = useAppPreferences();
+  const teamEnabled = useFeatureFlag("fund_team", false);
+  if (!teamEnabled) {
+    const zh = language === "zh-CN";
+    return (
+      <div className="mx-auto max-w-2xl px-6 py-12">
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-8 text-center">
+          <h2 className="text-lg font-semibold text-amber-900">
+            {zh ? "基金团队管理已暂停" : "Fund Team Management is paused"}
+          </h2>
+          <p className="mt-3 text-sm text-amber-800">
+            {zh
+              ? "我们正在重构基金内部 AI 团队的产品形态，本入口已临时下线。管理员可在「后台 → 功能开关」中重新开启。"
+              : "We're redesigning the fund-internal AI team experience. This surface is temporarily disabled. Admins can re-enable it under Admin → Feature Flags."}
+          </p>
+          <Link
+            to={fundId ? `/funds/${fundId}` : "/"}
+            className="mt-5 inline-block rounded-full border border-amber-300 bg-white px-5 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+          >
+            {zh ? "返回基金总览" : "Back to fund overview"}
+          </Link>
+        </div>
+      </div>
+    );
+  }
+  return <TeamManagementInner />;
+};
+
+const TeamManagementInner: React.FC = () => {
   const { fundId } = useParams<{ fundId: string }>();
   const { language } = useAppPreferences();
   const [agents, setAgents] = useState<TeamAgent[]>([]);

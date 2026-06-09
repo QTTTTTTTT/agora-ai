@@ -9,6 +9,7 @@ import {
   registerWithPassword,
 } from "../lib/api";
 import { useAppPreferences } from "../lib/preferences";
+import { BlackPillButton, MascotAvatar, TabPills } from "../theme";
 
 type AuthMode = "login" | "register";
 
@@ -224,8 +225,10 @@ const Login: React.FC = () => {
 
   if (checkingSession) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 px-6 py-12 text-white">
-        <div className="rounded-2xl border border-white/10 bg-white/5 px-6 py-5 text-sm text-slate-300">{copy.checkingSession}</div>
+      <div className="flex min-h-screen items-center justify-center px-6 py-12">
+        <div className="rounded-envelope bg-cream-0 px-6 py-5 text-sm text-ink-300 shadow-envelope ring-1 ring-ink-100/60">
+          {copy.checkingSession}
+        </div>
       </div>
     );
   }
@@ -333,32 +336,43 @@ const Login: React.FC = () => {
     setError(null);
   }
 
+  // Cream redesign: shared field styles + the inline TabPills
+  // tabset for login/register. Keep tw classes hoisted so the
+  // 80-line JSX stays readable.
+  const fieldClass =
+    "mt-2 w-full rounded-2xl bg-cream-50 px-4 py-3 text-sm text-ink-900 outline-none ring-1 ring-ink-100/80 transition focus:ring-2 focus:ring-sage-500/60 placeholder:text-ink-300";
+  const errorBox =
+    "rounded-2xl bg-risk-50 px-4 py-3 text-sm text-risk-500 ring-1 ring-risk-100";
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 px-6 py-12 text-white">
-      <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/5 p-8 shadow-2xl backdrop-blur">
+    <div className="flex min-h-screen items-center justify-center px-6 py-12">
+      <div className="w-full max-w-md rounded-envelope-lg bg-cream-0 p-8 shadow-envelope ring-1 ring-ink-100/60">
         {twoFAChallenge ? (
           <div>
-            <div className="mb-8">
-              <p className="text-sm font-medium text-indigo-300">FundAI</p>
-              <h1 className="mt-2 text-3xl font-semibold">{copy.twoFA.title}</h1>
-              <p className="mt-3 text-sm leading-6 text-slate-300">{copy.twoFA.subtitle}</p>
+            <div className="mb-7 flex items-center gap-3">
+              <MascotAvatar role="risk" size={56} animated />
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sage-700">
+                  FundAI
+                </p>
+                <h1 className="mt-1 text-2xl font-extrabold text-ink-900">
+                  {copy.twoFA.title}
+                </h1>
+              </div>
             </div>
+            <p className="mb-6 text-sm leading-6 text-ink-300">
+              {copy.twoFA.subtitle}
+            </p>
             <form className="space-y-5" onSubmit={handle2FASubmit}>
-              <div className="grid grid-cols-2 rounded-2xl border border-white/10 bg-slate-900/60 p-1 text-sm">
-                <button
-                  type="button"
-                  onClick={() => setTwoFAMode("code")}
-                  className={`rounded-xl px-4 py-2 transition ${twoFAMode === "code" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"}`}
-                >
-                  {copy.twoFA.modeCode}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTwoFAMode("recovery")}
-                  className={`rounded-xl px-4 py-2 transition ${twoFAMode === "recovery" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"}`}
-                >
-                  {copy.twoFA.modeRecovery}
-                </button>
+              <div className="flex">
+                <TabPills
+                  tabs={[
+                    { key: "code",     label: copy.twoFA.modeCode },
+                    { key: "recovery", label: copy.twoFA.modeRecovery },
+                  ] as const}
+                  active={twoFAMode}
+                  onChange={(k) => setTwoFAMode(k as "code" | "recovery")}
+                />
               </div>
               {twoFAMode === "code" ? (
                 <input
@@ -369,7 +383,7 @@ const Login: React.FC = () => {
                   value={twoFACode}
                   onChange={(e) => setTwoFACode(e.target.value.replace(/[^0-9]/g, ""))}
                   placeholder={copy.twoFA.codePlaceholder}
-                  className="w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-center font-mono text-2xl tracking-widest text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                  className={`${fieldClass} text-center font-mono text-2xl tracking-widest`}
                 />
               ) : (
                 <input
@@ -378,23 +392,22 @@ const Login: React.FC = () => {
                   value={twoFARecovery}
                   onChange={(e) => setTwoFARecovery(e.target.value.toUpperCase())}
                   placeholder={copy.twoFA.recoveryPlaceholder}
-                  className="w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-center font-mono text-lg tracking-widest text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+                  className={`${fieldClass} text-center font-mono text-lg tracking-widest`}
                 />
               )}
-              {error ? (
-                <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>
-              ) : null}
-              <button
+              {error ? <div className={errorBox}>{error}</div> : null}
+              <BlackPillButton
                 type="submit"
+                size="lg"
+                block
                 disabled={submitting || (twoFAMode === "code" ? twoFACode.length < 6 : !twoFARecovery.trim())}
-                className="w-full rounded-2xl bg-indigo-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {submitting ? copy.twoFA.submitting : copy.twoFA.submit}
-              </button>
+              </BlackPillButton>
               <button
                 type="button"
                 onClick={handleCancelTwoFA}
-                className="w-full rounded-2xl border border-white/10 bg-transparent px-4 py-3 text-sm text-slate-300 transition hover:border-white/20"
+                className="w-full rounded-full bg-cream-50 px-4 py-3 text-sm font-medium text-ink-300 ring-1 ring-ink-100 transition hover:text-ink-700"
               >
                 {copy.twoFA.cancel}
               </button>
@@ -402,145 +415,143 @@ const Login: React.FC = () => {
           </div>
         ) : (
           <>
-        <div className="mb-8">
-          <p className="text-sm font-medium text-indigo-300">FundAI</p>
-          <h1 className="mt-2 text-3xl font-semibold">{mode === "login" ? copy.titleLogin : copy.titleRegister}</h1>
-          <p className="mt-3 text-sm leading-6 text-slate-300">{copy.subtitle}</p>
-        </div>
+            <div className="mb-7 flex items-center gap-3">
+              <MascotAvatar role="captain" size={56} animated />
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sage-700">
+                  FundAI
+                </p>
+                <h1 className="mt-1 text-2xl font-extrabold text-ink-900">
+                  {mode === "login" ? copy.titleLogin : copy.titleRegister}
+                </h1>
+              </div>
+            </div>
+            <p className="mb-6 text-sm leading-6 text-ink-300">
+              {copy.subtitle}
+            </p>
 
-        <div className="mb-6 grid grid-cols-2 rounded-2xl border border-white/10 bg-slate-900/60 p-1 text-sm">
-          <button
-            type="button"
-            onClick={() => {
-              setMode("login");
-              setError(null);
-            }}
-            className={`rounded-xl px-4 py-2 transition ${mode === "login" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"}`}
-          >
-            {copy.tabs.login}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMode("register");
-              setError(null);
-            }}
-            className={`rounded-xl px-4 py-2 transition ${mode === "register" ? "bg-indigo-500 text-white" : "text-slate-300 hover:text-white"}`}
-          >
-            {copy.tabs.register}
-          </button>
-        </div>
-
-        <form className="space-y-5" onSubmit={handleSubmit}>
-          <label className="block text-sm font-medium text-slate-200">
-            {copy.labels.email}
-            <input
-              value={form.email}
-              onChange={(event) => updateField("email", event.target.value)}
-              placeholder={copy.placeholders.email}
-              autoComplete="email"
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
-            />
-          </label>
-
-          {mode === "register" ? (
-            <label className="block text-sm font-medium text-slate-200">
-              {copy.labels.displayName}
-              <input
-                value={form.displayName}
-                onChange={(event) => updateField("displayName", event.target.value)}
-                placeholder={copy.placeholders.displayName}
-                autoComplete="nickname"
-                className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
+            <div className="mb-6 flex">
+              <TabPills
+                tabs={[
+                  { key: "login",    label: copy.tabs.login },
+                  { key: "register", label: copy.tabs.register },
+                ] as const}
+                active={mode}
+                onChange={(k) => {
+                  setMode(k as AuthMode);
+                  setError(null);
+                }}
               />
-            </label>
-          ) : null}
+            </div>
 
-          <label className="block text-sm font-medium text-slate-200">
-            {copy.labels.password}
-            <input
-              type="password"
-              value={form.password}
-              onChange={(event) => updateField("password", event.target.value)}
-              placeholder={copy.placeholders.password}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
-            />
-          </label>
+            <form className="space-y-5" onSubmit={handleSubmit}>
+              <label className="block text-sm font-medium text-ink-700">
+                {copy.labels.email}
+                <input
+                  value={form.email}
+                  onChange={(event) => updateField("email", event.target.value)}
+                  placeholder={copy.placeholders.email}
+                  autoComplete="email"
+                  className={fieldClass}
+                />
+              </label>
 
-          {mode === "register" ? (
-            <label className="block text-sm font-medium text-slate-200">
-              {copy.labels.confirmPassword}
-              <input
-                type="password"
-                value={form.confirmPassword}
-                onChange={(event) => updateField("confirmPassword", event.target.value)}
-                placeholder={copy.placeholders.confirmPassword}
-                autoComplete="new-password"
-                className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/40"
-              />
-            </label>
-          ) : null}
+              {mode === "register" ? (
+                <label className="block text-sm font-medium text-ink-700">
+                  {copy.labels.displayName}
+                  <input
+                    value={form.displayName}
+                    onChange={(event) => updateField("displayName", event.target.value)}
+                    placeholder={copy.placeholders.displayName}
+                    autoComplete="nickname"
+                    className={fieldClass}
+                  />
+                </label>
+              ) : null}
 
-          {error ? <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div> : null}
+              <label className="block text-sm font-medium text-ink-700">
+                {copy.labels.password}
+                <input
+                  type="password"
+                  value={form.password}
+                  onChange={(event) => updateField("password", event.target.value)}
+                  placeholder={copy.placeholders.password}
+                  autoComplete={mode === "login" ? "current-password" : "new-password"}
+                  className={fieldClass}
+                />
+              </label>
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full rounded-2xl bg-indigo-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {submitting ? (mode === "login" ? copy.actions.signingIn : copy.actions.registering) : mode === "login" ? copy.actions.signIn : copy.actions.register}
-          </button>
-        </form>
+              {mode === "register" ? (
+                <label className="block text-sm font-medium text-ink-700">
+                  {copy.labels.confirmPassword}
+                  <input
+                    type="password"
+                    value={form.confirmPassword}
+                    onChange={(event) => updateField("confirmPassword", event.target.value)}
+                    placeholder={copy.placeholders.confirmPassword}
+                    autoComplete="new-password"
+                    className={fieldClass}
+                  />
+                </label>
+              ) : null}
 
-        {mode === "login" ? (
-          <>
-            <div className="mt-4 text-center text-xs text-slate-400">
-              <Link to="/forgot-password" className="text-indigo-300 transition hover:text-indigo-200">
-                {copy.forgotPassword}
+              {error ? <div className={errorBox}>{error}</div> : null}
+
+              <BlackPillButton type="submit" size="lg" block disabled={submitting} withArrow={!submitting}>
+                {submitting
+                  ? mode === "login" ? copy.actions.signingIn : copy.actions.registering
+                  : mode === "login" ? copy.actions.signIn : copy.actions.register}
+              </BlackPillButton>
+            </form>
+
+            {mode === "login" ? (
+              <>
+                <div className="mt-4 text-center text-xs">
+                  <Link to="/forgot-password" className="text-sage-700 transition hover:text-sage-500">
+                    {copy.forgotPassword}
+                  </Link>
+                </div>
+
+                {/*
+                  * WeChat login entry. The product surface lists WeChat sign-in
+                  * as a supported path on both web and miniapp; previously web
+                  * only exposed email/password and the WeChat box was missing
+                  * entirely. Until the OAuth-redirect handler is wired on the
+                  * server we keep this as an *information* button that explains
+                  * how to complete the WeChat flow today (via the miniapp's
+                  * code2session, which already shares the JWT keyring with web
+                  * via the auth_wechat handler). Replace the click handler with
+                  * the OAuth redirect once /api/auth/wechat-redirect ships.
+                  */}
+                <div className="mt-6 flex flex-col items-center gap-2 rounded-2xl bg-sage-50 px-4 py-4 text-xs text-sage-700 ring-1 ring-sage-200/70">
+                  <button
+                    type="button"
+                    onClick={() => window.alert(copy.actions.wechatHint)}
+                    className="rounded-full bg-cream-0 px-4 py-2 text-sm font-semibold text-sage-700 ring-1 ring-sage-200 transition hover:bg-sage-50"
+                  >
+                    {copy.actions.wechat}
+                  </button>
+                  <p className="text-center text-[11px] text-sage-700/80">
+                    {copy.actions.wechatHint}
+                  </p>
+                </div>
+              </>
+            ) : null}
+
+            <div className="mt-8 rounded-2xl bg-cream-50 p-4 text-xs leading-6 text-ink-300 ring-1 ring-ink-100/70">
+              <p className="font-semibold text-ink-700">{copy.minimumAccountTitle}</p>
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                {copy.minimumAccountItems.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="mt-6 text-center text-xs">
+              <Link to="/masters" className="text-ink-300 transition hover:text-ink-700">
+                {copy.backHome}
               </Link>
             </div>
-
-            {/*
-              * WeChat login entry. The product surface lists WeChat sign-in
-              * as a supported path on both web and miniapp; previously web
-              * only exposed email/password and the WeChat box was missing
-              * entirely. Until the OAuth-redirect handler is wired on the
-              * server we keep this as an *information* button that explains
-              * how to complete the WeChat flow today (via the miniapp's
-              * code2session, which already shares the JWT keyring with web
-              * via the auth_wechat handler). Replace the click handler with
-              * the OAuth redirect once /api/auth/wechat-redirect ships.
-              */}
-            <div className="mt-6 flex flex-col items-center gap-2 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-4 text-xs text-emerald-200">
-              <button
-                type="button"
-                onClick={() =>
-                  window.alert(copy.actions.wechatHint)
-                }
-                className="rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/20"
-              >
-                {copy.actions.wechat}
-              </button>
-              <p className="text-center text-[11px] text-emerald-200/80">{copy.actions.wechatHint}</p>
-            </div>
-          </>
-        ) : null}
-
-        <div className="mt-8 rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-xs leading-6 text-slate-300">
-          <p className="font-medium text-slate-100">{copy.minimumAccountTitle}</p>
-          <ul className="mt-2 list-disc space-y-1 pl-5">
-            {copy.minimumAccountItems.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        </div>
-
-        <div className="mt-6 text-center text-xs text-slate-400">
-          <Link to="/companies" className="transition hover:text-white">
-            {copy.backHome}
-          </Link>
-        </div>
           </>
         )}
       </div>

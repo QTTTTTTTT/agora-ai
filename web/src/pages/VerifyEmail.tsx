@@ -119,7 +119,7 @@ const VerifyEmail: React.FC = () => {
         )}
 
         <div className="mt-6 text-center text-xs text-slate-400">
-          <Link to="/companies" className="transition hover:text-white">
+          <Link to="/masters" className="transition hover:text-white">
             {t("actions.backHome")}
           </Link>
         </div>

@@ -874,6 +874,7 @@ const Companies: React.FC = () => {
             kycLevel: "Level",
             marketplace: "Agent marketplace",
             admin: "Admin",
+            backToMasters: "← Master Team",
             accountSecurity: "Account & security",
             createCompany: "Create company",
             logout: "Log out",
@@ -916,6 +917,7 @@ const Companies: React.FC = () => {
             kycLevel: "等级",
             marketplace: "成员交易市场",
             admin: "管理员后台",
+            backToMasters: "← 大师团队",
             accountSecurity: "账号与安全",
             createCompany: "创建公司",
             logout: "退出登录",
@@ -1144,85 +1146,84 @@ const Companies: React.FC = () => {
     }
   }, [copy.createFundError, copy.fundNameRequired, copy.invalidCapital, fundForm, fundTargetCompany, navigate]);
 
+  // Cream redesign: a small palette of sage/coral/info pill links
+  // for the top-right action row replaces the rainbow of indigo /
+  // amber / violet / emerald borders. Each pill matches the tone
+  // of the destination feature it leads to.
+  const sidePillBase =
+    "inline-flex h-11 items-center rounded-full px-4 text-sm font-semibold ring-1 shadow-pill transition";
+  const sidePillSage = `${sidePillBase} bg-sage-50 text-sage-700 ring-sage-200/70 hover:bg-sage-100`;
+  const sidePillCoral = `${sidePillBase} bg-coral-50 text-coral-500 ring-coral-200/70 hover:bg-coral-100`;
+  const sidePillInfo = `${sidePillBase} bg-cream-0 text-ink-700 ring-ink-100/80 hover:bg-cream-50`;
+  const sidePillMint = `${sidePillBase} bg-cream-0 text-sage-700 ring-sage-200/70 hover:bg-sage-50`;
+
   return (
     <>
-      <div className="min-h-screen bg-gray-50 p-8">
+      <div className="min-h-screen p-6 sm:p-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <h1 className="text-3xl font-bold text-gray-900">{copy.companiesTitle}</h1>
-              <p className="mt-2 text-gray-500">{copy.companiesSubtitle}</p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sage-700">FundAI</p>
+              <h1 className="mt-1 text-3xl font-extrabold text-ink-900 dark:text-slate-100">
+                {copy.companiesTitle}
+              </h1>
+              <p className="mt-2 text-sm text-ink-300 dark:text-slate-400">{copy.companiesSubtitle}</p>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-3">
-              <div className="rounded-xl border border-gray-200 bg-white px-5 py-4 text-sm text-gray-500 shadow-sm">
+              <div className="rounded-envelope bg-cream-0 px-5 py-4 text-sm text-ink-300 shadow-envelope ring-1 ring-ink-100/60 dark:bg-slate-900 dark:text-slate-400 dark:ring-slate-700">
                 <p>
                   {formatNumberForLanguage(companies.length, language)} {copy.totalLabel} · {formatNumberForLanguage(totalFunds, language)} {copy.fundsLabel}
                 </p>
-                <p className="mt-1 truncate text-xs text-gray-400">{copy.currentUser}：{currentUserLabel}</p>
+                <p className="mt-1 truncate text-xs text-ink-300/80">{copy.currentUser}：{currentUserLabel}</p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ${kycStatusTone(currentSession?.kycStatus)}`}>
                     {kycStatusLabel(currentSession?.kycStatus, language)}
                   </span>
                   {currentSession?.kycLevel ? (
-                    <span className="rounded-full bg-gray-100 px-2.5 py-1 text-[11px] font-medium text-gray-600">
+                    <span className="rounded-full bg-cream-100 px-2.5 py-1 text-[11px] font-medium text-ink-700">
                       {copy.kycLevel}: {currentSession.kycLevel}
                     </span>
                   ) : null}
                 </div>
               </div>
-              <Link
-                to="/wallet"
-                className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700 shadow-sm transition hover:bg-emerald-100"
-              >
-                {copy.wallet}
-              </Link>
-              <Link
-                to="/kyc"
-                className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-700 shadow-sm transition hover:bg-amber-100"
-              >
-                {copy.kyc}
-              </Link>
-              <Link
-                to="/marketplace"
-                className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm font-medium text-violet-700 shadow-sm transition hover:bg-violet-100"
-              >
-                {copy.marketplace}
-              </Link>
+              {/* "Back to Master Team" is the persistent return
+                  path now that /masters (not /companies) is the
+                  default landing. We keep it as the first pill so
+                  super_admin sessions auditing data here have an
+                  always-visible exit. */}
+              <Link to="/masters"          className={sidePillInfo}>{copy.backToMasters}</Link>
+              <Link to="/wallet"           className={sidePillSage}>{copy.wallet}</Link>
+              <Link to="/kyc"              className={sidePillCoral}>{copy.kyc}</Link>
+              <Link to="/marketplace"       className={sidePillMint}>{copy.marketplace}</Link>
               {currentSession?.role === "super_admin" ? (
-                <Link
-                  to="/admin"
-                  className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-medium text-indigo-700 shadow-sm transition hover:bg-indigo-100"
-                >
-                  {copy.admin}
-                </Link>
+                <Link to="/admin"           className={sidePillInfo}>{copy.admin}</Link>
               ) : null}
-              <Link
-                to="/account/security"
-                className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
-              >
-                {copy.accountSecurity}
-              </Link>
+              <Link to="/account/security" className={sidePillInfo}>{copy.accountSecurity}</Link>
               <button
                 onClick={openCreateCompanyModal}
-                className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-700"
+                className="inline-flex h-11 items-center rounded-full bg-ink-900 px-5 text-sm font-semibold text-white shadow-pill-ink ring-1 ring-ink-700/40 transition hover:bg-ink-700"
               >
                 {copy.createCompany}
               </button>
               <button
                 onClick={() => void handleLogout()}
-                className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
+                className={sidePillInfo}
               >
                 {copy.logout}
               </button>
             </div>
           </div>
 
-          {loading ? <div className="rounded-lg border border-gray-200 bg-white p-6 text-sm text-gray-500">{copy.loading}</div> : null}
+          {loading ? (
+            <div className="rounded-envelope bg-cream-0 p-6 text-sm text-ink-300 shadow-envelope ring-1 ring-ink-100/60">
+              {copy.loading}
+            </div>
+          ) : null}
 
           {!loading && error ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-6 text-sm text-red-700">
+            <div className="rounded-envelope bg-risk-50 p-6 text-sm text-risk-500 ring-1 ring-risk-100">
               <p>{error}</p>
-              <button onClick={() => void loadData()} className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+              <button onClick={() => void loadData()} className="mt-4 rounded-full bg-risk-400 px-4 py-2 text-sm font-semibold text-white hover:bg-risk-500">
                 {copy.retry}
               </button>
             </div>
@@ -1243,29 +1244,29 @@ const Companies: React.FC = () => {
               {companies.map((company) => {
                 const primaryFund = company.funds[0] ?? null;
                 return (
-                  <div key={company.id} className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+                  <div key={company.id} className="rounded-envelope bg-cream-0 p-6 shadow-envelope ring-1 ring-ink-100/60 transition hover:shadow-envelope-hover dark:bg-slate-900 dark:ring-slate-700">
                     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                       <div>
-                        <h2 className="text-xl font-semibold text-gray-900">{company.name}</h2>
-                        <p className="mt-2 text-sm text-gray-500">{company.description?.trim() || copy.noDescription}</p>
+                        <h2 className="text-xl font-extrabold text-ink-900 dark:text-slate-100">{company.name}</h2>
+                        <p className="mt-2 text-sm text-ink-300 dark:text-slate-400">{company.description?.trim() || copy.noDescription}</p>
                       </div>
-                      <div className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+                      <div className="rounded-full bg-sage-100 px-3 py-1 text-xs font-semibold text-sage-700 dark:bg-sage-500/20 dark:text-sage-300">
                         {formatNumberForLanguage(company.funds.length, language)}{copy.fundCountSuffix}
                       </div>
                     </div>
 
                     {company.funds.length === 0 ? (
-                      <div className="mt-6 rounded-xl border border-dashed border-gray-200 bg-gray-50 p-5 text-sm text-gray-500">
+                      <div className="mt-6 rounded-2xl bg-cream-50 p-5 text-sm text-ink-300 ring-1 ring-dashed ring-ink-200">
                         <p>{copy.noFundText}</p>
                         <button
                           onClick={() => openCreateFundModal(company)}
-                          className="mt-4 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+                          className="mt-4 rounded-full bg-ink-900 px-4 py-2 text-sm font-semibold text-white shadow-pill-ink hover:bg-ink-700"
                         >
                           {copy.createFirstFund}
                         </button>
                         <button
                           onClick={() => setAssistTargetCompany(company)}
-                          className="mt-4 ml-2 rounded-lg border border-indigo-300 bg-white px-4 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-50"
+                          className="mt-4 ml-2 rounded-full bg-cream-0 px-4 py-2 text-sm font-semibold text-sage-700 ring-1 ring-sage-200 hover:bg-sage-50"
                         >
                           AI 辅助创建
                         </button>
@@ -1275,7 +1276,7 @@ const Companies: React.FC = () => {
                         {company.funds.map((fund) => (
                           <div
                             key={fund.id}
-                            className="group flex items-center justify-between rounded-xl border border-gray-200 px-4 py-4 transition-colors hover:border-indigo-300 hover:bg-indigo-50/40"
+                            className="group flex items-center justify-between rounded-2xl bg-cream-50/70 px-4 py-4 ring-1 ring-ink-100/60 transition-colors hover:bg-sage-50 hover:ring-sage-200 dark:bg-slate-800/60 dark:ring-slate-700"
                           >
                             <Link to={`/funds/${fund.id}`} className="flex min-w-0 flex-1 items-center pr-4">
                               <div className="min-w-0">
@@ -1308,26 +1309,36 @@ const Companies: React.FC = () => {
 
                     {primaryFund ? (
                       <div className="mt-6 flex flex-wrap gap-3">
-                        <Link to={`/funds/${primaryFund.id}`} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
+                        <Link
+                          to={`/funds/${primaryFund.id}`}
+                          className="inline-flex items-center gap-2 rounded-full bg-ink-900 px-5 py-2 text-sm font-semibold text-white shadow-pill-ink transition hover:bg-ink-700"
+                        >
                           {copy.openPrimaryFund}
+                          <span aria-hidden="true">→</span>
                         </Link>
-                        <Link to={`/funds/${primaryFund.id}/decisions`} className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+                        <Link
+                          to={`/funds/${primaryFund.id}/decisions`}
+                          className="rounded-full bg-cream-0 px-4 py-2 text-sm font-semibold text-ink-700 ring-1 ring-ink-100 hover:bg-cream-50"
+                        >
                           {copy.viewDecisions}
                         </Link>
-                        <Link to={`/funds/${primaryFund.id}/subscription`} className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+                        <Link
+                          to={`/funds/${primaryFund.id}/subscription`}
+                          className="rounded-full bg-cream-0 px-4 py-2 text-sm font-semibold text-ink-700 ring-1 ring-ink-100 hover:bg-cream-50"
+                        >
                           {copy.viewSubscription}
                         </Link>
                         <button
                           type="button"
                           onClick={() => openCreateFundModal(company)}
-                          className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
+                          className="rounded-full bg-sage-50 px-4 py-2 text-sm font-semibold text-sage-700 ring-1 ring-sage-200 transition hover:bg-sage-100"
                         >
                           + {copy.addFund}
                         </button>
                         <button
                           type="button"
                           onClick={() => setAssistTargetCompany(company)}
-                          className="ml-2 rounded-lg border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
+                          className="rounded-full bg-coral-50 px-4 py-2 text-sm font-semibold text-coral-500 ring-1 ring-coral-200 transition hover:bg-coral-100"
                         >
                           AI 辅助创建
                         </button>

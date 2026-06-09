@@ -569,7 +569,7 @@ const AccountSecurity: React.FC = () => {
         </section>
 
         <div className="mt-8 text-center text-xs text-slate-400">
-          <Link to="/companies" className="transition hover:text-white">
+          <Link to="/masters" className="transition hover:text-white">
             {copy.actions.backHome}
           </Link>
         </div>

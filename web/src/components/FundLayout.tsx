@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "reac
 import { ApiError, apiGet, formatApiError, getStoredSession, logoutSession } from "../lib/api";
 import { formatMoneyForDisplay, formatNumberForLanguage, useAppPreferences } from "../lib/preferences";
 import { AutoExecuteHeaderBadge, type AutoExecuteConfig } from "./AutoExecuteControls";
+import { useFeatureFlag } from "../lib/featureFlags";
 
 interface NavItem {
   key: string;
@@ -308,29 +309,55 @@ const FundLayout: React.FC = () => {
     [language],
   );
 
+  // Feature-flag gates for sidebar nav items. Each section that
+  // can be paused at runtime by an admin is reduced to a flag here;
+  // when off the corresponding row drops out of the rendered list
+  // (and the route is still reachable, but the SPA prefers a clear
+  // "not in nav" hint over rendering a paused page). Keep keys in
+  // sync with the seed list in migration 097.
+  const abCompareEnabled = useFeatureFlag("ab_test_compare");
+  const lineageEnabled = useFeatureFlag("agent_lineage");
+  // fund_team defaults OFF when the flag is missing from /api/feature-flags —
+  // the feature is paused for redesign and an unseeded environment should
+  // get the safer hidden state, not the default-true behaviour the hook
+  // applies to known flags. Admins flip via the feature_flags admin panel.
+  const fundTeamEnabled = useFeatureFlag("fund_team", false);
   const fundSections: FundSection[] = useMemo(
-    () => [
-      { key: "", label: copy.navLabels[""], icon: icons.chart },
-      { key: "performance", label: copy.navLabels.performance, icon: icons.chart },
-      { key: "team", label: copy.navLabels.team, icon: icons.people },
-      { key: "decisions", label: copy.navLabels.decisions, icon: icons.clipboard },
-      { key: "compare", label: copy.navLabels.compare, icon: icons.split },
-      { key: "forward-gate", label: copy.navLabels["forward-gate"], icon: icons.chart },
-      { key: "backtests", label: copy.navLabels.backtests, icon: icons.chart },
-      { key: "promotions", label: copy.navLabels.promotions, icon: icons.chart },
-      { key: "learning", label: copy.navLabels.learning, icon: icons.brain },
-      { key: "lineage", label: copy.navLabels.lineage, icon: icons.split },
-      { key: "memory", label: copy.navLabels.memory, icon: icons.brain },
-      { key: "trades", label: copy.navLabels.trades, icon: icons.list },
-      { key: "cash-ledger", label: copy.navLabels["cash-ledger"], icon: icons.list },
-      { key: "workflow", label: copy.navLabels.workflow, icon: icons.clipboard },
-      { key: "subscription", label: copy.navLabels.subscription, icon: icons.clipboard },
-      { key: "models", label: copy.navLabels.models, icon: icons.brain },
-      { key: "usage", label: copy.navLabels.usage, icon: icons.list },
-      { key: "audit", label: copy.navLabels.audit, icon: icons.clipboard },
-      { key: "settings", label: copy.navLabels.settings, icon: icons.gear },
-    ],
-    [copy],
+    () => {
+      const base: FundSection[] = [
+        { key: "", label: copy.navLabels[""], icon: icons.chart },
+        { key: "performance", label: copy.navLabels.performance, icon: icons.chart },
+      ];
+      if (fundTeamEnabled) {
+        base.push({ key: "team", label: copy.navLabels.team, icon: icons.people });
+      }
+      base.push({ key: "decisions", label: copy.navLabels.decisions, icon: icons.clipboard });
+      if (abCompareEnabled) {
+        base.push({ key: "compare", label: copy.navLabels.compare, icon: icons.split });
+      }
+      base.push(
+        { key: "forward-gate", label: copy.navLabels["forward-gate"], icon: icons.chart },
+        { key: "backtests", label: copy.navLabels.backtests, icon: icons.chart },
+        { key: "promotions", label: copy.navLabels.promotions, icon: icons.chart },
+        { key: "learning", label: copy.navLabels.learning, icon: icons.brain },
+      );
+      if (lineageEnabled) {
+        base.push({ key: "lineage", label: copy.navLabels.lineage, icon: icons.split });
+      }
+      base.push(
+        { key: "memory", label: copy.navLabels.memory, icon: icons.brain },
+        { key: "trades", label: copy.navLabels.trades, icon: icons.list },
+        { key: "cash-ledger", label: copy.navLabels["cash-ledger"], icon: icons.list },
+        { key: "workflow", label: copy.navLabels.workflow, icon: icons.clipboard },
+        { key: "subscription", label: copy.navLabels.subscription, icon: icons.clipboard },
+        { key: "models", label: copy.navLabels.models, icon: icons.brain },
+        { key: "usage", label: copy.navLabels.usage, icon: icons.list },
+        { key: "audit", label: copy.navLabels.audit, icon: icons.clipboard },
+        { key: "settings", label: copy.navLabels.settings, icon: icons.gear },
+      );
+      return base;
+    },
+    [copy, abCompareEnabled, lineageEnabled, fundTeamEnabled],
   );
 
   const pageLabels = useMemo(
@@ -412,15 +439,19 @@ const FundLayout: React.FC = () => {
 
   const sidebarContent = (
     <div className="flex h-full flex-col">
-      <div className="border-b border-gray-700 px-4 py-5">
+      <div className="border-b border-ink-100/80 px-4 py-5 dark:border-slate-700">
         <div className="flex items-center justify-between">
           {!collapsed && (
             <div className="min-w-0">
-              <h2 className="truncate text-sm font-semibold text-white">{fundName}</h2>
+              <h2 className="truncate text-sm font-extrabold text-ink-900 dark:text-slate-100">
+                {fundName}
+              </h2>
               {fund ? (
                 <span
-                  className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
-                    fund.tradingMode === "live" ? "bg-green-600/20 text-green-400" : "bg-indigo-600/20 text-indigo-400"
+                  className={`mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                    fund.tradingMode === "live"
+                      ? "bg-risk-100 text-risk-500 dark:bg-risk-500/20 dark:text-risk-200"
+                      : "bg-sage-100 text-sage-700 dark:bg-sage-500/20 dark:text-sage-300"
                   }`}
                 >
                   {fund.tradingMode === "live" ? copy.live : copy.simulation}
@@ -430,7 +461,7 @@ const FundLayout: React.FC = () => {
           )}
           <button
             onClick={() => setCollapsed((prev) => !prev)}
-            className="hidden items-center justify-center rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-700 hover:text-white lg:flex"
+            className="hidden items-center justify-center rounded-full p-1 text-ink-300 transition-colors hover:bg-cream-50 hover:text-ink-900 lg:flex dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-white"
             aria-label={collapsed ? copy.expandSidebar : copy.collapseSidebar}
           >
             {collapsed ? icons.chevronRight : icons.chevronLeft}
@@ -446,8 +477,10 @@ const FundLayout: React.FC = () => {
             end={item.to === basePath}
             onClick={() => setMobileOpen(false)}
             className={({ isActive }) =>
-              `flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
-                isActive ? "bg-indigo-600 text-white" : "text-gray-300 hover:bg-gray-700 hover:text-white"
+              `flex items-center gap-3 rounded-full px-3 py-2 text-sm font-semibold transition-colors ${
+                isActive
+                  ? "bg-ink-900 text-white shadow-pill-ink dark:bg-indigo-600"
+                  : "text-ink-300 hover:bg-cream-50 hover:text-ink-900 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-white"
               } ${collapsed ? "justify-center" : ""}`
             }
           >
@@ -457,10 +490,10 @@ const FundLayout: React.FC = () => {
         ))}
       </nav>
 
-      <div className="border-t border-gray-700 px-4 py-3">
+      <div className="border-t border-ink-100/80 px-4 py-3 dark:border-slate-700">
         <Link
           to="/companies"
-          className={`flex items-center gap-2 text-xs text-gray-400 transition-colors hover:text-white ${collapsed ? "justify-center" : ""}`}
+          className={`flex items-center gap-2 text-xs text-ink-300 transition-colors hover:text-ink-900 dark:text-slate-400 dark:hover:text-white ${collapsed ? "justify-center" : ""}`}
           onClick={() => setMobileOpen(false)}
         >
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
@@ -473,11 +506,11 @@ const FundLayout: React.FC = () => {
   );
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-50">
-      {mobileOpen ? <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setMobileOpen(false)} /> : null}
+    <div className="flex h-screen overflow-hidden">
+      {mobileOpen ? <div className="fixed inset-0 z-30 bg-black/40 lg:hidden" onClick={() => setMobileOpen(false)} /> : null}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex-shrink-0 bg-gray-900 transition-transform duration-200 lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex-shrink-0 border-r border-ink-100/80 bg-cream-0 transition-transform duration-200 lg:static lg:translate-x-0 dark:border-slate-700 dark:bg-slate-900 ${
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         } ${collapsed ? "w-16" : "w-60"}`}
       >
@@ -485,74 +518,74 @@ const FundLayout: React.FC = () => {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 shadow-sm">
+        <header className="flex items-center justify-between border-b border-ink-100/80 bg-cream-0/90 px-4 py-3 shadow-pill backdrop-blur dark:border-slate-700 dark:bg-slate-900">
           <div className="flex min-w-0 items-center gap-3">
             <button
               onClick={() => setMobileOpen(true)}
-              className="flex items-center justify-center rounded-md p-1.5 text-gray-500 hover:bg-gray-100 lg:hidden"
+              className="flex items-center justify-center rounded-full p-1.5 text-ink-300 hover:bg-cream-50 hover:text-ink-900 lg:hidden dark:text-slate-400 dark:hover:bg-slate-700"
               aria-label={copy.openSidebar}
             >
               {icons.menu}
             </button>
 
-            <nav className="hidden min-w-0 items-center text-sm text-gray-500 sm:flex">
-              <Link to="/companies" className="truncate hover:text-indigo-600">
+            <nav className="hidden min-w-0 items-center text-sm text-ink-300 sm:flex">
+              <Link to="/companies" className="truncate hover:text-sage-700">
                 {company}
               </Link>
-              <span className="mx-1.5 text-gray-300">/</span>
-              <Link to={basePath} className="truncate hover:text-indigo-600">
+              <span className="mx-1.5 text-ink-200">/</span>
+              <Link to={basePath} className="truncate hover:text-sage-700">
                 {fundName}
               </Link>
-              <span className="mx-1.5 text-gray-300">/</span>
-              <span className="truncate font-medium text-gray-800">{pageLabel}</span>
+              <span className="mx-1.5 text-ink-200">/</span>
+              <span className="truncate font-semibold text-ink-900 dark:text-slate-100">{pageLabel}</span>
             </nav>
 
-            <span className="truncate text-sm font-medium text-gray-800 sm:hidden">{pageLabel}</span>
+            <span className="truncate text-sm font-semibold text-ink-900 dark:text-slate-100 sm:hidden">{pageLabel}</span>
           </div>
 
           <div className="flex items-center gap-4">
             {fund ? (
               <div className="hidden items-center gap-4 text-xs md:flex">
                 <div className="text-right">
-                  <span className="block tracking-wide text-gray-400">{copy.unitNav}</span>
-                  <span className="font-semibold text-gray-800">
+                  <span className="block tracking-wide text-ink-300">{copy.unitNav}</span>
+                  <span className="font-bold text-ink-900 dark:text-slate-100">
                     {formatNumberForLanguage(fund.nav, language, { minimumFractionDigits: 4, maximumFractionDigits: 4 })}
                   </span>
                 </div>
                 <div className="text-right">
-                  <span className="block tracking-wide text-gray-400">{copy.totalAssets}</span>
-                  <span className="font-semibold text-gray-800">
+                  <span className="block tracking-wide text-ink-300">{copy.totalAssets}</span>
+                  <span className="font-bold text-ink-900 dark:text-slate-100">
                     {formatMoneyForDisplay(fund.totalAssets, fund.baseCurrency, displayCurrency, language)}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`h-2 w-2 rounded-full ${statusColors[workflow?.state ?? "idle"] ?? statusColors.idle}`} />
-                  <span className="text-gray-600">{workflowStateLabel(workflow?.state, copy.workflowStates, copy.workflowIdle)}</span>
-                  <span className="text-gray-300">·</span>
-                  <span className="text-gray-500">{workflowStepLabel(workflow?.step, copy.workflowSteps, copy.workflowNotStarted)}</span>
+                  <span className="text-ink-700 dark:text-slate-300">{workflowStateLabel(workflow?.state, copy.workflowStates, copy.workflowIdle)}</span>
+                  <span className="text-ink-200">·</span>
+                  <span className="text-ink-300 dark:text-slate-400">{workflowStepLabel(workflow?.step, copy.workflowSteps, copy.workflowNotStarted)}</span>
                 </div>
                 <AutoExecuteHeaderBadge fund={fund} onUpdated={(updated) => setFund((prev) => (prev ? { ...prev, ...updated } : prev))} />
               </div>
             ) : null}
 
-            <div className="hidden h-6 w-px bg-gray-200 md:block" />
+            <div className="hidden h-6 w-px bg-ink-100 md:block" />
 
             <div className="flex items-center gap-3">
               <div className="hidden text-right md:block">
-                <p className="text-[11px] uppercase tracking-wide text-gray-400">{copy.currentUser}</p>
-                <p className="max-w-[180px] truncate text-xs font-medium text-gray-700">{currentUserLabel}</p>
+                <p className="text-[11px] uppercase tracking-wide text-ink-300">{copy.currentUser}</p>
+                <p className="max-w-[180px] truncate text-xs font-medium text-ink-700 dark:text-slate-300">{currentUserLabel}</p>
               </div>
               <Link
                 to="/account/security"
                 title={copy.accountSecurity}
                 aria-label={copy.accountSecurity}
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-600 transition-all hover:ring-2 hover:ring-indigo-300"
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-sage-100 text-xs font-bold text-sage-700 transition-all hover:ring-2 hover:ring-sage-300 dark:bg-indigo-500/30 dark:text-indigo-300"
               >
                 {currentUserInitial}
               </Link>
               <button
                 onClick={() => void handleLogout()}
-                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-600 transition hover:bg-gray-50 hover:text-gray-900"
+                className="rounded-full bg-cream-50 px-3 py-2 text-xs font-semibold text-ink-700 ring-1 ring-ink-100 transition hover:bg-cream-100 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700"
               >
                 {copy.logout}
               </button>
@@ -562,13 +595,15 @@ const FundLayout: React.FC = () => {
 
         <main className="flex-1 overflow-y-auto p-6">
           {loading ? (
-            <div className="rounded-lg border border-gray-200 bg-white p-6 text-sm text-gray-500">{copy.loadingFundInfo}</div>
+            <div className="rounded-envelope bg-cream-0 p-6 text-sm text-ink-300 shadow-envelope ring-1 ring-ink-100/60 dark:bg-slate-900 dark:text-slate-400 dark:ring-slate-700">
+              {copy.loadingFundInfo}
+            </div>
           ) : error ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-6 text-sm text-red-700">
+            <div className="rounded-envelope bg-risk-50 p-6 text-sm text-risk-500 ring-1 ring-risk-100">
               <p>{error}</p>
               <button
                 onClick={() => setReloadKey((value) => value + 1)}
-                className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700"
+                className="mt-4 rounded-full bg-risk-400 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-risk-500"
               >
                 {copy.retry}
               </button>
