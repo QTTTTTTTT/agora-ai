@@ -6,6 +6,7 @@ import {
   formatApiError,
 } from "../lib/api";
 import { AppLanguage, formatDateTimeForLanguage, useAppPreferences } from "../lib/preferences";
+import Pagination from "./Pagination";
 
 interface TeamActivityPanelProps {
   fundId: string;
@@ -33,6 +34,8 @@ interface PanelCopy {
   loading: string;
   noMore: string;
   loadMoreError: string;
+  newEventsHint: (count: number) => string;
+  jumpToLatest: string;
   roleLabels: Record<string, string>;
 }
 
@@ -55,6 +58,8 @@ const copyByLanguage: Record<AppLanguage, PanelCopy> = {
     loading: "加载中…",
     noMore: "已经是最早的活动了",
     loadMoreError: "加载更早活动失败，请稍后重试。",
+    newEventsHint: (count) => `${count} 条新事件，点击回到最新`,
+    jumpToLatest: "回到最新",
     roleLabels: {
       pm: "组合经理",
       researcher: "研究员",
@@ -83,6 +88,8 @@ const copyByLanguage: Record<AppLanguage, PanelCopy> = {
     loading: "Loading…",
     noMore: "No earlier events",
     loadMoreError: "Failed to load earlier activity. Please retry.",
+    newEventsHint: (count) => `${count} new event${count === 1 ? "" : "s"} — jump to latest`,
+    jumpToLatest: "Jump to latest",
     roleLabels: {
       pm: "Portfolio Manager",
       researcher: "Researcher",
@@ -132,14 +139,36 @@ const TeamActivityPanel: React.FC<TeamActivityPanelProps> = ({ fundId, maxItems 
   const [reloadKey, setReloadKey] = useState(0);
 
   // Pagination state for the "load earlier" path. `loadingMore` gates
-  // the button so a fast double-click does not stack requests; `noMore`
-  // is set when the server returns an empty page (we've reached the
-  // start of the retention window). `loadMoreError` is rendered inline
-  // below the button so a transient failure doesn't tear down the
-  // whole panel.
+  // the network call so a fast double-click does not stack requests;
+  // `noMore` is set when the server returns an empty page (we've
+  // reached the start of the retention window). `loadMoreError` is
+  // rendered inline below the timeline so a transient failure doesn't
+  // tear down the whole panel.
   const [loadingMore, setLoadingMore] = useState(false);
   const [noMore, setNoMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+
+  // Pure client-side pagination over the in-memory buffer. Page 0 is
+  // "newest 10 events" — that's the steady state for someone watching
+  // a workflow live. When the user advances past the last buffered
+  // page we automatically fall back to the server's REST cursor so
+  // pages 2+ still resolve smoothly even though `items` started small.
+  const PAGE_SIZE = 10;
+  const [page, setPage] = useState(0);
+  // newEventsBuffered counts SSE arrivals while the user is on a
+  // historical page. We refuse to silently bump them back to page 0
+  // mid-read, but we surface the count so they can choose to jump.
+  const [newEventsBuffered, setNewEventsBuffered] = useState(0);
+  // Mirror `page` into a ref so the SSE handler can read the latest
+  // value without re-binding the EventSource every time the operator
+  // pages forward or backward. Without this, paginating tears down
+  // and reopens the stream — which is both wasteful and would cause
+  // the live "live" badge to flicker through "connecting" for ~1s
+  // on every page click.
+  const pageRef = useRef(0);
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
 
   // sessionCountRef accumulates how many live events we've shown this session
   // (since mount or last reload). We track it via a ref so the SSE handler
@@ -226,30 +255,34 @@ const TeamActivityPanel: React.FC<TeamActivityPanelProps> = ({ fundId, maxItems 
 
   // loadMore fetches the next historical page. Uses the oldest visible
   // event's timestamp as the cursor so the server returns events
-  // strictly older than what's already on screen.
-  const loadMore = useCallback(() => {
+  // strictly older than what's already on screen. We expose the
+  // returned promise so the pagination effect can chain "advance to
+  // the next page once the new rows are merged".
+  const loadMore = useCallback((): Promise<{ added: number }> => {
     if (!fundId || loadingMore || noMore) {
-      return;
+      return Promise.resolve({ added: 0 });
     }
     const oldest = items[items.length - 1];
     if (!oldest || !oldest.timestamp) {
       // Without any events on screen there's nothing to anchor the
       // cursor against; fall back to a plain refresh.
       setReloadKey((k) => k + 1);
-      return;
+      return Promise.resolve({ added: 0 });
     }
     setLoadingMore(true);
     setLoadMoreError(null);
-    fetchTeamActivity(fundId, { before: oldest.timestamp, limit: 50 })
+    return fetchTeamActivity(fundId, { before: oldest.timestamp, limit: 50 })
       .then((resp) => {
         if (!resp.items || resp.items.length === 0) {
           setNoMore(true);
-          return;
+          return { added: 0 };
         }
         ingest(resp.items, { append: true });
+        return { added: resp.items.length };
       })
       .catch((err) => {
         setLoadMoreError(formatApiError(err, copy.loadMoreError));
+        return { added: 0 };
       })
       .finally(() => {
         setLoadingMore(false);
@@ -305,6 +338,13 @@ const TeamActivityPanel: React.FC<TeamActivityPanelProps> = ({ fundId, maxItems 
           ingest([parsed]);
           sessionCountRef.current += 1;
           setSessionCount(sessionCountRef.current);
+          // If the operator is on a historical page, queue the
+          // arrival count instead of yanking them back to page 0.
+          // The badge in the header lets them opt in. We read
+          // the page from the ref so this effect doesn't have to
+          // depend on `page` (which would reopen the stream on
+          // every pagination click).
+          setNewEventsBuffered((prev) => (pageRef.current > 0 ? prev + 1 : prev));
         } catch {
           // Drop malformed payloads silently; the server's contract is JSON.
         }
@@ -333,6 +373,65 @@ const TeamActivityPanel: React.FC<TeamActivityPanelProps> = ({ fundId, maxItems 
       setStreamState("offline");
     };
   }, [fundId, ingest, maxItems, reloadKey]);
+
+  // Compute which slice of items to render for the current page.
+  // We re-derive instead of caching so pagination stays in lockstep
+  // with the live SSE buffer (new arrivals at index 0 just push
+  // older items toward subsequent pages — we never have to "rebalance").
+  const totalItems = items.length;
+  const pageCount = totalItems === 0 ? 0 : Math.ceil(totalItems / PAGE_SIZE);
+  const safePage = pageCount === 0 ? 0 : Math.min(page, pageCount - 1);
+  const visibleItems = useMemo(() => {
+    if (totalItems === 0) return [] as TeamActivityItem[];
+    const start = safePage * PAGE_SIZE;
+    return items.slice(start, start + PAGE_SIZE);
+  }, [items, safePage, totalItems]);
+
+  // Auto-clamp & auto-fetch: when the user clicks "next" and they're
+  // already on the last buffered page, we transparently fetch the
+  // next history page from the server before letting them advance.
+  // This keeps pagination feeling like a single uniform list even
+  // though the buffer grows on demand.
+  const handlePageChange = useCallback(
+    (next: number) => {
+      const upperBound = pageCount - 1;
+      // Going back is always safe and instantaneous.
+      if (next <= safePage) {
+        setPage(Math.max(0, next));
+        if (next === 0) {
+          setNewEventsBuffered(0);
+        }
+        return;
+      }
+      // Going forward but still within the current buffer — straight slice.
+      if (next <= upperBound) {
+        setPage(next);
+        return;
+      }
+      // Forward past the buffer's end: pull the next history page
+      // from the server first, then advance once it lands. We only
+      // attempt this when noMore is false; otherwise we clamp at the
+      // last buffered page so the "Next" button effectively becomes
+      // a no-op on truly exhausted streams.
+      if (noMore) {
+        setPage(upperBound);
+        return;
+      }
+      void loadMore().then((res) => {
+        if (res.added > 0) {
+          setPage(next);
+        } else {
+          setPage(upperBound);
+        }
+      });
+    },
+    [pageCount, safePage, noMore, loadMore],
+  );
+
+  const handleJumpToLatest = useCallback(() => {
+    setPage(0);
+    setNewEventsBuffered(0);
+  }, []);
 
   const statusBadge = useMemo(() => {
     const palette: Record<StreamState, { bg: string; text: string; dot: string }> = {
@@ -386,8 +485,18 @@ const TeamActivityPanel: React.FC<TeamActivityPanelProps> = ({ fundId, maxItems 
           <div className="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center text-sm text-gray-500">{copy.empty}</div>
         ) : (
           <>
+            {newEventsBuffered > 0 && safePage > 0 ? (
+              <button
+                type="button"
+                onClick={handleJumpToLatest}
+                className="mb-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100"
+              >
+                <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+                {copy.newEventsHint(newEventsBuffered)}
+              </button>
+            ) : null}
             <ol className="relative ml-3 space-y-3 border-l border-gray-200 pl-5">
-              {items.map((item) => {
+              {visibleItems.map((item) => {
                 const palette = roleColorMap[item.role] ?? roleColorMap.system;
                 const roleLabel = copy.roleLabels[item.role] ?? item.role;
                 return (
@@ -407,20 +516,24 @@ const TeamActivityPanel: React.FC<TeamActivityPanelProps> = ({ fundId, maxItems 
                 );
               })}
             </ol>
-            <div className="mt-4 flex flex-col items-center gap-1">
-              {noMore ? (
-                <span className="text-xs text-gray-400">{copy.noMore}</span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={loadMore}
-                  disabled={loadingMore}
-                  className="rounded-md border border-gray-200 bg-white px-4 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {loadingMore ? copy.loading : copy.loadMore}
-                </button>
-              )}
-              {loadMoreError ? <span className="text-xs text-rose-600">{loadMoreError}</span> : null}
+            <div className="mt-4 space-y-2">
+              <Pagination
+                page={safePage}
+                pageCount={pageCount}
+                pageSize={PAGE_SIZE}
+                totalItems={totalItems}
+                language={language}
+                onPageChange={handlePageChange}
+                align="between"
+              />
+              <div className="flex items-center justify-end gap-2 text-xs">
+                {loadingMore ? (
+                  <span className="text-gray-400">{copy.loading}</span>
+                ) : noMore ? (
+                  <span className="text-gray-400">{copy.noMore}</span>
+                ) : null}
+                {loadMoreError ? <span className="text-rose-600">{loadMoreError}</span> : null}
+              </div>
             </div>
           </>
         )}

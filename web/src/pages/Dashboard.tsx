@@ -38,11 +38,14 @@ import {
   formatMoneyForDisplay,
   formatNumberForLanguage,
   useAppPreferences,
+  type AppLanguage,
+  type DisplayCurrency,
 } from "../lib/preferences";
 import { CorpActionTimeline } from "../components/CorpActionTimeline";
 import { BenchmarkChart } from "../components/BenchmarkChart";
 import { HoldingsTrendsGrid } from "../components/HoldingsTrendsGrid";
 import { SkeletonCard } from "../components/Skeleton";
+import Pagination, { usePaginatedSlice } from "../components/Pagination";
 import { useSWRFetch } from "../lib/useSWRFetch";
 
 interface FundUniverse {
@@ -467,7 +470,14 @@ function buildDashboardData(
     };
   });
 
-  const tradeViews: TradeView[] = trades.slice(0, 10).map((trade) => ({
+  // Surface up to 100 most recent trades to feed client-side
+  // pagination. The server already orders by executedAt DESC and
+  // limits the dashboard payload to a reasonable cap, so taking
+  // 100 is safe even for very active funds. We previously sliced
+  // to 10 hard, which made the panel feel like a "tip of the
+  // iceberg" view; pagination now lets the operator walk through
+  // the recent trade history without leaving the dashboard.
+  const tradeViews: TradeView[] = trades.slice(0, 100).map((trade) => ({
     id: trade.id,
     time: trade.executedAt ?? trade.createdAt,
     symbol: trade.symbol,
@@ -1575,17 +1585,72 @@ export default function Dashboard() {
         {fundId ? <CorpActionTimeline fundId={fundId} language={language} /> : null}
       </div>
 
-      <div className="mt-6 overflow-x-auto rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-500">{copy.titles.trades}</h2>
-        {data.recentTrades.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-sm text-gray-500">
-            <p className="font-medium text-gray-700">{copy.emptyStates.noTrades.title}</p>
-            <p className="mt-1">{copy.emptyStates.noTrades.description}</p>
-            <Link to="decisions" className="mt-4 inline-flex rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
-              {copy.emptyStates.noTrades.actionLabel}
-            </Link>
-          </div>
-        ) : (
+      <RecentTradesTable
+        trades={data.recentTrades}
+        language={language}
+        displayCurrency={displayCurrency}
+        copy={copy}
+        instrumentMeta={instrumentMeta}
+        humanizeValue={humanizeValue}
+        formatQuantity={formatQuantity}
+        tradeActionLabel={tradeActionLabel}
+        tradeStatusBadge={tradeStatusBadge}
+        tradeStatusLabel={tradeStatusLabel}
+        positionSideLabel={positionSideLabel}
+        openCloseLabel={openCloseLabel}
+      />
+    </div>
+  );
+}
+
+interface RecentTradesTableProps {
+  trades: TradeView[];
+  language: AppLanguage;
+  displayCurrency: DisplayCurrency;
+  copy: DashboardCopy;
+  instrumentMeta: (
+    market: string | undefined,
+    exchange: string | undefined,
+    assetClass: string | undefined,
+  ) => string[];
+  humanizeValue: (value?: string, emptyLabel?: string) => string;
+  formatQuantity: (value: number) => string;
+  tradeActionLabel: (value: TradeView["action"]) => string;
+  tradeStatusBadge: (status: TradeView["status"]) => string;
+  tradeStatusLabel: (value: TradeView["status"]) => string;
+  positionSideLabel: (side: string) => string;
+  openCloseLabel: (oc: string) => string;
+}
+
+function RecentTradesTable({
+  trades,
+  language,
+  displayCurrency,
+  copy,
+  instrumentMeta,
+  humanizeValue,
+  formatQuantity,
+  tradeActionLabel,
+  tradeStatusBadge,
+  tradeStatusLabel,
+  positionSideLabel,
+  openCloseLabel,
+}: RecentTradesTableProps) {
+  const { fundId } = useParams<{ fundId: string }>();
+  const pagination = usePaginatedSlice(trades, 10);
+  return (
+    <div className="mt-6 overflow-x-auto rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-500">{copy.titles.trades}</h2>
+      {trades.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-sm text-gray-500">
+          <p className="font-medium text-gray-700">{copy.emptyStates.noTrades.title}</p>
+          <p className="mt-1">{copy.emptyStates.noTrades.description}</p>
+          <Link to={`/funds/${fundId}/decisions`} className="mt-4 inline-flex rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700">
+            {copy.emptyStates.noTrades.actionLabel}
+          </Link>
+        </div>
+      ) : (
+        <>
           <table className="w-full min-w-[980px] text-sm">
             <thead>
               <tr className="border-b border-gray-100 text-left text-xs font-medium uppercase tracking-wider text-gray-400">
@@ -1599,7 +1664,7 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {data.recentTrades.map((trade) => (
+              {pagination.slice.map((trade) => (
                 <tr key={trade.id} className="border-b border-gray-50 transition-colors last:border-0 hover:bg-gray-50/60">
                   <td className="whitespace-nowrap py-2 pr-4 text-xs text-gray-500">{formatDateTimeForLanguage(trade.time, language)}</td>
                   <td className="py-2 pr-4">
@@ -1638,8 +1703,21 @@ export default function Dashboard() {
               ))}
             </tbody>
           </table>
-        )}
-      </div>
+          {pagination.pageCount > 1 ? (
+            <div className="mt-4 border-t border-gray-100 pt-3">
+              <Pagination
+                page={pagination.page}
+                pageCount={pagination.pageCount}
+                pageSize={pagination.pageSize}
+                totalItems={pagination.totalItems}
+                language={language}
+                onPageChange={pagination.setPage}
+                align="between"
+              />
+            </div>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }

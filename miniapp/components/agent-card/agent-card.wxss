@@ -1,25 +1,36 @@
+/* Agent card — cream / sage / ink refresh.
+   The card mirrors the "lifted paper" look used by web's
+   EnvelopeCard and Android's ThemedCard: 24rpx radius, soft
+   drop shadow, hairline border, and a colored mascot circle
+   that picks its background from the agent's role.
+   ----------------------------------------------------------
+   The role / status emoji + colors come from utils/util.js
+   so we only change presentation, not behaviour. */
+
 .agent-card {
   display: flex;
   align-items: center;
   background: #ffffff;
-  border-radius: 16rpx;
-  padding: 24rpx;
-  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.06);
-  gap: 20rpx;
-  transition: background-color 0.2s;
+  border-radius: 28rpx;
+  padding: 28rpx;
+  box-shadow: 0 4rpx 20rpx rgba(28, 28, 24, 0.06);
+  border: 1rpx solid rgba(229, 227, 221, 0.6);
+  gap: 24rpx;
+  transition: background-color 0.2s, box-shadow 0.2s;
 }
 
 .agent-card-hover {
-  background-color: #f5f5f5;
+  background-color: #faf7f1;
+  box-shadow: 0 6rpx 26rpx rgba(28, 28, 24, 0.10);
 }
 
 /* 头像 */
 .agent-avatar {
   position: relative;
-  width: 88rpx;
-  height: 88rpx;
-  background: #f0f5ff;
-  border-radius: 50%;
+  width: 104rpx;
+  height: 104rpx;
+  background: #f0ebe0;
+  border-radius: 26rpx;       /* squarer pixel-art frame */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -27,17 +38,19 @@
 }
 
 .avatar-emoji {
-  font-size: 40rpx;
+  font-size: 56rpx;
+  line-height: 1;
 }
 
 .status-dot {
   position: absolute;
-  bottom: 2rpx;
-  right: 2rpx;
-  width: 18rpx;
-  height: 18rpx;
+  bottom: -2rpx;
+  right: -2rpx;
+  width: 20rpx;
+  height: 20rpx;
   border-radius: 50%;
-  border: 3rpx solid #ffffff;
+  border: 4rpx solid #ffffff;
+  box-shadow: 0 1rpx 3rpx rgba(28, 28, 24, 0.18);
 }
 
 /* 信息区域 */
@@ -57,8 +70,8 @@
 
 .agent-name {
   font-size: 30rpx;
-  font-weight: 600;
-  color: #262626;
+  font-weight: 700;
+  color: #1f1d18;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -67,11 +80,12 @@
 .role-badge {
   display: inline-block;
   font-size: 20rpx;
-  color: #1890ff;
-  background: #e6f7ff;
-  border: 1rpx solid #91d5ff;
-  border-radius: 6rpx;
-  padding: 2rpx 12rpx;
+  color: #0f6a3f;             /* sage-700 text */
+  background: #dcebd6;        /* sage-100 fill */
+  border: none;
+  border-radius: 999rpx;
+  padding: 4rpx 16rpx;
+  font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -81,22 +95,22 @@
   align-items: center;
   gap: 8rpx;
   font-size: 24rpx;
-  color: #8c8c8c;
+  color: #7a766c;
 }
 
 .agent-divider {
-  color: #d9d9d9;
+  color: #c5c1b6;
 }
 
 .agent-model {
   font-family: monospace;
   font-size: 22rpx;
-  color: #8c8c8c;
+  color: #7a766c;
 }
 
 .agent-style {
   font-size: 22rpx;
-  color: #8c8c8c;
+  color: #7a766c;
 }
 
 .agent-status-row {
@@ -113,7 +127,7 @@
 
 .status-text {
   font-size: 22rpx;
-  color: #8c8c8c;
+  color: #7a766c;
 }
 
 /* 箭头 */
@@ -126,6 +140,6 @@
 
 .arrow-icon {
   font-size: 36rpx;
-  color: #d9d9d9;
+  color: #c5c1b6;
   font-weight: 300;
 }

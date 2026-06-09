@@ -4,8 +4,8 @@
   <!-- ===== 1. 团队概览头部 ===== -->
   <view class="team-overview">
     <view class="overview-top">
-      <text class="overview-title">团队成员</text>
-      <text class="overview-count">{{teamCount}} 人</text>
+      <text class="overview-title">阵容</text>
+      <text class="overview-count">{{teamCount}}</text>
     </view>
     <!-- 角色分布统计条 -->
     <view class="role-bar">

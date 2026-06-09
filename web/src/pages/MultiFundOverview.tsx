@@ -41,6 +41,8 @@ import { formatMoneyForDisplay, formatNumberForLanguage, useAppPreferences } fro
 import { ResponsiveTable, type ResponsiveColumn } from "../components/ResponsiveTable";
 import { useWorkflowStreamMulti } from "../lib/useWorkflowStream";
 import multiFundOverviewEnFallback from "../i18n/locales/en-US/multiFundOverview";
+import { EnvelopeCard, PillTag, MetricBlock, SectionLabel } from "../theme";
+import type { PillTagToneName } from "../theme/PillTag";
 
 interface Fund {
   id: string;
@@ -80,12 +82,12 @@ const tradingModeLabel = (mode: string, language: string): string => {
   return map[k] ?? mode;
 };
 
-const statusTone = (status: string): string => {
+const statusToneName = (status: string): PillTagToneName => {
   const s = status.toLowerCase();
-  if (s === "active" || s === "running") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200";
-  if (s === "paused" || s === "draft") return "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200";
-  if (s === "archived" || s === "closed") return "bg-gray-200 text-gray-600 dark:bg-slate-700 dark:text-slate-300";
-  return "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200";
+  if (s === "active" || s === "running") return "sage";
+  if (s === "paused" || s === "draft") return "coral";
+  if (s === "archived" || s === "closed") return "muted";
+  return "info";
 };
 
 const MultiFundOverview: React.FC = () => {
@@ -199,7 +201,10 @@ const MultiFundOverview: React.FC = () => {
         header: copy.col.fund,
         primary: true,
         cell: (row) => (
-          <Link to={`/funds/${row.id}`} className="font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-300">
+          <Link
+            to={`/funds/${row.id}`}
+            className="font-semibold text-sage-700 hover:text-sage-500 dark:text-sage-300"
+          >
             {row.name}
           </Link>
         ),
@@ -213,24 +218,21 @@ const MultiFundOverview: React.FC = () => {
         key: "mode",
         header: copy.col.mode,
         cell: (row) => (
-          <span
-            className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${
-              row.tradingMode.toLowerCase() === "live"
-                ? "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200"
-                : "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-            }`}
+          <PillTag
+            size="sm"
+            tone={row.tradingMode.toLowerCase() === "live" ? "risk" : "info"}
           >
             {tradingModeLabel(row.tradingMode, language)}
-          </span>
+          </PillTag>
         ),
       },
       {
         key: "status",
         header: copy.col.status,
         cell: (row) => (
-          <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${statusTone(row.status)}`}>
+          <PillTag size="sm" tone={statusToneName(row.status)}>
             {row.status}
-          </span>
+          </PillTag>
         ),
       },
       {
@@ -246,25 +248,18 @@ const MultiFundOverview: React.FC = () => {
         header: copy.col.workflow,
         cell: (row) => {
           if (workflow.forbidden.includes(row.id)) {
-            return (
-              <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-500 dark:bg-slate-700 dark:text-slate-300">
-                {copy.workflow.forbidden}
-              </span>
-            );
+            return <PillTag size="sm" tone="muted">{copy.workflow.forbidden}</PillTag>;
           }
           const frame = workflow.statuses[row.id] ?? null;
           if (!frame) {
-            return <span className="text-xs text-gray-400 dark:text-slate-500">{copy.workflow.idle}</span>;
+            return <span className="text-xs text-ink-300 dark:text-slate-500">{copy.workflow.idle}</span>;
           }
           const state = (frame.state ?? "").toLowerCase();
-          const stateClass =
-            state === "completed"
-              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200"
-              : state === "failed"
-              ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-200"
-              : state === "running"
-              ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-200"
-              : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200";
+          const stateTone: PillTagToneName =
+            state === "completed" ? "sage"
+            : state === "failed" ? "risk"
+            : state === "running" ? "info"
+            : "coral";
           const stateLabel =
             state === "completed"
               ? copy.workflow.stateCompleted
@@ -277,12 +272,9 @@ const MultiFundOverview: React.FC = () => {
           const showDot = workflow.connected && !isTerminal;
           return (
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${stateClass}`}>
-                {showDot ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> : null}
-                {stateLabel}
-              </span>
+              <PillTag size="sm" tone={stateTone} dot={showDot}>{stateLabel}</PillTag>
               {state === "running" && typeof frame.progressPercent === "number" ? (
-                <span className="text-[11px] text-gray-500 dark:text-slate-400">
+                <span className="text-[11px] text-ink-300 dark:text-slate-400">
                   {Math.round(frame.progressPercent)}%
                 </span>
               ) : null}
@@ -324,57 +316,59 @@ const MultiFundOverview: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+      <EnvelopeCard className="text-sm text-ink-300 dark:text-slate-400">
         {copy.loading}
-      </div>
+      </EnvelopeCard>
     );
   }
 
   if (error) {
     return (
-      <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-300">
+      <EnvelopeCard className="text-sm text-risk-500 ring-risk-100" tone="risk">
         <p>{error}</p>
-      </div>
+      </EnvelopeCard>
     );
   }
 
+  const inputClass =
+    "w-full max-w-md rounded-full bg-cream-50 px-4 py-2 text-sm text-ink-900 ring-1 ring-ink-100/80 outline-none transition focus:ring-2 focus:ring-sage-500/60 placeholder:text-ink-300 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700";
+
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+      <SectionLabel>组合驾驶舱</SectionLabel>
+      <EnvelopeCard className="animate-fade-up">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">{copy.title}</h1>
-            <p className="mt-1 text-sm text-gray-500 dark:text-slate-400">{copy.subtitle}</p>
+            <h1 className="text-2xl font-extrabold text-ink-900 dark:text-slate-100">
+              {copy.title}
+            </h1>
+            <p className="mt-1 text-sm text-ink-300 dark:text-slate-400">
+              {copy.subtitle}
+            </p>
           </div>
         </div>
-        <dl className="mt-6 grid grid-cols-2 gap-4 md:grid-cols-5">
-          <KpiCard label={copy.kFunds} value={formatNumberForLanguage(kpis.fundCount, language)} />
-          <KpiCard label={copy.kCompanies} value={formatNumberForLanguage(kpis.companyCount, language)} />
-          <KpiCard label={copy.kLive} value={formatNumberForLanguage(kpis.liveCount, language)} />
-          <KpiCard
-            label={copy.kAum}
-            value={formatMoneyForDisplay(kpis.totalAssets, "USD", displayCurrency, language)}
-          />
-          <KpiCard
-            label={copy.kAvgNav}
-            value={formatNumberForLanguage(kpis.avgNav, language, { minimumFractionDigits: 4, maximumFractionDigits: 4 })}
-          />
+        <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-5">
+          <MetricBlock compact label={copy.kFunds}     value={formatNumberForLanguage(kpis.fundCount, language)} />
+          <MetricBlock compact label={copy.kCompanies} value={formatNumberForLanguage(kpis.companyCount, language)} />
+          <MetricBlock compact label={copy.kLive}      value={formatNumberForLanguage(kpis.liveCount, language)} tone={kpis.liveCount > 0 ? "positive" : "neutral"} />
+          <MetricBlock compact label={copy.kAum}       value={formatMoneyForDisplay(kpis.totalAssets, "USD", displayCurrency, language)} />
+          <MetricBlock compact label={copy.kAvgNav}    value={formatNumberForLanguage(kpis.avgNav, language, { minimumFractionDigits: 4, maximumFractionDigits: 4 })} />
         </dl>
-      </div>
+      </EnvelopeCard>
 
-      <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900 sm:p-6">
+      <EnvelopeCard className="animate-fade-up">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <input
             type="search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={copy.searchPh}
-            className="w-full max-w-md rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+            className={inputClass}
           />
           <select
             value={modeFilter}
             onChange={(e) => setModeFilter(e.target.value as "all" | "live" | "simulation")}
-            className="rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+            className="rounded-full bg-cream-50 px-4 py-2 text-sm text-ink-900 ring-1 ring-ink-100/80 outline-none transition focus:ring-2 focus:ring-sage-500/60 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
           >
             <option value="all">{copy.modeAll}</option>
             <option value="live">{copy.modeLive}</option>
@@ -386,22 +380,15 @@ const MultiFundOverview: React.FC = () => {
           columns={columns}
           keyOf={(row) => row.id}
           empty={
-            <div className="rounded-xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500 dark:border-slate-600 dark:text-slate-400">
-              <p className="font-medium">{copy.emptyTitle}</p>
+            <div className="rounded-2xl bg-cream-50 p-10 text-center text-sm text-ink-300 ring-1 ring-dashed ring-ink-200 dark:bg-slate-800 dark:text-slate-400 dark:ring-slate-600">
+              <p className="font-semibold text-ink-700 dark:text-slate-200">{copy.emptyTitle}</p>
               <p className="mt-1">{copy.emptyDescription}</p>
             </div>
           }
         />
-      </div>
+      </EnvelopeCard>
     </div>
   );
 };
-
-const KpiCard: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <div className="rounded-xl border border-gray-100 bg-gray-50 p-4 dark:border-slate-700 dark:bg-slate-800">
-    <dt className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-slate-400">{label}</dt>
-    <dd className="mt-1 text-lg font-bold text-gray-900 dark:text-slate-100">{value}</dd>
-  </div>
-);
 
 export default MultiFundOverview;

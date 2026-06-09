@@ -5,6 +5,9 @@
  * - 用户点 fund 卡片时切换 activeFund（高亮当前选中）。
  * - 任何 setSession token = null 后，react-query cache 仍保留（用 mmkv 持久化）—
  *   下次登录用同一账号能"瞬时"看到上一会话的数据。
+ *
+ * 视觉风格已切换到 cream / sage / 黑胶囊 设计系统（与 web /style-preview
+ * 一致），通过 ThemedCard / PillTag / BlackPillButton / MetricBlock 复用。
  */
 
 import React, { useEffect } from 'react';
@@ -23,13 +26,22 @@ import type { CompanyWithFunds, FundSummary } from '@fundai/api-client';
 
 import { apiClient } from '../lib/api';
 import { useActiveFund } from '../lib/activeFund';
+import { useTheme } from '../lib/theme';
 import { CorpActionTimelineCard } from '../components/CorpActionTimelineCard';
 import { BenchmarkMiniChart } from '../components/BenchmarkMiniChart';
 import { HoldingsTrendsGrid } from '../components/HoldingsTrendsGrid';
+import {
+  ThemedCard,
+  PillTag,
+  BlackPillButton,
+  MetricBlock,
+  SectionLabel,
+} from '../components/ThemedCard';
 
 export default function HomeScreen(): JSX.Element {
   const { t } = useTranslation();
   const { fundId, setFund } = useActiveFund();
+  const { colors } = useTheme();
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ['companies'],
     queryFn: async () => {
@@ -47,27 +59,25 @@ export default function HomeScreen(): JSX.Element {
 
   if (isLoading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color="#4f46e5" />
-        <Text style={styles.muted}>{t('home.loading')}</Text>
+      <View style={[styles.center, { backgroundColor: colors.bg }]}>
+        <ActivityIndicator size="large" color={colors.accent} />
+        <Text style={[styles.muted, { color: colors.textMuted }]}>{t('home.loading')}</Text>
       </View>
     );
   }
 
   if (isError || !data) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.errorText}>{t('home.error')}</Text>
-        <Pressable
-          style={styles.retry}
+      <View style={[styles.center, { backgroundColor: colors.bg }]}>
+        <Text style={[styles.errorText, { color: colors.danger }]}>{t('home.error')}</Text>
+        <BlackPillButton
+          label={t('home.retry')}
           onPress={() => void refetch()}
-          accessibilityRole="button"
+          variant="ink"
+          size="md"
+          style={{ marginTop: 16 }}
           accessibilityLabel={t('home.retry')}
-        >
-          {/* 之前这里显示 t('home.loading') —— 用户看到"加载中"但其实
-              是请求失败，按钮文案与行为对不上。改回正确的 retry 文案。 */}
-          <Text style={styles.retryText}>{t('home.retry')}</Text>
-        </Pressable>
+        />
       </View>
     );
   }
@@ -76,9 +86,15 @@ export default function HomeScreen(): JSX.Element {
     <FlatList
       data={data}
       keyExtractor={(c) => c.id}
+      style={{ backgroundColor: colors.bg }}
       contentContainerStyle={styles.container}
-      refreshControl={<RefreshControl refreshing={isFetching} onRefresh={() => void refetch()} />}
-      ListEmptyComponent={<Text style={styles.muted}>{t('home.empty')}</Text>}
+      refreshControl={<RefreshControl refreshing={isFetching} onRefresh={() => void refetch()} tintColor={colors.accent} />}
+      ListHeaderComponent={
+        <SectionLabel style={{ marginTop: 8 }} trailing={`${data.length}`}>
+          组合驾驶舱
+        </SectionLabel>
+      }
+      ListEmptyComponent={<Text style={[styles.muted, { color: colors.textMuted }]}>{t('home.empty')}</Text>}
       renderItem={({ item }) => <CompanyCard company={item} activeFundId={fundId} setFund={setFund} />}
     />
   );
@@ -93,14 +109,30 @@ function CompanyCard({
   activeFundId: string | null;
   setFund: (id: string | null) => void;
 }): JSX.Element {
+  const { colors } = useTheme();
   return (
-    <View style={styles.companyCard}>
-      <Text style={styles.companyName}>{company.name}</Text>
-      {company.description ? <Text style={styles.muted}>{company.description}</Text> : null}
+    <ThemedCard>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <View style={{ flex: 1, paddingRight: 8 }}>
+          <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase' }}>
+            团队驾驶舱
+          </Text>
+          <Text style={{ color: colors.text, fontSize: 20, fontWeight: '800', marginTop: 4 }}>
+            {company.name}
+          </Text>
+          {company.description ? (
+            <Text style={{ color: colors.textMuted, fontSize: 13, marginTop: 6 }}>
+              {company.description}
+            </Text>
+          ) : null}
+        </View>
+        <PillTag tone="sage" size="sm">{`${company.funds.length} 支`}</PillTag>
+      </View>
+      <View style={{ height: 14 }} />
       {company.funds.map((fund) => (
         <FundCard key={fund.id} fund={fund} active={fund.id === activeFundId} onPress={() => setFund(fund.id)} />
       ))}
-    </View>
+    </ThemedCard>
   );
 }
 
@@ -114,28 +146,56 @@ function FundCard({
   onPress: () => void;
 }): JSX.Element {
   const { t } = useTranslation();
+  const { colors } = useTheme();
   return (
     <View>
       <Pressable
-        style={[styles.fundCard, active ? styles.fundCardActive : null]}
         onPress={onPress}
         accessibilityRole="button"
         accessibilityState={{ selected: active }}
         accessibilityLabel={`${fund.name} ${active ? 'active' : ''}`}
+        style={{
+          backgroundColor: active ? colors.ink : colors.surfaceAlt,
+          borderRadius: 18,
+          padding: 14,
+          marginTop: 10,
+          borderWidth: 1,
+          borderColor: active ? colors.ink : colors.border,
+        }}
       >
-        <View style={styles.row}>
-          <Text style={[styles.fundName, active ? styles.fundNameActive : null]}>{fund.name}</Text>
-          {active ? <Text style={styles.activeChip}>•</Text> : null}
-        </View>
-        <View style={styles.row}>
-          <Text style={styles.mutedSmall}>{t('home.navLabel')}</Text>
-          <Text style={styles.fundValue}>{fund.nav.toFixed(3)}</Text>
-        </View>
-        <View style={styles.row}>
-          <Text style={styles.mutedSmall}>{t('home.assetsLabel')}</Text>
-          <Text style={styles.fundValue}>
-            {fund.total_assets.toLocaleString()} {fund.base_currency ?? ''}
+        <View style={[styles.row, { marginTop: 0 }]}>
+          <Text
+            style={{
+              color: active ? '#ffffff' : colors.text,
+              fontSize: 15,
+              fontWeight: '700',
+              flex: 1,
+            }}
+          >
+            {fund.name}
           </Text>
+          <PillTag
+            tone={active ? 'sage' : fund.status === 'active' ? 'info' : 'muted'}
+            size="sm"
+          >
+            {active ? '当前' : fund.status}
+          </PillTag>
+        </View>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, gap: 12 }}>
+          <View style={{ flex: 1 }}>
+            <MetricBlock
+              label={t('home.navLabel') ?? '组合净值'}
+              value={fund.nav.toFixed(3)}
+              tone="neutral"
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <MetricBlock
+              label={t('home.assetsLabel') ?? '总资产'}
+              value={`${fund.total_assets.toLocaleString()} ${fund.base_currency ?? ''}`.trim()}
+              tone="neutral"
+            />
+          </View>
         </View>
       </Pressable>
       {/* Timeline only renders when this fund is the active one,
@@ -152,35 +212,7 @@ function FundCard({
 const styles = StyleSheet.create({
   container: { padding: 16, paddingBottom: 32 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  muted: { color: '#6b7280', fontSize: 14, marginTop: 8 },
-  mutedSmall: { color: '#9ca3af', fontSize: 12 },
-  companyCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-  },
-  companyName: { fontSize: 18, fontWeight: '600', color: '#111827', marginBottom: 4 },
-  fundCard: {
-    backgroundColor: '#f9fafb',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  fundCardActive: { borderColor: '#4f46e5', backgroundColor: '#eef2ff' },
-  fundName: { fontSize: 15, fontWeight: '500', color: '#1f2937' },
-  fundNameActive: { color: '#3730a3' },
-  fundValue: { fontSize: 14, color: '#111827', fontWeight: '500' },
+  muted: { fontSize: 14, marginTop: 8 },
   row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 },
-  retry: { marginTop: 12, paddingVertical: 8, paddingHorizontal: 16, backgroundColor: '#e5e7eb', borderRadius: 6 },
-  retryText: { color: '#1f2937' },
-  errorText: { color: '#dc2626', fontSize: 14, marginTop: 8, textAlign: 'center' },
-  activeChip: { color: '#4f46e5', fontSize: 18, fontWeight: '700' },
+  errorText: { fontSize: 14, marginTop: 8, textAlign: 'center' },
 });

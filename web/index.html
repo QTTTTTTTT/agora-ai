@@ -19,8 +19,20 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="dns-prefetch" href="https://fonts.gstatic.com" />
+    <!--
+      Font roster:
+        * Manrope — primary friendly grotesque used by the 2026
+          cream/sage refresh (matches mockups, falls back to Inter).
+        * Inter — secondary fallback for legacy pages that haven't
+          adopted Manrope-specific weights yet.
+        * Press Start 2P — pixel-art accent for mascot captions and
+          retro chips on /style-preview. Loaded sparingly because
+          the file is large; only pages that opt in via
+          `font-pixel` (Tailwind utility) trigger fallback render.
+        * JetBrains Mono — monospace numerics in tables / code.
+    -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Press+Start+2P&display=swap"
       rel="stylesheet"
     />
     <!--
@@ -61,7 +73,7 @@
       })();
     </script>
   </head>
-  <body class="antialiased bg-white text-gray-900 dark:bg-slate-900 dark:text-slate-100">
+  <body class="antialiased text-ink-700 dark:bg-slate-900 dark:text-slate-100">
     <div id="root"></div>
     <!--
       fetchpriority="high" tells the browser to bump this entry

@@ -1,33 +1,62 @@
 /* ============================================
    AI基金平台 - 全局样式
+   ----------------------------------------------
+   2026 cream / sage / ink design refresh: shifts
+   the entire color system to the cream-paper +
+   sage-green + black-pill aesthetic shared with
+   web (`web/src/theme/*`) and Android. Existing
+   `.card` / `.badge-*` / `.btn-*` utilities keep
+   their semantics so legacy pages (which read
+   them via class names) automatically inherit
+   the new look without per-page churn.
    ============================================ */
 
 /* ---------- CSS 变量 ---------- */
 page {
-  --color-primary: #4f46e5;
-  --color-primary-light: #818cf8;
-  --color-primary-dark: #3730a3;
-  --color-success: #10b981;
-  --color-success-light: #34d399;
-  --color-warning: #f59e0b;
-  --color-warning-light: #fbbf24;
-  --color-danger: #ef4444;
-  --color-danger-light: #f87171;
-  --color-info: #3b82f6;
+  /* primary -> sage green; secondary accent -> coral; the
+     historical "indigo primary" lives only as `--color-brand-legacy`
+     in case a chart absolutely needs it. */
+  --color-primary: #1faa64;
+  --color-primary-light: #9ec99a;
+  --color-primary-dark: #0f6a3f;
+  --color-success: #1faa64;
+  --color-success-light: #73b272;
+  --color-warning: #f7a05d;        /* coral-300 */
+  --color-warning-light: #f08a40;
+  --color-danger: #e64949;
+  --color-danger-light: #ee7079;
+  --color-info: #4f46e5;
+  --color-brand-legacy: #4f46e5;
 
-  --color-text-primary: #1f2937;
-  --color-text-secondary: #6b7280;
-  --color-text-placeholder: #9ca3af;
+  /* ink scale — used by primary CTA fills and headings */
+  --color-ink: #111110;
+  --color-ink-700: #1f1d18;
+  --color-ink-300: #7a766c;
+
+  /* cream / sage / coral / risk surface tints */
+  --color-cream: #f4f2ee;
+  --color-cream-100: #ebe8e1;
+  --color-sage: #dcebd6;
+  --color-sage-700: #0f6a3f;
+  --color-coral: #fbe1d1;
+  --color-coral-500: #dc6f24;
+  --color-risk: #fad1d3;
+  --color-risk-500: #c5343a;
+
+  --color-text-primary: var(--color-ink-700);
+  --color-text-secondary: var(--color-ink-300);
+  --color-text-placeholder: #b3afa2;
   --color-text-white: #ffffff;
 
-  --color-bg-page: #f5f5f5;
+  --color-bg-page: var(--color-cream);
   --color-bg-card: #ffffff;
-  --color-bg-hover: #f9fafb;
-  --color-border: #e5e7eb;
+  --color-bg-hover: #faf8f3;
+  --color-border: #e5e3dd;
 
   --radius-sm: 8rpx;
-  --radius-md: 16rpx;
-  --radius-lg: 24rpx;
+  --radius-md: 24rpx;          /* envelope card radius */
+  --radius-lg: 32rpx;
+  --radius-xl: 40rpx;
   --radius-full: 999rpx;
 
   --spacing-xs: 8rpx;
@@ -44,9 +73,10 @@ page {
   --font-xl: 40rpx;
   --font-xxl: 48rpx;
 
-  --shadow-sm: 0 2rpx 8rpx rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4rpx 16rpx rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 8rpx 32rpx rgba(0, 0, 0, 0.12);
+  --shadow-sm: 0 2rpx 12rpx rgba(28, 28, 24, 0.04);
+  --shadow-md: 0 6rpx 28rpx rgba(28, 28, 24, 0.08);
+  --shadow-lg: 0 12rpx 40rpx rgba(28, 28, 24, 0.12);
+  --shadow-ink: 0 6rpx 18rpx rgba(17, 17, 16, 0.32);
 }
 
 /* ---------- 全局 page 样式 ---------- */
@@ -55,7 +85,14 @@ page {
     'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', sans-serif;
   font-size: var(--font-base);
   color: var(--color-text-primary);
+  /* Soft cream paper with sage / coral wash, mirrors web body bg
+     but driven via `background-image` so it survives layered
+     scroll-views (a hard #color page can clip the wash). */
   background-color: var(--color-bg-page);
+  background-image:
+    radial-gradient(circle at 0% 0%, rgba(158, 201, 154, 0.20) 0%, transparent 38%),
+    radial-gradient(circle at 100% 0%, rgba(247, 196, 163, 0.13) 0%, transparent 32%),
+    radial-gradient(circle at 50% 110%, rgba(158, 201, 154, 0.10) 0%, transparent 42%);
   line-height: 1.6;
   box-sizing: border-box;
   -webkit-font-smoothing: antialiased;
@@ -73,6 +110,7 @@ view, text, image, navigator, scroll-view, swiper, button, input, textarea, form
   padding: var(--spacing-lg);
   margin: var(--spacing-md) var(--spacing-lg);
   box-shadow: var(--shadow-sm);
+  border: 1rpx solid rgba(229, 227, 221, 0.6);
 }
 
 .card-no-padding {
@@ -80,7 +118,47 @@ view, text, image, navigator, scroll-view, swiper, button, input, textarea, form
   border-radius: var(--radius-md);
   margin: var(--spacing-md) var(--spacing-lg);
   box-shadow: var(--shadow-sm);
+  border: 1rpx solid rgba(229, 227, 221, 0.6);
   overflow: hidden;
+}
+
+/* Envelope card — the signature white "lifted paper" surface in
+   the refresh. 24rpx radius, soft drop shadow, 1rpx hairline. */
+.envelope-card {
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-md);
+  padding: 36rpx 36rpx;
+  margin: 24rpx 32rpx;
+  box-shadow: var(--shadow-sm);
+  border: 1rpx solid rgba(229, 227, 221, 0.7);
+}
+
+.envelope-card-compact {
+  padding: 24rpx 28rpx;
+}
+
+/* Section eyebrow — small caps gray label that sits above
+   an envelope card (e.g. "团队驾驶舱" / "数据整备" / "阵容"). */
+.section-eyebrow {
+  font-size: 22rpx;
+  letter-spacing: 3rpx;
+  text-transform: uppercase;
+  color: var(--color-ink-300);
+  font-weight: 600;
+  padding: 0 36rpx;
+  margin-top: 24rpx;
+  margin-bottom: 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.section-eyebrow .trailing {
+  color: var(--color-sage-700);
+  font-weight: 700;
+  font-size: 26rpx;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 /* ---------- 徽章 ---------- */
@@ -88,36 +166,68 @@ view, text, image, navigator, scroll-view, swiper, button, input, textarea, form
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4rpx 16rpx;
+  padding: 6rpx 20rpx;
   border-radius: var(--radius-full);
   font-size: var(--font-xs);
   line-height: 1.4;
   white-space: nowrap;
+  font-weight: 500;
 }
 
 .badge-primary {
-  background-color: rgba(79, 70, 229, 0.1);
-  color: var(--color-primary);
+  background-color: var(--color-sage);
+  color: var(--color-sage-700);
 }
 
 .badge-success {
-  background-color: rgba(16, 185, 129, 0.1);
-  color: var(--color-success);
+  background-color: var(--color-sage);
+  color: var(--color-sage-700);
 }
 
 .badge-warning {
-  background-color: rgba(245, 158, 11, 0.1);
-  color: var(--color-warning);
+  background-color: var(--color-coral);
+  color: var(--color-coral-500);
 }
 
 .badge-danger {
-  background-color: rgba(239, 68, 68, 0.1);
-  color: var(--color-danger);
+  background-color: var(--color-risk);
+  color: var(--color-risk-500);
 }
 
 .badge-info {
-  background-color: rgba(59, 130, 246, 0.1);
-  color: var(--color-info);
+  background-color: rgba(79, 70, 229, 0.12);
+  color: var(--color-brand-legacy);
+}
+
+/* Pill tags — same surface as `.badge` but with a more
+   editorial scale and dot variant. Pages can use
+   `pill-tag pill-tag-sage` (etc) interchangeably with the
+   legacy `badge-success` class. */
+.pill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6rpx;
+  padding: 8rpx 22rpx;
+  border-radius: var(--radius-full);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.pill-tag-sage  { background-color: var(--color-sage);  color: var(--color-sage-700); }
+.pill-tag-coral { background-color: var(--color-coral); color: var(--color-coral-500); }
+.pill-tag-risk  { background-color: var(--color-risk);  color: var(--color-risk-500); }
+.pill-tag-ink   { background-color: var(--color-cream-100); color: var(--color-ink-700); }
+.pill-tag-muted { background-color: var(--color-cream-100); color: var(--color-ink-300); }
+.pill-tag-info  { background-color: rgba(79, 70, 229, 0.12); color: var(--color-brand-legacy); }
+
+.pill-tag-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background-color: currentColor;
+  opacity: 0.7;
 }
 
 /* ---------- 标题 ---------- */
@@ -281,10 +391,11 @@ view, text, image, navigator, scroll-view, swiper, button, input, textarea, form
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 16rpx 32rpx;
-  border-radius: var(--radius-md);
+  gap: 12rpx;
+  padding: 18rpx 36rpx;
+  border-radius: var(--radius-full);
   font-size: var(--font-base);
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1.5;
   border: none;
   outline: none;
@@ -310,22 +421,86 @@ view, text, image, navigator, scroll-view, swiper, button, input, textarea, form
   color: var(--color-text-white);
 }
 
+/* Black pill CTA — matches "装备 →" / "去回测验证" buttons in
+   the design refresh. Use this for the dominant action on the
+   page (only one per screen). */
+.btn-ink {
+  background-color: var(--color-ink);
+  color: var(--color-text-white);
+  box-shadow: var(--shadow-ink);
+}
+
+.btn-ghost {
+  background-color: var(--color-bg-card);
+  color: var(--color-ink-700);
+  border: 1rpx solid var(--color-border);
+}
+
 .btn-block {
   display: flex;
   width: 100%;
 }
 
 .btn-sm {
-  padding: 8rpx 20rpx;
+  padding: 10rpx 24rpx;
   font-size: var(--font-sm);
-  border-radius: var(--radius-sm);
 }
 
 .btn-lg {
-  padding: 24rpx 48rpx;
+  padding: 26rpx 56rpx;
   font-size: var(--font-md);
-  border-radius: var(--radius-lg);
 }
+
+/* Bottom sticky action bar — anchors a black-pill CTA to the
+   foot of any scroll surface (mirrors the bottom bar in
+   WechatIMG180). */
+.sticky-action-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 16rpx 24rpx 24rpx;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.sticky-action-bar > .inner {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  background-color: rgba(255, 255, 255, 0.92);
+  border: 1rpx solid var(--color-border);
+  border-radius: var(--radius-full);
+  padding: 12rpx 16rpx;
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(12px);
+}
+
+/* Mascot avatar — pixel-art role portrait. The wxml provides
+   the role + image source; this just sizes the circle bg.
+   Mini-program can't easily inline 16x16 SVG grids the way
+   web does, so we ship a simpler "tinted circle + emoji" look
+   that still reads as a chunky retro avatar at thumbnail size. */
+.mascot {
+  width: 144rpx;
+  height: 144rpx;
+  border-radius: 36rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 80rpx;
+  line-height: 1;
+}
+
+.mascot-sm { width: 96rpx; height: 96rpx; border-radius: 28rpx; font-size: 56rpx; }
+
+.mascot-captain { background-color: #f0ebe0; }
+.mascot-intel   { background-color: #e6f0e8; }
+.mascot-picker  { background-color: #f1ece2; }
+.mascot-trader  { background-color: #e9f1e2; }
+.mascot-risk    { background-color: #f4e6e0; }
+.mascot-analyst { background-color: #eef2ff; }
 
 /* ---------- 分割线 ---------- */
 .divider {

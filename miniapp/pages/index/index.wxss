@@ -1,33 +1,53 @@
-/* ===== 首页 Dashboard 样式 ===== */
+/* ===== 首页 Dashboard 样式 — cream / sage / ink 设计刷新 =====
+   将原 indigo 渐变 hero 替换为白色 envelope 卡片，所有 indigo
+   accent 替换成 sage / coral，并把工作流 / 快捷入口的 active 高亮
+   改为黑色 ink 圆胶囊，与 web /style-preview 体验对齐。
+*/
 
 .page {
-  background: #f5f6fa;
   min-height: 100vh;
   padding-bottom: env(safe-area-inset-bottom);
 }
 
 /* ---------- 1. 基金头部卡片 ---------- */
 .fund-header {
-  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
-  padding: 48rpx 32rpx 40rpx;
-  color: #ffffff;
+  background: #ffffff;
+  margin: 24rpx 32rpx;
+  padding: 36rpx 36rpx 32rpx;
+  color: #1f1d18;
   position: relative;
   overflow: hidden;
+  border-radius: 32rpx;
+  border: 1rpx solid rgba(229, 227, 221, 0.7);
+  box-shadow: 0 4rpx 20rpx rgba(28, 28, 24, 0.06);
 }
 
 .fund-header::after {
   content: '';
   position: absolute;
-  top: -60rpx;
-  right: -40rpx;
-  width: 240rpx;
-  height: 240rpx;
+  top: -80rpx;
+  right: -60rpx;
+  width: 280rpx;
+  height: 280rpx;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(158, 201, 154, 0.18);
+}
+
+.fund-header::before {
+  content: '团队驾驶舱';
+  display: block;
+  font-size: 22rpx;
+  letter-spacing: 3rpx;
+  text-transform: uppercase;
+  color: #7a766c;
+  margin-bottom: 12rpx;
+  font-weight: 700;
 }
 
 .fund-header-top {
   margin-bottom: 24rpx;
+  position: relative;
+  z-index: 1;
 }
 
 .fund-name-wrap {
@@ -38,32 +58,33 @@
 }
 
 .fund-name {
-  font-size: 36rpx;
-  font-weight: 700;
+  font-size: 40rpx;
+  font-weight: 800;
   letter-spacing: 1rpx;
+  color: #1f1d18;
 }
 
 .mode-badge {
   font-size: 20rpx;
-  font-weight: 600;
-  padding: 4rpx 16rpx;
-  border-radius: 8rpx;
+  font-weight: 700;
+  padding: 6rpx 18rpx;
+  border-radius: 999rpx;
   letter-spacing: 2rpx;
 }
 
 .mode-badge--live {
-  background: rgba(255, 77, 79, 0.85);
-  color: #ffffff;
+  background: #fad1d3;
+  color: #c5343a;
 }
 
 .mode-badge--simulation {
-  background: rgba(250, 173, 20, 0.85);
-  color: #ffffff;
+  background: #fbe1d1;
+  color: #dc6f24;
 }
 
 .company-name {
   font-size: 24rpx;
-  color: rgba(255, 255, 255, 0.75);
+  color: #7a766c;
 }
 
 .fund-header-body {
@@ -71,6 +92,8 @@
   align-items: baseline;
   gap: 20rpx;
   margin-bottom: 8rpx;
+  position: relative;
+  z-index: 1;
 }
 
 .nav-big {
@@ -78,6 +101,7 @@
   font-weight: 800;
   letter-spacing: 2rpx;
   line-height: 1.1;
+  color: #1f1d18;
 }
 
 .nav-change-wrap {
@@ -88,34 +112,27 @@
 
 .nav-change {
   font-size: 28rpx;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .nav-change-pct {
   font-size: 24rpx;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .color-up {
-  color: #ff6b6b;
+  color: #c5343a;             /* A 股审美：上涨 = 红 */
 }
 
 .color-down {
-  color: #51cf66;
-}
-
-/* 头部内的涨跌色使用亮色 */
-.fund-header .color-up {
-  color: #ffa8a8;
-}
-
-.fund-header .color-down {
-  color: #8ce99a;
+  color: #1faa64;             /* 下跌 = 绿（sage） */
 }
 
 .fund-header-label {
   font-size: 22rpx;
-  color: rgba(255, 255, 255, 0.6);
+  color: #7a766c;
+  position: relative;
+  z-index: 1;
 }
 
 /* ---------- 2. 快捷指标行 ---------- */
@@ -135,10 +152,11 @@
 /* ---------- 通用 Section ---------- */
 .section {
   background: #ffffff;
-  margin: 20rpx 24rpx;
-  border-radius: 20rpx;
-  padding: 28rpx 28rpx 24rpx;
-  box-shadow: 0 2rpx 16rpx rgba(0, 0, 0, 0.04);
+  margin: 20rpx 32rpx;
+  border-radius: 32rpx;
+  padding: 32rpx 32rpx 28rpx;
+  box-shadow: 0 4rpx 20rpx rgba(28, 28, 24, 0.06);
+  border: 1rpx solid rgba(229, 227, 221, 0.7);
 }
 
 .section-header {
@@ -149,14 +167,16 @@
 }
 
 .section-title {
-  font-size: 30rpx;
-  font-weight: 700;
-  color: #1a1a2e;
+  font-size: 32rpx;
+  font-weight: 800;
+  color: #1f1d18;
+  letter-spacing: 0.5rpx;
 }
 
 .section-more {
   font-size: 24rpx;
-  color: #6366f1;
+  color: #0f6a3f;
+  font-weight: 600;
 }
 
 /* ---------- 3. NAV 走势 ---------- */
@@ -177,12 +197,13 @@
 .position-card {
   display: inline-flex;
   flex-direction: column;
-  width: 260rpx;
-  min-width: 260rpx;
-  background: #fafbff;
-  border-radius: 16rpx;
-  padding: 24rpx 20rpx;
-  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.05);
+  width: 280rpx;
+  min-width: 280rpx;
+  background: #faf7f1;
+  border-radius: 24rpx;
+  padding: 24rpx 22rpx;
+  box-shadow: 0 1rpx 8rpx rgba(28, 28, 24, 0.04);
+  border: 1rpx solid rgba(229, 227, 221, 0.6);
   gap: 12rpx;
   flex-shrink: 0;
 }
@@ -195,14 +216,14 @@
 
 .pos-symbol {
   font-size: 26rpx;
-  font-weight: 700;
-  color: #1a1a2e;
+  font-weight: 800;
+  color: #1f1d18;
   font-family: monospace;
 }
 
 .pos-name {
   font-size: 22rpx;
-  color: #8c8c8c;
+  color: #7a766c;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -216,13 +237,13 @@
 
 .pos-quantity {
   font-size: 22rpx;
-  color: #8c8c8c;
+  color: #7a766c;
 }
 
 .pos-market-value {
   font-size: 28rpx;
-  font-weight: 600;
-  color: #262626;
+  font-weight: 700;
+  color: #1f1d18;
 }
 
 .pos-bottom {
@@ -231,7 +252,7 @@
 
 .pos-pnl {
   font-size: 28rpx;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 /* ---------- 5. 最近交易 ---------- */
@@ -246,7 +267,7 @@
   align-items: center;
   gap: 16rpx;
   padding: 18rpx 0;
-  border-bottom: 1rpx solid #f5f5f5;
+  border-bottom: 1rpx solid #ebe8e1;
 }
 
 .trade-row:last-child {
@@ -255,73 +276,71 @@
 
 .trade-time {
   font-size: 22rpx;
-  color: #999;
+  color: #7a766c;
   width: 140rpx;
   flex-shrink: 0;
 }
 
 .trade-action-badge {
   font-size: 20rpx;
-  font-weight: 600;
-  padding: 4rpx 16rpx;
-  border-radius: 8rpx;
+  font-weight: 700;
+  padding: 6rpx 16rpx;
+  border-radius: 999rpx;
   flex-shrink: 0;
 }
 
 .badge-buy {
-  background: #fff1f0;
-  color: #ff4d4f;
-  border: 1rpx solid #ffccc7;
+  background: #fad1d3;
+  color: #c5343a;
 }
 
 .badge-sell {
-  background: #f6ffed;
-  color: #52c41a;
-  border: 1rpx solid #b7eb8f;
+  background: #dcebd6;
+  color: #0f6a3f;
 }
 
 .trade-symbol {
   font-size: 26rpx;
-  font-weight: 600;
-  color: #262626;
+  font-weight: 700;
+  color: #1f1d18;
   font-family: monospace;
   flex-shrink: 0;
 }
 
 .trade-quantity {
   font-size: 24rpx;
-  color: #666;
+  color: #7a766c;
   flex: 1;
 }
 
 .trade-price {
   font-size: 26rpx;
-  font-weight: 600;
-  color: #262626;
+  font-weight: 700;
+  color: #1f1d18;
   flex-shrink: 0;
 }
 
 /* ---------- 6. 工作流状态 ---------- */
 .wf-status-tag {
   font-size: 20rpx;
-  font-weight: 600;
-  padding: 4rpx 16rpx;
-  border-radius: 8rpx;
+  font-weight: 700;
+  padding: 6rpx 18rpx;
+  border-radius: 999rpx;
 }
 
 .wf-status--idle {
-  background: #f0f0f0;
-  color: #999;
+  background: #ebe8e1;
+  color: #7a766c;
 }
 
 .wf-status--running {
-  background: #e6f7ff;
-  color: #1890ff;
+  background: #dcebd6;
+  color: #0f6a3f;
 }
 
 .wf-status--completed {
-  background: #f6ffed;
-  color: #52c41a;
+  background: #dcebd6;
+  color: #0f6a3f;
 }
 
 .workflow-steps {
@@ -349,22 +368,22 @@
   left: calc(50% + 14rpx);
   width: calc(100% - 28rpx);
   height: 4rpx;
-  background: #e8e8e8;
+  background: #ebe8e1;
 }
 
 .wf-step--done:not(:last-child)::after {
-  background: #6366f1;
+  background: #1faa64;
 }
 
 .wf-step--active:not(:last-child)::after {
-  background: linear-gradient(90deg, #6366f1, #e8e8e8);
+  background: linear-gradient(90deg, #1faa64, #ebe8e1);
 }
 
 .wf-step-dot {
   width: 28rpx;
   height: 28rpx;
   border-radius: 50%;
-  background: #e8e8e8;
+  background: #ebe8e1;
   border: 4rpx solid #ffffff;
   position: relative;
   z-index: 1;
@@ -372,25 +391,25 @@
 }
 
 .wf-step--done .wf-step-dot {
-  background: #6366f1;
+  background: #1faa64;
 }
 
 .wf-step--active .wf-step-dot {
-  background: #6366f1;
-  box-shadow: 0 0 0 8rpx rgba(99, 102, 241, 0.2);
+  background: #1faa64;
+  box-shadow: 0 0 0 8rpx rgba(31, 170, 100, 0.20);
 }
 
 .wf-step-label {
   font-size: 20rpx;
-  color: #bfbfbf;
+  color: #b3afa2;
   text-align: center;
   white-space: nowrap;
 }
 
 .wf-step--done .wf-step-label,
 .wf-step--active .wf-step-label {
-  color: #6366f1;
-  font-weight: 600;
+  color: #0f6a3f;
+  font-weight: 700;
 }
 
 .workflow-action {
@@ -399,23 +418,26 @@
 }
 
 .wf-btn {
-  width: 80%;
-  height: 80rpx;
-  line-height: 80rpx;
+  width: 86%;
+  height: 96rpx;
+  line-height: 96rpx;
   text-align: center;
-  font-size: 28rpx;
-  font-weight: 600;
-  border-radius: 40rpx;
+  font-size: 30rpx;
+  font-weight: 700;
+  border-radius: 999rpx;
   border: none;
   color: #ffffff;
 }
 
 .wf-btn--start {
-  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+  background: #111110;
+  box-shadow: 0 6rpx 18rpx rgba(17, 17, 16, 0.32);
 }
 
 .wf-btn--pause {
-  background: linear-gradient(135deg, #faad14 0%, #ffc53d 100%);
+  background: #f7a05d;
+  color: #ffffff;
+  box-shadow: 0 4rpx 14rpx rgba(247, 160, 93, 0.4);
 }
 
 .wf-btn::after {
@@ -438,19 +460,21 @@
 }
 
 .shortcut-icon {
-  width: 88rpx;
-  height: 88rpx;
+  width: 92rpx;
+  height: 92rpx;
   border-radius: 24rpx;
-  background: #f0f0ff;
+  background: #faf7f1;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 40rpx;
+  border: 1rpx solid rgba(229, 227, 221, 0.7);
 }
 
 .shortcut-label {
   font-size: 24rpx;
-  color: #595959;
+  color: #1f1d18;
+  font-weight: 600;
   text-align: center;
 }
 
