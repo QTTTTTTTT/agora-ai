@@ -3,12 +3,19 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/fundai/server/internal/lineage"
 )
+
+// jsonMarshal is a thin alias so the in-file mustMarshalJSON
+// doesn't have to import encoding/json in its signature. Keeping
+// the alias local makes the failure-mode comment in
+// mustMarshalJSON tight and self-contained.
+var jsonMarshal = json.Marshal
 
 type AgentLineageParent struct {
 	AgentID         string
@@ -116,7 +123,41 @@ func (r *LineageRepo) AddEdgeWithTx(ctx context.Context, tx *sql.Tx, e lineage.E
 	); err != nil {
 		return fmt.Errorf("lineage_repo: update closure: %w", err)
 	}
+	// Migration 112 — enqueue an outbox event in the SAME tx as
+	// the lineage write. Today the bundled LoggingHandler simply
+	// records it; in a follow-up PR a Kafka / S3 / public-feed
+	// handler chains in via outbox.MultiHandler. Failure to
+	// enqueue here is treated as fatal for the whole AddEdge
+	// operation: we'd rather refuse the buyout than ship a
+	// lineage row whose external-publish event got lost.
+	payload := map[string]any{
+		"child_agent_id":          e.ChildAgentID,
+		"parent_agent_id":         e.ParentAgentID,
+		"derived_via":             string(e.Via),
+		"source_listing_id":       e.SourceListingID,
+		"source_subscription_id":  e.SourceSubscriptionID,
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload)
+		 VALUES ('lineage.edge.added', 'agent', $1, $2)`,
+		e.ChildAgentID, mustMarshalJSON(payload),
+	); err != nil {
+		return fmt.Errorf("lineage_repo: enqueue outbox: %w", err)
+	}
 	return nil
+}
+
+// mustMarshalJSON marshals to a string suitable for the JSONB
+// column. The keys here are static + bounded so marshaling cannot
+// realistically fail; on the off chance encoding/json complains
+// we return an empty JSON object so the outbox row is still well-
+// formed and downstream alarms can spot the empty payload.
+func mustMarshalJSON(v any) []byte {
+	b, err := jsonMarshal(v)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
 }
 
 func (r *LineageRepo) OwnerOfAgent(agentID string) (string, error) {

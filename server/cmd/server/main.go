@@ -48,6 +48,8 @@ import (
 	"github.com/fundai/server/internal/fundamental"
 	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/fx"
+	"github.com/fundai/server/internal/llm"
+	"github.com/fundai/server/internal/outbox"
 	"github.com/fundai/server/internal/lotbackfill"
 	"github.com/fundai/server/internal/mailer"
 	"github.com/fundai/server/internal/marketdata"
@@ -1807,6 +1809,11 @@ func handleMetrics(svc *Services) http.HandlerFunc {
 		_, _ = w.Write([]byte(exportEmbedQuotaPerFundPrometheus(svc.EmbedQuotaRecorder)))
 		_, _ = w.Write([]byte(exportSSEMuxPrometheus()))
 		_, _ = w.Write([]byte(exportMemReembedPrometheus(svc.MemReembedQueue)))
+		// LLM resolver chain — llm_resolution_source_total{layer}.
+		// Lazily-registered counter from internal/llm; emits a
+		// row per layer that has fired since boot. See
+		// internal/llm/resolve_trace.go for the layer enum.
+		_, _ = w.Write([]byte(llm.ExportResolverPrometheus()))
 	}
 }
 
@@ -3157,6 +3164,16 @@ func isUniqueViolation(err error) bool {
 
 func isPublicRoute(path string) bool {
 	if strings.HasPrefix(path, "/api/") {
+		// Migration 111 — Paper-trading Publisher's-Exclusion
+		// surface. The /track-record family is intentionally
+		// anonymous: SEC §202(a)(11)(D) only carves out
+		// "publication of impersonal information", so any
+		// auth-gated divergence would re-create the personalised-
+		// advice risk the exclusion is supposed to avoid. The
+		// handler returns identical data for every viewer.
+		if strings.HasPrefix(path, "/api/papertrading/public/") {
+			return true
+		}
 		switch path {
 		case "/api/health", "/api/version", "/api/metrics", "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/session",
 			"/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/wechat-login",
@@ -5439,6 +5456,29 @@ func main() {
 	if svc.AgentReputationLoop != nil {
 		go func() {
 			svc.AgentReputationLoop.Run(context.Background())
+		}()
+	}
+
+	// Migration 112 — transactional outbox flusher. Drains
+	// outbox_events via SELECT … FOR UPDATE SKIP LOCKED so
+	// multi-replica deploys are safe. v1 handler is the bundled
+	// LoggingHandler which just records the event in slog; real
+	// downstream sinks (Kafka, S3, public provenance feed) are
+	// chained in via MultiHandler in a follow-up PR. The flusher
+	// runs unconditionally — an empty queue is the cheap idle path.
+	{
+		flusher := outbox.NewFlusher(
+			db,
+			outbox.LoggingHandler(slog.Default()),
+			outbox.FlusherOptions{
+				PollInterval:   10 * time.Second,
+				BatchSize:      64,
+				HandlerTimeout: 30 * time.Second,
+				Logger:         slog.Default(),
+			},
+		)
+		go func() {
+			_ = flusher.Run(context.Background())
 		}()
 	}
 

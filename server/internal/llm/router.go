@@ -175,7 +175,23 @@ func NewModelRouter(systemAPIKeys map[Provider]string, defaultModels map[ModelTi
 // 隔离，这样 marketplace 黑盒推理时调用者用的是策略所有者的配置/额度。
 //
 // 返回的 *ModelConfig 是一份新拷贝，调用方可安全修改。
+//
+// Hot-path semantics: this is the no-trace variant. Every existing
+// caller routes through here. ResolveModelWithTrace (see
+// resolve_trace.go) is the observability-friendly sibling that
+// shares the same implementation via resolveModelInternal.
 func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*ModelConfig, error) {
+	return r.resolveModelInternal(ctx, req, nil)
+}
+
+// resolveModelInternal is the shared implementation. trace is
+// nil-safe — nil disables recording entirely and the hot path
+// pays nothing. The non-nil case is driven by ResolveModelWithTrace.
+//
+// IMPORTANT: do not call this method with the trace pointer from
+// outside this package. The visible API is the two public
+// ResolveModel* methods.
+func (r *ModelRouter) resolveModelInternal(ctx context.Context, req *ChatRequest, trace *traceRecorder) (*ModelConfig, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -188,10 +204,14 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 	// --- 1. 指定了具体模型名 ---
 	if req.Model != "" {
 		if cfg := r.findModelByName(req.Model, owner); cfg != nil {
+			trace.record(LayerExplicitModel, true, "matched req.Model="+req.Model)
 			return r.finalizeConfig(ctx, req, tier, cfg.Clone())
 		}
 		// 找不到具体模型，记录警告并继续用 tier 路由
 		log.Printf("[llm/router] model %q not found, falling back to tier routing", req.Model)
+		trace.record(LayerExplicitModel, false, "req.Model="+req.Model+" not found in platform list, continuing chain")
+	} else {
+		trace.record(LayerExplicitModel, false, "req.Model empty")
 	}
 
 	// --- 1.5. Sprint 10.1 — model A/B routing hook ---
@@ -206,8 +226,12 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
 			cfg := decision.Config.Clone()
 			r.ensureAPIKey(cfg, owner)
+			trace.record(LayerModelAB, true, "A/B hook returned config")
 			return r.finalizeConfig(ctx, req, tier, cfg)
 		}
+		trace.record(LayerModelAB, false, "A/B hook returned nil decision")
+	} else {
+		trace.record(LayerModelAB, false, "no A/B hook configured")
 	}
 
 	// --- 1.55. Phase B-2 — user-supplied BYOK key override ---
@@ -226,8 +250,12 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
 			cfg := decision.Config.Clone()
 			cfg.UsesCustomKey = true
+			trace.record(LayerUserBYOK, true, "user BYOK hook returned config")
 			return r.finalizeConfig(ctx, req, tier, cfg)
 		}
+		trace.record(LayerUserBYOK, false, "user BYOK hook returned nil decision")
+	} else {
+		trace.record(LayerUserBYOK, false, "no user BYOK hook configured")
 	}
 
 	// --- 1.6. S14.B — fund-level provider override ---
@@ -243,8 +271,12 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 	if hook := r.fundOverrideHook; hook != nil {
 		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
 			cfg := decision.Config.Clone()
+			trace.record(LayerFundOverride, true, "fund override hook returned config")
 			return r.finalizeConfig(ctx, req, tier, cfg)
 		}
+		trace.record(LayerFundOverride, false, "fund override hook returned nil decision")
+	} else {
+		trace.record(LayerFundOverride, false, "no fund override hook configured")
 	}
 
 	// --- 2. Agent 默认模型配置 ---
@@ -253,8 +285,12 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		if agentCfg, ok := r.agentDefaults[key]; ok {
 			cfg := agentCfg.Clone()
 			r.ensureAPIKey(cfg, owner)
+			trace.record(LayerAgentDefault, true, "agent default for "+key)
 			return r.finalizeConfig(ctx, req, tier, cfg)
 		}
+		trace.record(LayerAgentDefault, false, "no agent default for "+key)
+	} else {
+		trace.record(LayerAgentDefault, false, "owner or AgentID empty")
 	}
 
 	// --- 3. 用户自定义 tier 覆盖 ---
@@ -263,8 +299,12 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		if uo, ok := r.userOverrides[key]; ok {
 			cfg := uo.Clone()
 			r.ensureAPIKey(cfg, owner)
+			trace.record(LayerUserTierOverride, true, "user tier override for "+key)
 			return r.finalizeConfig(ctx, req, tier, cfg)
 		}
+		trace.record(LayerUserTierOverride, false, "no user tier override for "+key)
+	} else {
+		trace.record(LayerUserTierOverride, false, "owner empty")
 	}
 
 	// --- 4. 用户自定义端点 ---
@@ -281,9 +321,15 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 				if ep.ModelName != "" {
 					cfg.ModelName = ep.ModelName
 				}
+				trace.record(LayerUserCustomEndpoint, true, "user custom endpoint for "+epKey)
 				return r.finalizeConfig(ctx, req, tier, cfg)
 			}
+			trace.record(LayerUserCustomEndpoint, false, "no user custom endpoint for "+epKey)
+		} else {
+			trace.record(LayerUserCustomEndpoint, false, "no platform default for tier "+string(tier))
 		}
+	} else {
+		trace.record(LayerUserCustomEndpoint, false, "owner empty")
 	}
 
 	// --- 5/6/7. 平台默认模型 ---
@@ -294,6 +340,9 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		if cfg == nil {
 			cfg = DefaultModels[TierStandard].Clone()
 		}
+		trace.record(LayerFallbackStandard, true, "tier "+string(tier)+" missing, fell back to standard")
+	} else {
+		trace.record(LayerPlatformDefault, true, "platform default for tier "+string(tier))
 	}
 
 	result := cfg.Clone()

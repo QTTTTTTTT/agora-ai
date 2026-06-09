@@ -304,6 +304,18 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		mux.HandleFunc("GET /api/trending/most-active", trendingH.handleMostActive)
 	}
 
+	// /api/papertrading/public/* — SEC Publisher's-Exclusion
+	// surface added in migration 111. Unauthenticated by design:
+	// the entire point of the carve-out is "identical data for
+	// every viewer, no individualised advice". The handler reads
+	// only rows where paper_portfolios.public_track_record=TRUE
+	// and embeds a disclosure block + methodology in every
+	// payload. See paper_trading_public_handler.go for the full
+	// rationale and the SEC rule citation.
+	if pubHandler := buildPaperTradingPublicHandler(svc); pubHandler != nil {
+		registerPublicPaperTradingRoutes(mux, pubHandler)
+	}
+
 	// Phase B-4 — /advisor BYOK CRUD surface. Same /api/advisor
 	// prefix so the featureGateMiddleware advisor_mode gate
 	// already covers it. The handler enforces the additional

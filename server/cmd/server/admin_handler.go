@@ -522,6 +522,13 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerModelABPromotionRoutes(mux)
 	h.registerLLMProviderRoutes(mux)
 	h.registerLLMProviderObservabilityRoutes(mux)
+	// LLM Resolver dry-run — debugs which layer of the 9-layer
+	// priority chain (explicit_model → A/B hook → BYOK → fund
+	// override → agent default → user-tier override → custom
+	// endpoint → platform default → fallback) selected the model
+	// for a given (user, agent, step, fund) tuple. No tokens
+	// spent, no DB writes. See admin_llm_resolve.go.
+	h.registerLLMResolveAdminRoute(mux)
 	// Admin feature flags + announcements + user role management.
 	// All gated by requireAdmin (super_admin promotion is gated by
 	// the handler itself — see admin_user_roles.go).
