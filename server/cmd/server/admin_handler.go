@@ -16,6 +16,7 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/brinson"
+	"github.com/fundai/server/internal/cnmarketstructure"
 	"github.com/fundai/server/internal/factorexposure"
 	"github.com/fundai/server/internal/llm"
 	"github.com/fundai/server/internal/stress"
@@ -66,6 +67,18 @@ type adminHandler struct {
 	// 503; tests that don't need them can leave it unset.
 	corpActionRepo *repository.CorpActionRepo
 
+	// featureFlags backs the admin feature-flag toggle endpoints
+	// AND the public read endpoint exposed via main mux. The cache
+	// is shared with the gate middleware so flips take effect on
+	// the next request after a successful PUT (cache TTL is 5s
+	// otherwise, see featureFlagCache.load).
+	featureFlags *featureFlagCache
+
+	// announcements backs the admin publish/archive endpoints. The
+	// public surface (list + mark-read) is registered separately
+	// off the main mux so non-admin users never traverse adminHandler.
+	announcements *announcementService
+
 	// metrics surfaces lifecycle counters for admin-driven flows
 	// (funding-request approve/reject, broker-link approve, etc.).
 	// Nil-safe in tests; production wires it via newAdminHandler.
@@ -115,6 +128,19 @@ type adminHandler struct {
 	// admin POST endpoint calls. Typically *agentReputationLoop;
 	// tests can plug a stub. nil → rebuild returns 503.
 	agentReputationRebuildSink agentReputationRebuildSink
+
+	// advisorReputationRebuildSink is the Phase 5 sibling of
+	// agentReputationRebuildSink — scoped to the /advisor
+	// surface (no fund_id). Typically *advisorReputationLoop;
+	// nil → POST /api/admin/advisor-reputation/rebuild returns 503.
+	advisorReputationRebuildSink advisorReputationRebuildSink
+
+	// advisorColdStartReturns is the OHLC-backed price lookup
+	// the Phase 6 cold-start uses to grade synthetic outcomes.
+	// Same shape as the live loop's AdvisorRealisedReturnFn.
+	// nil → the /coldstart endpoint returns 503 because the
+	// seed would otherwise write rows with no realised data.
+	advisorColdStartReturns AdvisorRealisedReturnFn
 
 	// workflowCheckpointRepo + workflowCheckpointResumeSink back
 	// the S9.2 per-step admin view + resume endpoints. Both nil
@@ -181,6 +207,14 @@ type adminHandler struct {
 	providerDailyRollupRepo   *repository.ProviderDailyRollupRepo
 	healthProbeLoop           *llmHealthProbeLoop
 	costRollupLoop            *llmCostRollupLoop
+
+	// Phase 3 — A-share intraday / 龙虎榜 / 市场活跃度 provider
+	// chain used by the advisor /tactic panel. Probe + health
+	// endpoints render straight off these fields. Both nil-safe;
+	// missing wiring degrades the probe to a 503/"not configured"
+	// response.
+	cnStructRegistry *cnmarketstructure.Registry
+	cnStructProvider cnmarketstructure.Provider
 }
 
 // attachLLMRuntime wires the in-process model router + reloader
@@ -365,6 +399,9 @@ func newAdminHandler(svc *Services) *adminHandler {
 		providerDailyRollupRepo:   svc.ProviderDailyRollupRepo,
 		healthProbeLoop:           svc.LLMHealthProbeLoop,
 		costRollupLoop:            svc.LLMCostRollupLoop,
+
+		cnStructRegistry: svc.CNMarketStructureRegistry,
+		cnStructProvider: svc.CNMarketStructureProvider,
 	}
 	// S13 — modelRouter + providerReloader come from the LLM
 	// runtime which is constructed in a later wave of initServices
@@ -385,6 +422,18 @@ func newAdminHandler(svc *Services) *adminHandler {
 	if svc.AgentReputationLoop != nil {
 		h.agentReputationRebuildSink = svc.AgentReputationLoop
 	}
+	// Phase 5 — advisor reputation rebuild sink. Same typed-nil
+	// dance as above so the admin POST endpoint stays 503-able
+	// when AdvisorService is not wired.
+	if svc.AdvisorReputationLoop != nil {
+		h.advisorReputationRebuildSink = svc.AdvisorReputationLoop
+	}
+	// Phase 6 — cold-start returns lookup. We re-derive the same
+	// closure the live loop uses so the cold-start grading and
+	// the daily grading agree on benchmark / market mapping.
+	if ohlc := buildOHLCFetcherFromEnv(); ohlc != nil {
+		h.advisorColdStartReturns = advisorRealisedReturnFromOHLC(ohlc)
+	}
 	// S9.2 — typed-nil safe wiring for the resume sink. The
 	// adapter forwards into the workflowService's existing
 	// TriggerStep path so a resume is just "re-fire the same
@@ -402,6 +451,11 @@ func newAdminHandler(svc *Services) *adminHandler {
 	// admin + scheduled ingest. Repository is cheap to construct
 	// (just wraps *sql.DB) so we always wire it.
 	h.corpActionRepo = repository.NewCorpActionRepo(svc.DB)
+	// Admin feature flags + announcements: both are pure SQL repos
+	// over migration 097's tables. We always wire them — the tables
+	// are created on bootstrap and the cost is negligible.
+	h.featureFlags = newFeatureFlagCache(svc.DB)
+	h.announcements = newAnnouncementService(svc.DB)
 	h.registerDualControlActions()
 	return h
 }
@@ -458,6 +512,7 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerBrinsonAdminRoutes(mux)
 	// S8.4 — per-agent reputation ledger admin view + rebuild.
 	h.registerAgentReputationAdminRoutes(mux)
+	h.registerAdvisorReputationAdminRoutes(mux)
 	// S9.2 — per-step workflow checkpoint timeline + resume.
 	h.registerWorkflowCheckpointAdminRoutes(mux)
 	// S10.3 / 10.4 — model A/B experiment list / report / CRUD.
@@ -467,6 +522,14 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerModelABPromotionRoutes(mux)
 	h.registerLLMProviderRoutes(mux)
 	h.registerLLMProviderObservabilityRoutes(mux)
+	// Admin feature flags + announcements + user role management.
+	// All gated by requireAdmin (super_admin promotion is gated by
+	// the handler itself — see admin_user_roles.go).
+	h.registerFeatureFlagAdminRoutes(mux)
+	h.registerAnnouncementAdminRoutes(mux)
+	h.registerUserRoleAdminRoutes(mux)
+	// Phase 3 — CN-A market structure provider probe + health.
+	h.registerCNMarketStructureAdminRoutes(mux)
 }
 
 // handleListProposedSkills implements GET /api/admin/skills/proposed.

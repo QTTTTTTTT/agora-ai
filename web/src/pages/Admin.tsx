@@ -42,6 +42,9 @@ import AdminMarketImpactSection from "../components/AdminMarketImpactSection";
 import AdminMarketStatusSection from "../components/AdminMarketStatusSection";
 import AdminWSFeedSection from "../components/AdminWSFeedSection";
 import AdminStopTriggerSection from "../components/AdminStopTriggerSection";
+import AdminFeatureFlagsSection from "../components/AdminFeatureFlagsSection";
+import AdminAnnouncementsSection from "../components/AdminAnnouncementsSection";
+import AdminUserRolesSection from "../components/AdminUserRolesSection";
 
 interface PlatformSettings {
   access_mode: "paid_open" | "free_open";
@@ -735,6 +738,15 @@ const Admin: React.FC = () => {
           <p className="mt-2 text-2xl font-bold text-gray-900">{totals.teamCount}</p>
         </div>
       </section>
+
+      {/* Platform-wide control surfaces: feature flags (toggle product
+          surfaces), in-app announcements (push notices to every user),
+          and user role management (promote/demote admin / super admin).
+          Placed directly under the totals tiles so an admin landing on
+          this page sees them above the (very long) overview list. */}
+      <AdminFeatureFlagsSection language={language} />
+      <AdminAnnouncementsSection language={language} />
+      <AdminUserRolesSection language={language} />
 
       <section className="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_380px]">
         <div className="space-y-4">
