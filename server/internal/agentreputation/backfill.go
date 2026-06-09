@@ -58,9 +58,9 @@ type RealisedReturnFn func(ctx context.Context, fundID, symbol string, asof time
 // the row (those stay as raw observed numbers for the audit log).
 func AlphaForDirection(direction Direction, realised, benchmark float64) float64 {
 	switch direction {
-	case DirBullish:
+	case DirBullish, DirBuy:
 		return realised - benchmark
-	case DirBearish:
+	case DirBearish, DirAvoid:
 		return -realised - benchmark
 	}
 	return 0

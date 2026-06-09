@@ -1,0 +1,75 @@
+{
+  "agent_id": "tail_sniper",
+  "name_zh": "尾盘狙击手",
+  "name_en": "Tail-End Sniper Agent",
+  "category": "cn_ultra_short",
+  "holding_period": "T+1",
+  "philosophy": "在日内资金确认方向后跟随强势股，赚取次日开盘溢价。不预测、只跟随；不过夜两次、严守纪律。",
+  "trigger_time": {
+    "scan_window": "14:30-14:55",
+    "decision_cutoff": "14:55",
+    "timezone": "Asia/Shanghai"
+  },
+  "must_have_criteria": {
+    "daily_gain_pct": {"min": 2.0, "max": 5.0},
+    "turnover_rate_pct": {"min": 3.0, "max": 10.0},
+    "volume_ratio": {"min": 1.5, "max": 3.0},
+    "float_market_cap_yi": {"min": 50, "max": 300},
+    "distance_to_ma60_pct": {"max": 15},
+    "upper_shadow_pct": {"max": 3.0},
+    "ma_alignment": "ma5 > ma10 > ma20"
+  },
+  "qualitative_filters": [
+    "属于当日涨幅榜前3的强势板块成分股",
+    "近20日有过涨停或大阳线启动记录",
+    "无ST、*ST、退市风险警示",
+    "30日内解禁<5%流通盘",
+    "无监管问询函、立案调查"
+  ],
+  "market_regime_filter": {
+    "shanghai_index_intraday_change_pct": {"min": -1.0},
+    "limit_up_count_today": {"min": 30},
+    "rationale": "大盘跌超1%或全市场涨停<30家时，禁用此策略"
+  },
+  "scoring_weights": {
+    "sector_strength": 0.30,
+    "volume_price_quality": 0.25,
+    "longhubang_history": 0.20,
+    "northbound_flow": 0.10,
+    "technical_pattern": 0.15
+  },
+  "red_lines": [
+    "当日有长上影线(>3%) -> 否决",
+    "当日成交额突破历史天量200% -> 否决",
+    "盘中触及涨停又开板 -> 否决",
+    "属于近7日跌幅榜前10的弱势板块 -> 否决"
+  ],
+  "position_sizing": {
+    "single_position_pct": 10,
+    "max_concurrent_holdings": 3,
+    "stop_loss_pct": -3.0
+  },
+  "exit_rules": {
+    "next_day_open_above_3pct": "9:30-9:45 全部卖出",
+    "next_day_open_0_to_3pct": "观察至9:45，未封板即卖",
+    "next_day_open_below_0pct": "9:30:00 集合竞价立即卖出",
+    "next_day_limit_down_open": "挂跌停板排队卖出",
+    "max_holding_period": "T+1 当日必须清仓"
+  },
+  "backtest_baseline": {
+    "win_rate_target": 0.55,
+    "profit_loss_ratio_target": 1.5,
+    "max_drawdown_threshold": 0.15,
+    "annual_trades_estimate": 80
+  },
+  "verdict_enum": ["BUY_TAIL", "SKIP"],
+  "output_format": {
+    "verdict": "BUY_TAIL | SKIP",
+    "confidence": "0-100",
+    "entry_price_range": "[low, high]",
+    "expected_next_day_open_pct": "estimated range",
+    "stop_loss_price": "number",
+    "key_reasons": ["..."],
+    "key_risks": ["..."]
+  }
+}

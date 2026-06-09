@@ -97,6 +97,15 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	}
 	if adminHandler != nil {
 		adminHandler.RegisterRoutes(mux)
+		// Public-facing surfaces of the admin features:
+		//   * /api/feature-flags                  — soft-hide hints for the SPA
+		//   * /api/announcements + .../{id}/read  — banner data + dismissal
+		// Both reuse the cache/service constructed inside adminHandler
+		// so we don't have a second connection pool reading the same
+		// rows. Auth is "any logged-in user" (handled inline by the
+		// individual handlers — see feature_flags.go / announcements.go).
+		registerFeatureFlagPublicRoutes(mux, adminHandler.featureFlags)
+		registerAnnouncementPublicRoutes(mux, adminHandler.announcements)
 	}
 	// P0-8 — audit log hash chain verifier (super-admin only).
 	// Mounted independently of adminHandler so an admin handler
@@ -257,6 +266,66 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		ch.RegisterRoutes(mux)
 	}
 
+	// /advisor consultation surface (migration 098). Isolated from
+	// the fund/team system: routes hang off /api/advisor/* with no
+	// fund_id in the path. nil-safe via newAdvisorHandler; the
+	// advisor_mode feature flag (098 seed, enforce_server_gate=TRUE)
+	// is enforced upstream by featureGateMiddleware so admins can
+	// 503 the entire surface without a redeploy.
+	if ah := newAdvisorHandler(svc); ah != nil {
+		ah.RegisterRoutes(mux)
+	}
+
+	// /api/daily-picks publisher surface (migration 106). The
+	// handler bundles the browse-grid list endpoint, the
+	// quota-gated per-stock detail endpoint, and the admin
+	// run-once trigger. nil-safe via newDailyPicksHandler — when
+	// AdvisorService or DailyPicksRepo isn't wired the constructor
+	// still returns a handler, but the list endpoint returns
+	// empty arrays and the detail endpoint returns 404.
+	if svc.AdvisorService != nil && svc.DailyPicksRepo != nil {
+		dph := newDailyPicksHandler(svc.AdvisorService, svc.DailyPicksRepo, svc.SubscriptionService, svc.DB, svc.DailyPicksLoop)
+		mux.HandleFunc("GET /api/daily-picks", dph.handleList)
+		mux.HandleFunc("GET /api/daily-picks/{date}/{symbol}", dph.handleDetail)
+		mux.HandleFunc("POST /api/daily-picks/_admin/run-once", dph.handleAdminRunOnce)
+	}
+
+	// /api/trending/* — compliance-friendly "observation" lists.
+	// v1 ships Most Active by Volume; the same handler will host
+	// Momentum Screen / Social Trending / Disruptive Screen
+	// siblings in P3. Backed by the same OHLC fetcher the
+	// daily-picks loop uses (cache-shared) and the active
+	// watchlist as universe — both already nil-safe so the route
+	// registers even on a degraded boot (returns empty list with
+	// the criteria disclosure still attached).
+	{
+		trendingOHLC := buildOHLCFetcherFromEnv()
+		trendingH := newTrendingHandler(trendingOHLC, svc.DailyPicksRepo)
+		mux.HandleFunc("GET /api/trending/most-active", trendingH.handleMostActive)
+	}
+
+	// Phase B-4 — /advisor BYOK CRUD surface. Same /api/advisor
+	// prefix so the featureGateMiddleware advisor_mode gate
+	// already covers it. The handler enforces the additional
+	// advisor_byok feature flag + Plan.AllowAdvisorBYOK on top.
+	// Cache pulled from adminHandler so the in-process flag cache
+	// is shared (single source of truth across surfaces).
+	var byokFlagCache *featureFlagCache
+	if adminHandler != nil {
+		byokFlagCache = adminHandler.featureFlags
+	}
+	if bh := newAdvisorBYOKHandler(svc, byokFlagCache); bh != nil {
+		bh.RegisterRoutes(mux)
+	}
+
+	// Phase C-3 — credit-pack catalogue + checkout + webhook +
+	// order history. The webhook lives at /api/lemonsqueezy/webhook
+	// (outside /api/advisor/*) so the advisor_mode flag can't
+	// accidentally block legitimate payment callbacks.
+	if ch := newAdvisorCreditsHandler(svc); ch != nil {
+		ch.RegisterRoutes(mux)
+	}
+
 	// ---- SPA fallback: serve React static files ----
 	spa := spaHandler(cfg.StaticFilesPath)
 	mux.Handle("/", spa)
@@ -283,7 +352,26 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	rateLimitStore := newRateLimiterStore(defaultRateLimitConfig())
 	var handler http.Handler = mux
 	handler = pathAliasMiddleware(handler)
+	// Feature flag soft-gate: a small subset of endpoints carrying
+	// `enforce_server_gate=TRUE` (e.g. ab_test_compare) short-circuit
+	// with 503 when the admin disables the flag. Sits AFTER auth
+	// (so the 503 response carries a real user context for audit)
+	// — wrapping the existing `handler` keeps the layering: auth →
+	// rateLimit → cors → … remains unchanged from this point out.
+	if adminHandler != nil && adminHandler.featureFlags != nil {
+		handler = featureGateMiddleware(adminHandler.featureFlags)(handler)
+	}
 	handler = authMiddlewareWithKeyring(svc.DB, cfg.effectiveJWTKeyring())(handler)
+	// OFAC + EU geo gate sits OUTSIDE auth (so an OFAC-country
+	// scraper that doesn't have a token still gets 451) but
+	// INSIDE rateLimit (so a flood of OFAC requests can't
+	// exhaust our compliance-decision cache). Reads
+	// CF-IPCountry first (production behind Cloudflare), then
+	// X-Vercel-IP-Country, then the X-Forwarded-For-derived
+	// header. When no header is present we fail OPEN — the
+	// alternative (block everything) would 451 every developer
+	// in local dev.
+	handler = complianceGeoMiddleware()(handler)
 	handler = rateLimitMiddleware(rateLimitStore)(handler)
 	handler = corsMiddleware(cfg.CORSOrigins)(handler)
 	handler = compressionMiddleware(handler)

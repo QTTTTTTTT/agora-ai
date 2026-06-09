@@ -151,9 +151,49 @@ func TestRepo_UpsertOutcomes_HappyPath(t *testing.T) {
 	}
 }
 
+func TestRepo_UpsertOutcomes_AdvisorRow(t *testing.T) {
+	r, mock, done := newMockRepo(t)
+	defer done()
+	asof := time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectPrepare("INSERT INTO agent_reputation_outcomes")
+	mock.ExpectExec("INSERT INTO agent_reputation_outcomes").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	err := r.UpsertOutcomes(context.Background(), []Outcome{{
+		AgentID: "master:buffett", AgentName: "Buffett",
+		AgentKind: KindMaster, Category: "master",
+		Symbol: "AAPL", AsOf: asof, Direction: DirBuy, Confidence: 70,
+		RealisedReturn: 0.05, BenchmarkReturn: 0.01, Alpha: 0.04,
+		HorizonDays: 5,
+	}})
+	if err != nil {
+		t.Fatalf("upsert advisor: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("expectations: %v", err)
+	}
+}
+
+func TestRepo_UpsertOutcomes_RejectsAdvisorRowWithFundID(t *testing.T) {
+	r, _, done := newMockRepo(t)
+	defer done()
+	asof := time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC)
+	bad := []Outcome{{
+		FundID: "f1", AgentID: "master:buffett",
+		AgentKind: KindMaster, Symbol: "AAPL", AsOf: asof,
+		Direction: DirBuy, Confidence: 70, HorizonDays: 5,
+	}}
+	if err := r.UpsertOutcomes(context.Background(), bad); err == nil {
+		t.Error("expected advisor rows with FundID to fail validation")
+	}
+}
+
 func TestRepo_RecomputeStats_HappyPath(t *testing.T) {
 	r, mock, done := newMockRepo(t)
 	defer done()
+	// Single fund-scoped recompute when a fundID is passed —
+	// the advisor recompute is skipped.
 	mock.ExpectExec("INSERT INTO agent_reputation_stats").
 		WithArgs("f1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -165,8 +205,12 @@ func TestRepo_RecomputeStats_HappyPath(t *testing.T) {
 func TestRepo_RecomputeStats_AllFunds(t *testing.T) {
 	r, mock, done := newMockRepo(t)
 	defer done()
+	// Two execs when fundID == "": one for fund rows, then one
+	// for advisor rows.
 	mock.ExpectExec("INSERT INTO agent_reputation_stats").
 		WithArgs(nil).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO agent_reputation_stats").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	if err := r.RecomputeStats(context.Background(), ""); err != nil {
 		t.Fatal(err)

@@ -87,9 +87,14 @@ func WithLLMAdapterTemperature(t float64) LLMAdapterOption {
 	return func(a *LLMAdapter) { a.temperature = t }
 }
 
-// NewLLMAdapter builds an LLMAdapter. fundID is required so the
-// per-fund token budget can be enforced. Pass options to set
-// userID, agentID, step name, model tier, etc.
+// NewLLMAdapter builds an LLMAdapter. fundID should be a valid
+// funds.id UUID for fund-mode traffic so the per-fund token budget
+// can be enforced and usage is bucketed by fund. Pass an empty
+// string for user-scoped (non-fund) traffic such as the advisor
+// surface — both llm_budgets.fund_id and usage_entries.fund_id
+// are UUID columns and only accept a real fund UUID or NULL, so
+// any string sentinel would be rejected by Postgres with 22P02.
+// Pass options to set userID, agentID, step name, model tier, etc.
 func NewLLMAdapter(client llm.LLMClient, fundID string, opts ...LLMAdapterOption) *LLMAdapter {
 	a := &LLMAdapter{
 		client:    client,

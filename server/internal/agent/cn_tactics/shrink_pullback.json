@@ -1,0 +1,85 @@
+{
+  "agent_id": "shrink_pullback",
+  "name_zh": "缩量回踩低吸手",
+  "name_en": "Volume-Shrink Pullback Dip Buyer",
+  "category": "cn_swing_trade",
+  "holding_period": "T+2 ~ T+10",
+  "philosophy": "强势股回踩重要均线缩量企稳，是趋势中继的低风险介入点。买在无人问津，卖在众人追捧。",
+  "trigger_time": {
+    "scan_window": "13:00-14:50",
+    "primary_entry_zone": "14:00-14:50 确认日线形态后",
+    "timezone": "Asia/Shanghai"
+  },
+  "must_have_criteria": {
+    "uptrend_confirmed": "近30日涨幅 > 15% 且 ma5 > ma10 > ma20 > ma60",
+    "pullback_depth_pct": {"min": 5.0, "max": 15.0},
+    "pullback_target_ma": "ma10 或 ma20",
+    "pullback_volume_vs_rally_avg_pct": {"max": 50, "rationale": "回踩量必须显著萎缩"},
+    "current_price_vs_ma10": {"tolerance_pct": 2.0},
+    "kline_pattern": "锤头线 / 长下影 / 十字星 / 缩量小阳",
+    "float_market_cap_yi": {"min": 30, "max": 500},
+    "no_breakdown_of_ma20": true
+  },
+  "qualitative_filters": [
+    "回踩期间无明显利空消息",
+    "所属板块仍处于多头排列",
+    "主力资金近5日累计净流入为正",
+    "北向资金近10日未连续大幅流出",
+    "近期无大额解禁(30日内解禁<3%流通盘)"
+  ],
+  "market_regime_filter": {
+    "shanghai_index_20d_trend": "上涨或横盘",
+    "sector_relative_strength_rank": {"top_pct": 30},
+    "rationale": "熊市中所有反弹都是诱多，此策略禁用"
+  },
+  "scoring_weights": {
+    "trend_strength": 0.25,
+    "volume_shrinkage_quality": 0.25,
+    "ma_support_reliability": 0.20,
+    "sector_momentum": 0.15,
+    "capital_flow_health": 0.15
+  },
+  "red_lines": [
+    "回踩跌破ma20 -> 否决",
+    "回踩放量 -> 否决(主力出货)",
+    "出现长上影线 -> 否决",
+    "连续3日阴线收盘 -> 否决",
+    "MACD死叉且绿柱放大 -> 否决",
+    "ST、退市风险股 -> 否决"
+  ],
+  "position_sizing": {
+    "single_position_pct": 12,
+    "max_concurrent_holdings": 4,
+    "stop_loss_pct": -5.0,
+    "first_take_profit_pct": 8.0,
+    "second_take_profit_pct": 15.0,
+    "pyramid_add_on": "突破前高放量时加仓5%"
+  },
+  "exit_rules": {
+    "break_ma20_close": "立即止损",
+    "reach_first_target_8pct": "卖出50%，剩余设保本止损",
+    "reach_second_target_15pct": "再卖30%，剩余移动止盈",
+    "trailing_stop": "持仓收益>10%后，回撤5%即出",
+    "time_stop": "持有10个交易日未达5%收益 -> 清仓",
+    "trend_reversal": "ma5下穿ma10 + 放量阴线 -> 清仓"
+  },
+  "backtest_baseline": {
+    "win_rate_target": 0.60,
+    "profit_loss_ratio_target": 2.0,
+    "max_drawdown_threshold": 0.12,
+    "annual_trades_estimate": 50,
+    "best_market_regime": "牛市中段 / 结构性行情"
+  },
+  "verdict_enum": ["BUY_PULLBACK", "WAIT_FOR_CONFIRMATION", "SKIP"],
+  "output_format": {
+    "verdict": "BUY_PULLBACK | WAIT_FOR_CONFIRMATION | SKIP",
+    "confidence": "0-100",
+    "entry_price_range": "[low, high]",
+    "stop_loss_price": "ma20 - 2%",
+    "target_price_1": "前高 * 0.97",
+    "target_price_2": "前高 * 1.08",
+    "expected_holding_days": "5-10",
+    "key_reasons": ["..."],
+    "key_risks": ["..."]
+  }
+}

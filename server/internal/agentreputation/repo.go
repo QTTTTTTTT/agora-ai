@@ -32,12 +32,18 @@ const (
 	KindAdvocate   AgentKind = "advocate"
 	KindPM         AgentKind = "pm"
 	KindResearcher AgentKind = "researcher"
+	// KindMaster / KindTactic are the /advisor-mode kinds added in
+	// migration 099 — outcomes for these kinds are stored with
+	// fund_id IS NULL because the advisor surface is not scoped
+	// to a fund.
+	KindMaster AgentKind = "master"
+	KindTactic AgentKind = "tactic"
 )
 
 // IsValid reports whether k is one of the known kinds.
 func (k AgentKind) IsValid() bool {
 	switch k {
-	case KindAnalyst, KindAdvocate, KindPM, KindResearcher:
+	case KindAnalyst, KindAdvocate, KindPM, KindResearcher, KindMaster, KindTactic:
 		return true
 	}
 	return false
@@ -50,10 +56,24 @@ const (
 	DirBullish Direction = "bullish"
 	DirBearish Direction = "bearish"
 	DirNeutral Direction = "neutral"
+	// Advisor-mode mappings (migration 099): master verdicts
+	// (BUY/HOLD/AVOID/...) and tactic verdicts (BUY_TAIL/SKIP/...)
+	// collapse into these four buckets when written to the
+	// reputation ledger so the rollup math stays uniform.
+	DirBuy   Direction = "buy"
+	DirAvoid Direction = "avoid"
+	DirSkip  Direction = "skip"
+	DirWait  Direction = "wait"
 )
 
 // IsValid reports whether d is one of the known directions.
-func (d Direction) IsValid() bool { return d == DirBullish || d == DirBearish || d == DirNeutral }
+func (d Direction) IsValid() bool {
+	switch d {
+	case DirBullish, DirBearish, DirNeutral, DirBuy, DirAvoid, DirSkip, DirWait:
+		return true
+	}
+	return false
+}
 
 // Outcome is one materialised decision row.
 type Outcome struct {
@@ -77,10 +97,20 @@ type Outcome struct {
 	CreatedAt       time.Time
 }
 
+// IsAdvisor reports whether the outcome belongs to the
+// /advisor surface (no fund scope, master/tactic kind).
+// Advisor rows are persisted with fund_id IS NULL.
+func (o Outcome) IsAdvisor() bool {
+	return o.AgentKind == KindMaster || o.AgentKind == KindTactic
+}
+
 // Validate enforces the must-have fields.
 func (o Outcome) Validate() error {
-	if strings.TrimSpace(o.FundID) == "" {
+	if !o.IsAdvisor() && strings.TrimSpace(o.FundID) == "" {
 		return errors.New("agentreputation: outcome.FundID required")
+	}
+	if o.IsAdvisor() && strings.TrimSpace(o.FundID) != "" {
+		return errors.New("agentreputation: advisor outcomes must not carry FundID")
 	}
 	if strings.TrimSpace(o.AgentID) == "" {
 		return errors.New("agentreputation: outcome.AgentID required")
@@ -167,7 +197,7 @@ func (r *Repo) UpsertOutcomes(ctx context.Context, outs []Outcome) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const q = `INSERT INTO agent_reputation_outcomes
+	const qFund = `INSERT INTO agent_reputation_outcomes
 		(fund_id, agent_id, agent_name, agent_kind, category, symbol, asof,
 		 direction, confidence, realised_return, benchmark_return, alpha,
 		 horizon_days, source_panel_id, source_debate_id, note)
@@ -186,13 +216,74 @@ func (r *Repo) UpsertOutcomes(ctx context.Context, outs []Outcome) error {
 		              source_panel_id = EXCLUDED.source_panel_id,
 		              source_debate_id = EXCLUDED.source_debate_id,
 		              note = EXCLUDED.note`
-	stmt, err := tx.PrepareContext(ctx, q)
-	if err != nil {
-		return fmt.Errorf("agentreputation: prepare upsert: %w", err)
-	}
-	defer stmt.Close()
+
+	// Advisor rows go through a separate ON CONFLICT path that
+	// targets the partial unique index uq_agent_reputation_outcomes_advisor
+	// (created in migration 099). Postgres requires the WHERE
+	// predicate to match the partial index so the planner picks it.
+	const qAdvisor = `INSERT INTO agent_reputation_outcomes
+		(fund_id, agent_id, agent_name, agent_kind, category, symbol, asof,
+		 direction, confidence, realised_return, benchmark_return, alpha,
+		 horizon_days, source_panel_id, source_debate_id, note)
+		VALUES (NULL, $1, $2, $3, $4, $5, $6,
+		        $7, $8, $9, $10, $11,
+		        $12, $13, $14, $15)
+		ON CONFLICT (agent_id, symbol, asof, horizon_days)
+		WHERE fund_id IS NULL
+		DO UPDATE SET agent_name = EXCLUDED.agent_name,
+		              agent_kind = EXCLUDED.agent_kind,
+		              category = EXCLUDED.category,
+		              direction = EXCLUDED.direction,
+		              confidence = EXCLUDED.confidence,
+		              realised_return = EXCLUDED.realised_return,
+		              benchmark_return = EXCLUDED.benchmark_return,
+		              alpha = EXCLUDED.alpha,
+		              source_panel_id = EXCLUDED.source_panel_id,
+		              source_debate_id = EXCLUDED.source_debate_id,
+		              note = EXCLUDED.note`
+
+	// Prepare lazily so a batch containing only fund-scoped rows
+	// (the dominant case for the legacy backfill) doesn't pay the
+	// cost of preparing the advisor-path statement and existing
+	// tests that ExpectPrepare("INSERT ...") exactly once still
+	// pass without modification.
+	var stmtFund, stmtAdvisor *sql.Stmt
+	defer func() {
+		if stmtFund != nil {
+			_ = stmtFund.Close()
+		}
+		if stmtAdvisor != nil {
+			_ = stmtAdvisor.Close()
+		}
+	}()
+
 	for _, o := range outs {
-		if _, err := stmt.ExecContext(ctx,
+		if o.IsAdvisor() {
+			if stmtAdvisor == nil {
+				prep, prepErr := tx.PrepareContext(ctx, qAdvisor)
+				if prepErr != nil {
+					return fmt.Errorf("agentreputation: prepare advisor upsert: %w", prepErr)
+				}
+				stmtAdvisor = prep
+			}
+			if _, err := stmtAdvisor.ExecContext(ctx,
+				o.AgentID, o.AgentName, string(o.AgentKind), o.Category,
+				strings.ToUpper(o.Symbol), o.AsOf,
+				string(o.Direction), o.Confidence, o.RealisedReturn, o.BenchmarkReturn, o.Alpha,
+				o.HorizonDays, o.SourcePanelID, o.SourceDebateID, o.Note,
+			); err != nil {
+				return fmt.Errorf("agentreputation: upsert advisor outcome (%s/%s): %w", o.AgentID, o.Symbol, err)
+			}
+			continue
+		}
+		if stmtFund == nil {
+			prep, prepErr := tx.PrepareContext(ctx, qFund)
+			if prepErr != nil {
+				return fmt.Errorf("agentreputation: prepare fund upsert: %w", prepErr)
+			}
+			stmtFund = prep
+		}
+		if _, err := stmtFund.ExecContext(ctx,
 			o.FundID, o.AgentID, o.AgentName, string(o.AgentKind), o.Category,
 			strings.ToUpper(o.Symbol), o.AsOf,
 			string(o.Direction), o.Confidence, o.RealisedReturn, o.BenchmarkReturn, o.Alpha,
@@ -210,34 +301,46 @@ func (r *Repo) UpsertOutcomes(ctx context.Context, outs []Outcome) error {
 // RecomputeStats rebuilds the agent_reputation_stats row(s) for
 // the given fund (or all funds when fundID == "") from the
 // outcomes table. Idempotent.
+//
+// The hit / miss CASE expression covers six direction values:
+//
+//	bullish (legacy)  -> hit when realised_return > 0
+//	bearish (legacy)  -> hit when realised_return < 0
+//	buy     (advisor) -> hit when realised_return > 0
+//	avoid   (advisor) -> hit when realised_return < 0
+//	skip / wait / neutral -> never counted as hit or miss
 func (r *Repo) RecomputeStats(ctx context.Context, fundID string) error {
 	if r == nil || r.db == nil {
 		return errors.New("agentreputation: repo not initialised")
 	}
-	const q = `INSERT INTO agent_reputation_stats AS s
-		(fund_id, agent_id, agent_name, agent_kind, category,
-		 decisions_count, hits_count, misses_count,
-		 avg_alpha, sum_alpha, avg_confidence, last_decision_at, updated_at)
-		SELECT fund_id, agent_id,
+	const statsSelect = `SELECT fund_id, agent_id,
 		       MAX(agent_name)             AS agent_name,
 		       MAX(agent_kind)             AS agent_kind,
 		       MAX(category)               AS category,
 		       COUNT(*)                    AS decisions_count,
-		       SUM(CASE WHEN (direction='bullish' AND realised_return > 0)
-		                  OR (direction='bearish' AND realised_return < 0)
+		       SUM(CASE WHEN (direction IN ('bullish','buy')   AND realised_return > 0)
+		                  OR (direction IN ('bearish','avoid') AND realised_return < 0)
 		                THEN 1 ELSE 0 END) AS hits_count,
-		       SUM(CASE WHEN (direction='bullish' AND realised_return < 0)
-		                  OR (direction='bearish' AND realised_return > 0)
+		       SUM(CASE WHEN (direction IN ('bullish','buy')   AND realised_return < 0)
+		                  OR (direction IN ('bearish','avoid') AND realised_return > 0)
 		                THEN 1 ELSE 0 END) AS misses_count,
 		       AVG(alpha)                  AS avg_alpha,
 		       SUM(alpha)                  AS sum_alpha,
 		       AVG(confidence)             AS avg_confidence,
 		       MAX(asof)                   AS last_decision_at,
-		       now()                       AS updated_at
+		       now()                       AS updated_at`
+
+	// Fund-scoped recompute: ON CONFLICT targets uq_agent_reputation_stats_fund.
+	const qFund = `INSERT INTO agent_reputation_stats AS s
+		(fund_id, agent_id, agent_name, agent_kind, category,
+		 decisions_count, hits_count, misses_count,
+		 avg_alpha, sum_alpha, avg_confidence, last_decision_at, updated_at)
+		` + statsSelect + `
 		  FROM agent_reputation_outcomes
-		 WHERE ($1::uuid IS NULL OR fund_id = $1::uuid)
+		 WHERE fund_id IS NOT NULL
+		   AND ($1::uuid IS NULL OR fund_id = $1::uuid)
 		 GROUP BY fund_id, agent_id
-		ON CONFLICT (fund_id, agent_id)
+		ON CONFLICT (fund_id, agent_id) WHERE fund_id IS NOT NULL
 		DO UPDATE SET agent_name = EXCLUDED.agent_name,
 		              agent_kind = EXCLUDED.agent_kind,
 		              category = EXCLUDED.category,
@@ -250,12 +353,43 @@ func (r *Repo) RecomputeStats(ctx context.Context, fundID string) error {
 		              last_decision_at = EXCLUDED.last_decision_at,
 		              updated_at = now()
 		WHERE s.fund_id = EXCLUDED.fund_id`
+
 	var arg interface{}
 	if strings.TrimSpace(fundID) != "" {
 		arg = fundID
 	}
-	if _, err := r.db.ExecContext(ctx, q, arg); err != nil {
-		return fmt.Errorf("agentreputation: recompute stats: %w", err)
+	if _, err := r.db.ExecContext(ctx, qFund, arg); err != nil {
+		return fmt.Errorf("agentreputation: recompute stats (fund): %w", err)
+	}
+
+	// Advisor recompute only runs when no fund filter was passed,
+	// since advisor rows have fund_id IS NULL and a fund-id filter
+	// would always exclude them.
+	if strings.TrimSpace(fundID) != "" {
+		return nil
+	}
+	const qAdvisor = `INSERT INTO agent_reputation_stats AS s
+		(fund_id, agent_id, agent_name, agent_kind, category,
+		 decisions_count, hits_count, misses_count,
+		 avg_alpha, sum_alpha, avg_confidence, last_decision_at, updated_at)
+		` + statsSelect + `
+		  FROM agent_reputation_outcomes
+		 WHERE fund_id IS NULL
+		 GROUP BY fund_id, agent_id
+		ON CONFLICT (agent_id) WHERE fund_id IS NULL
+		DO UPDATE SET agent_name = EXCLUDED.agent_name,
+		              agent_kind = EXCLUDED.agent_kind,
+		              category = EXCLUDED.category,
+		              decisions_count = EXCLUDED.decisions_count,
+		              hits_count = EXCLUDED.hits_count,
+		              misses_count = EXCLUDED.misses_count,
+		              avg_alpha = EXCLUDED.avg_alpha,
+		              sum_alpha = EXCLUDED.sum_alpha,
+		              avg_confidence = EXCLUDED.avg_confidence,
+		              last_decision_at = EXCLUDED.last_decision_at,
+		              updated_at = now()`
+	if _, err := r.db.ExecContext(ctx, qAdvisor); err != nil {
+		return fmt.Errorf("agentreputation: recompute stats (advisor): %w", err)
 	}
 	return nil
 }
@@ -264,9 +398,13 @@ func (r *Repo) RecomputeStats(ctx context.Context, fundID string) error {
 
 // ListStatsParams filters the stats listing.
 type ListStatsParams struct {
-	FundID    string
-	AgentKind AgentKind
-	Limit     int
+	FundID string
+	// AdvisorOnly forces fund_id IS NULL — used by the public
+	// advisor track-record panel. Mutually exclusive with FundID;
+	// when both are set FundID wins.
+	AdvisorOnly bool
+	AgentKind   AgentKind
+	Limit       int
 }
 
 // ListStats returns rolling per-agent stats ordered by avg_alpha
@@ -277,9 +415,12 @@ func (r *Repo) ListStats(ctx context.Context, p ListStatsParams) ([]Stats, error
 	}
 	conds := []string{}
 	args := []interface{}{}
-	if strings.TrimSpace(p.FundID) != "" {
+	switch {
+	case strings.TrimSpace(p.FundID) != "":
 		args = append(args, p.FundID)
 		conds = append(conds, fmt.Sprintf("fund_id = $%d", len(args)))
+	case p.AdvisorOnly:
+		conds = append(conds, "fund_id IS NULL")
 	}
 	if p.AgentKind != "" {
 		args = append(args, string(p.AgentKind))
@@ -311,10 +452,13 @@ func (r *Repo) ListStats(ctx context.Context, p ListStatsParams) ([]Stats, error
 
 // ListOutcomesParams filters the outcomes listing.
 type ListOutcomesParams struct {
-	FundID  string
-	AgentID string
-	Symbol  string
-	Limit   int
+	FundID string
+	// AdvisorOnly forces fund_id IS NULL — used by the public
+	// advisor surface. Mutually exclusive with FundID.
+	AdvisorOnly bool
+	AgentID     string
+	Symbol      string
+	Limit       int
 }
 
 // ListOutcomes returns recent outcomes (latest first).
@@ -324,9 +468,12 @@ func (r *Repo) ListOutcomes(ctx context.Context, p ListOutcomesParams) ([]Outcom
 	}
 	conds := []string{}
 	args := []interface{}{}
-	if strings.TrimSpace(p.FundID) != "" {
+	switch {
+	case strings.TrimSpace(p.FundID) != "":
 		args = append(args, p.FundID)
 		conds = append(conds, fmt.Sprintf("fund_id = $%d", len(args)))
+	case p.AdvisorOnly:
+		conds = append(conds, "fund_id IS NULL")
 	}
 	if strings.TrimSpace(p.AgentID) != "" {
 		args = append(args, p.AgentID)
@@ -385,21 +532,53 @@ func (r *Repo) GetStats(ctx context.Context, fundID, agentID string) (Stats, err
 	return out[0], nil
 }
 
+// GetAdvisorStats fetches a single advisor-mode (fund_id IS NULL,
+// agent_id) summary row. agentID should already carry the
+// "master:" or "tactic:" prefix.
+func (r *Repo) GetAdvisorStats(ctx context.Context, agentID string) (Stats, error) {
+	if r == nil || r.db == nil {
+		return Stats{}, errors.New("agentreputation: repo not initialised")
+	}
+	const q = `SELECT fund_id, agent_id, agent_name, agent_kind, category,
+	                  decisions_count, hits_count, misses_count,
+	                  avg_alpha, sum_alpha, avg_confidence,
+	                  last_decision_at, updated_at
+	             FROM agent_reputation_stats
+	            WHERE fund_id IS NULL AND agent_id = $1`
+	rows, err := r.db.QueryContext(ctx, q, agentID)
+	if err != nil {
+		return Stats{}, fmt.Errorf("agentreputation: get advisor stats: %w", err)
+	}
+	defer rows.Close()
+	out, err := scanStatsRows(rows)
+	if err != nil {
+		return Stats{}, err
+	}
+	if len(out) == 0 {
+		return Stats{}, ErrNotFound
+	}
+	return out[0], nil
+}
+
 // --- helpers ----------------------------------------------------------------
 
 func scanStatsRows(rows *sql.Rows) ([]Stats, error) {
 	var out []Stats
 	for rows.Next() {
 		var s Stats
-		var kind string
+		var (
+			kind   string
+			fundID sql.NullString
+		)
 		if err := rows.Scan(
-			&s.FundID, &s.AgentID, &s.AgentName, &kind, &s.Category,
+			&fundID, &s.AgentID, &s.AgentName, &kind, &s.Category,
 			&s.DecisionsCount, &s.HitsCount, &s.MissesCount,
 			&s.AvgAlpha, &s.SumAlpha, &s.AvgConfidence,
 			&s.LastDecisionAt, &s.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("agentreputation: scan stats: %w", err)
 		}
+		s.FundID = fundID.String
 		s.AgentKind = AgentKind(kind)
 		out = append(out, s)
 	}
@@ -413,14 +592,18 @@ func scanOutcomeRows(rows *sql.Rows) ([]Outcome, error) {
 	var out []Outcome
 	for rows.Next() {
 		var o Outcome
-		var kind, dir string
+		var (
+			kind, dir string
+			fundID    sql.NullString
+		)
 		if err := rows.Scan(
-			&o.ID, &o.FundID, &o.AgentID, &o.AgentName, &kind, &o.Category, &o.Symbol, &o.AsOf,
+			&o.ID, &fundID, &o.AgentID, &o.AgentName, &kind, &o.Category, &o.Symbol, &o.AsOf,
 			&dir, &o.Confidence, &o.RealisedReturn, &o.BenchmarkReturn, &o.Alpha,
 			&o.HorizonDays, &o.SourcePanelID, &o.SourceDebateID, &o.Note, &o.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("agentreputation: scan outcome: %w", err)
 		}
+		o.FundID = fundID.String
 		o.AgentKind = AgentKind(kind)
 		o.Direction = Direction(dir)
 		out = append(out, o)

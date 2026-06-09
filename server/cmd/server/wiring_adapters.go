@@ -66,6 +66,7 @@ import (
 	"github.com/fundai/server/internal/sizing"
 	"github.com/fundai/server/internal/social"
 	"github.com/fundai/server/internal/subscription"
+	"github.com/fundai/server/internal/userbyok"
 	"github.com/fundai/server/internal/value"
 	"github.com/fundai/server/internal/workflow"
 )
@@ -281,6 +282,26 @@ func (r *llmRuntime) SetFundLLMOverrideRepo(repo *repository.FundLLMOverrideRepo
 	}
 	r.router.SetFundOverrideHook(rt.Hook())
 	slog.Info("fund_llm_overrides: hook installed")
+}
+
+// SetUserBYOKRepo wires the Phase B-2 user BYOK repo + installs
+// the user-override hook on the router. nil-safe: passing nil
+// detaches the hook, which immediately disables BYOK platform-
+// wide (every /advisor consult falls back to the platform pool).
+//
+// Safe to call multiple times — the second call replaces the
+// previous hook closure.
+func (r *llmRuntime) SetUserBYOKRepo(repo *userbyok.Repo) {
+	if r == nil || r.router == nil {
+		return
+	}
+	rt := newUserBYOKRuntime(repo, slog.Default())
+	if rt == nil {
+		r.router.SetUserOverrideHook(nil)
+		return
+	}
+	r.router.SetUserOverrideHook(rt.Hook())
+	slog.Info("user_llm_keys: BYOK hook installed")
 }
 
 // newLLMRuntimeWithProviderRepo is the S13 entry point. When repo

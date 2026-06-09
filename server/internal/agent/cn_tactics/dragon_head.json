@@ -1,0 +1,85 @@
+{
+  "agent_id": "dragon_head",
+  "name_zh": "龙头打板手",
+  "name_en": "Dragon-Head Breakout Hunter",
+  "category": "cn_ultra_short_aggressive",
+  "holding_period": "T+1 ~ T+2",
+  "philosophy": "板块龙头一封板，资金共识形成，次日溢价概率最高。打板不打第二，只做最强龙一。高赔率、低胜率、严格止损。",
+  "trigger_time": {
+    "scan_window": "09:30-14:55",
+    "primary_entry_signal": "封板瞬间或炸板回封时",
+    "timezone": "Asia/Shanghai"
+  },
+  "must_have_criteria": {
+    "is_sector_leader": true,
+    "rank_in_sector": 1,
+    "limit_up_today": true,
+    "limit_up_time_before": "10:30 优先，14:30前可接受",
+    "seal_amount_yi": {"min": 1.0},
+    "seal_to_float_cap_ratio": {"min": 0.01},
+    "consecutive_limit_up_count": {"min": 1, "max": 4, "rationale": "1板首龙最优，5板以上风险骤升"},
+    "float_market_cap_yi": {"min": 30, "max": 150},
+    "no_open_after_seal_today": true
+  },
+  "qualitative_filters": [
+    "板块当日涨停家数 >= 5家(板块共振)",
+    "龙头股具备明确题材催化(政策/事件/业绩)",
+    "近60日未连续3板以上(避免接最后一棒)",
+    "龙虎榜有知名游资席位介入(章盟主/方新侠/孙哥/炒股养家等)",
+    "题材处于发酵期1-3天内，未进入退潮期"
+  ],
+  "market_regime_filter": {
+    "shanghai_index_intraday_change_pct": {"min": -0.5},
+    "limit_up_count_today": {"min": 50},
+    "limit_down_count_today": {"max": 20},
+    "fried_board_rate_pct": {"max": 40},
+    "yesterday_top_limit_up_today_performance_pct": {"min": 0, "rationale": "昨日龙头今日红盘=做多氛围健康"}
+  },
+  "scoring_weights": {
+    "sector_consensus_strength": 0.30,
+    "seal_quality": 0.25,
+    "longhubang_hot_money_quality": 0.20,
+    "theme_freshness": 0.15,
+    "market_sentiment_index": 0.10
+  },
+  "red_lines": [
+    "封板后炸板2次以上 -> 否决",
+    "板块内有更强龙头出现 -> 否决，切换龙一",
+    "题材已发酵 > 5天 -> 否决(退潮风险)",
+    "封单金额 < 5000万 -> 否决",
+    "ST、次新股(上市<60日)、停牌前 -> 否决",
+    "大盘炸板率 > 50% -> 当日禁用"
+  ],
+  "position_sizing": {
+    "single_position_pct": 15,
+    "max_concurrent_holdings": 2,
+    "stop_loss_pct": -7.0,
+    "rationale": "高赔率策略，集中重仓但严格止损"
+  },
+  "exit_rules": {
+    "next_day_high_open_above_5pct": "9:30-9:35 集合竞价卖出50%，剩余看封板",
+    "next_day_seals_limit_up_again": "持有，看T+2",
+    "next_day_open_2_to_5pct_no_seal_by_10am": "全部卖出",
+    "next_day_low_open_below_0pct": "9:30立即止损全部出",
+    "T+2_no_new_limit_up": "尾盘清仓",
+    "any_day_break_below_cost_3pct": "无条件止损"
+  },
+  "backtest_baseline": {
+    "win_rate_target": 0.45,
+    "profit_loss_ratio_target": 2.5,
+    "max_drawdown_threshold": 0.25,
+    "annual_trades_estimate": 60,
+    "warning": "回撤波动大，需强心理承受能力"
+  },
+  "verdict_enum": ["CHASE_LIMIT_UP", "SKIP"],
+  "output_format": {
+    "verdict": "CHASE_LIMIT_UP | SKIP",
+    "confidence": "0-100",
+    "entry_price": "涨停价",
+    "stop_loss_price": "number",
+    "expected_next_day_premium_pct": "range",
+    "hot_money_seats_detected": ["席位1", "席位2"],
+    "key_reasons": ["..."],
+    "key_risks": ["..."]
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "agent_id": "first_limit_dip",
+  "name_zh": "首板低吸手",
+  "name_en": "First-Limit-Up Dip Buyer",
+  "category": "cn_short_term",
+  "holding_period": "T+1 ~ T+3",
+  "philosophy": "首次涨停代表主力建仓启动，涨停打开后的回踩是黄金低吸点。买在分歧、卖在一致。",
+  "trigger_time": {
+    "scan_window": "09:30-14:30",
+    "primary_entry_zone": "10:30-11:30 或 13:00-14:00",
+    "timezone": "Asia/Shanghai"
+  },
+  "must_have_criteria": {
+    "is_first_limit_up_in_60d": true,
+    "limit_up_date": "T-0 当日涨停后炸板，或T-1首板次日回踩",
+    "open_pct_today": {"min": -2.0, "max": 5.0},
+    "intraday_pullback_from_high_pct": {"min": 3.0, "max": 7.0},
+    "dip_volume_vs_morning_pct": {"max": 60, "rationale": "回踩缩量是关键"},
+    "float_market_cap_yi": {"min": 30, "max": 200},
+    "price_above_yesterday_close": true,
+    "no_breach_of_yesterday_limit_up_price": true
+  },
+  "qualitative_filters": [
+    "首板封单金额 > 1亿元(强主力痕迹)",
+    "首板涨停时间 < 14:00(早板优于尾盘板)",
+    "所属板块当日仍在涨幅榜前5",
+    "无利好出尽风险(如已发业绩预增公告)",
+    "近期无大股东减持公告"
+  ],
+  "market_regime_filter": {
+    "shanghai_index_5d_trend": "上涨或横盘",
+    "limit_up_break_rate_pct": {"max": 50, "rationale": "全市场炸板率>50%时禁用"},
+    "sector_consistency": "首板个股所在板块次日继续上涨概率 > 60%"
+  },
+  "scoring_weights": {
+    "limit_up_seal_quality": 0.30,
+    "sector_continuation_strength": 0.25,
+    "pullback_volume_shrinkage": 0.20,
+    "longhubang_seat_quality": 0.15,
+    "main_capital_inflow": 0.10
+  },
+  "red_lines": [
+    "首板封单<3000万 -> 否决(主力不坚决)",
+    "回踩跌破首板涨停价 -> 否决",
+    "回踩放量(超过早盘均量) -> 否决(主力出货)",
+    "所属板块次日跌幅榜前3 -> 否决",
+    "ST、*ST、退市风险股 -> 否决"
+  ],
+  "position_sizing": {
+    "single_position_pct": 8,
+    "max_concurrent_holdings": 4,
+    "stop_loss_pct": -4.0,
+    "first_take_profit_pct": 5.0,
+    "let_profit_run_above_pct": 8.0
+  },
+  "exit_rules": {
+    "next_day_limit_up": "持有，看二板表现",
+    "next_day_high_open_3pct_no_seal": "9:45-10:00 卖出",
+    "next_day_low_open_break_cost": "立即止损",
+    "T+2_no_new_high": "尾盘卖出",
+    "T+3_force_exit": "无论盈亏清仓",
+    "trailing_stop_after_profit_5pct": "回撤3%即出"
+  },
+  "backtest_baseline": {
+    "win_rate_target": 0.50,
+    "profit_loss_ratio_target": 2.0,
+    "max_drawdown_threshold": 0.18,
+    "annual_trades_estimate": 100
+  },
+  "verdict_enum": ["BUY_DIP", "WAIT_FOR_CONFIRMATION", "SKIP"],
+  "output_format": {
+    "verdict": "BUY_DIP | WAIT | SKIP",
+    "confidence": "0-100",
+    "entry_price_range": "[low, high]",
+    "stop_loss_price": "number",
+    "target_price_t1": "number",
+    "target_price_t3": "number",
+    "key_reasons": ["..."],
+    "key_risks": ["..."]
+  }
+}

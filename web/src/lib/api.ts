@@ -223,6 +223,17 @@ function createRequestId(): string {
   return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// DEFAULT_REQUEST_TIMEOUT_MS caps any single API request at 45 seconds.
+// We pick 45s instead of a smaller bound because a few legit endpoints
+// (decision-trace LLM localisation, full A/B analysis recompute) can
+// genuinely take 20-30s end-to-end. Anything beyond 45s is almost
+// certainly a hung connection, queue-blocked request, or stalled
+// proxy hop — leaving the page in an indefinite spinner is a worse
+// UX than surfacing a "timeout, please retry" error. Callers that
+// know they need longer can pass `init.signal` themselves; we only
+// install our own AbortController when none is supplied.
+const DEFAULT_REQUEST_TIMEOUT_MS = 45_000;
+
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getApiToken();
   const headers = new Headers(init.headers ?? {});
@@ -250,6 +261,22 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     headers.set("Content-Type", "application/json");
   }
 
+  // Install a default abort controller so a hung response can't lock
+  // the UI forever. We set a flag so the catch block can tell our
+  // own timeout-driven abort apart from a caller-supplied AbortSignal
+  // (which should surface as the original AbortError, not a "timeout").
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  let signal = init.signal ?? undefined;
+  if (!signal && typeof AbortController !== "undefined") {
+    const controller = new AbortController();
+    signal = controller.signal;
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, DEFAULT_REQUEST_TIMEOUT_MS);
+  }
+
   // Network-failure path: fetch() rejects on DNS, CORS, offline, TLS,
   // or a hard browser abort. None of those produce a Response object
   // so the !response.ok branch below can't see them. We toast a
@@ -264,13 +291,33 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
       ...init,
       credentials: init.credentials ?? "include",
       headers,
+      signal,
     });
   } catch (err) {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+    if (timedOut) {
+      toast.error(
+        { zh: "请求超时", en: "Request timed out" },
+        { zh: "服务响应较慢，请稍后重试。", en: "The server is slow to respond. Please retry shortly." },
+      );
+      throw new ApiError(
+        "请求超时，请稍后重试。",
+        0,
+        `Timed out after ${DEFAULT_REQUEST_TIMEOUT_MS}ms`,
+        requestId,
+        null,
+      );
+    }
     toast.error(
       { zh: "网络异常", en: "Network error" },
       { zh: "请检查网络连接后重试。", en: "Check your network connection and try again." },
     );
     throw err;
+  }
+  if (timeoutId !== null) {
+    clearTimeout(timeoutId);
   }
 
   const responseRequestId = response.headers.get("X-Request-ID") ?? requestId;
@@ -742,6 +789,14 @@ export interface BacktestSubmitInput {
   maxOrdersPerDay?: number;
   engineKind?: "fallback" | "llm" | "llm-debate" | string;
   walkForward?: WalkForwardInput;
+  /** Index ticker to track alongside the strategy. e.g. "SPY", "QQQ", "IWM". */
+  benchmarkSymbol?: string;
+  /**
+   * How often the decision engine fires. "daily" (default) runs every
+   * trading day, "monthly" runs on the first trading day of each month —
+   * matches the Stage-1 US SaaS rebalance cadence.
+   */
+  rebalanceFrequency?: "daily" | "weekly" | "monthly" | string;
 }
 
 export interface WalkForwardInput {
@@ -811,6 +866,21 @@ export interface BacktestMetricsView {
   tradeCount: number;
   winningTradeCount: number;
   losingTradeCount: number;
+  /** All zero when the run had no benchmark or only had a 1-day window. */
+  benchmarkCumulativeReturn?: number;
+  excessReturn?: number;
+  excessMaxDrawdown?: number;
+  alpha?: number;
+  beta?: number;
+  trackingError?: number;
+  informationRatio?: number;
+}
+
+export interface BacktestBenchmarkPoint {
+  date: string;
+  close: number;
+  nav: number;
+  pct: number;
 }
 
 export interface BacktestResultView {
@@ -821,6 +891,8 @@ export interface BacktestResultView {
   metrics: BacktestMetricsView;
   completedAt?: string;
   walkForward?: WalkForwardResultView;
+  benchmarkSymbol?: string;
+  benchmarkCurve?: BacktestBenchmarkPoint[];
 }
 
 export interface BacktestRequestEcho {
@@ -834,6 +906,8 @@ export interface BacktestRequestEcho {
   maxOrdersPerDay: number;
   initialPositions?: BacktestInitialPosition[];
   walkForward?: WalkForwardInput;
+  benchmarkSymbol?: string;
+  rebalanceFrequency?: string;
 }
 
 export interface BacktestJob {
@@ -857,6 +931,276 @@ export async function submitBacktest(fundId: string, body: BacktestSubmitInput):
 
 export async function listBacktests(fundId: string): Promise<BacktestJob[]> {
   return apiGet<BacktestJob[]>(`/api/funds/${encodeURIComponent(fundId)}/backtests`);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2 — Factor IC/IR/分层 report
+// ---------------------------------------------------------------------------
+
+export interface FactorReportInput {
+  factorNames?: string[];
+  fixtureName?: string;
+  horizons?: number[];
+  layeredHorizonDays?: number;
+  seedOverride?: number;
+  daysOverride?: number;
+}
+
+export interface FactorICStats {
+  horizonDays: number;
+  pearsonSeries: number[];
+  spearmanSeries: number[];
+  pearsonMean: number;
+  pearsonStd: number;
+  pearsonIR: number;
+  pearsonTStat: number;
+  spearmanMean: number;
+  spearmanStd: number;
+  spearmanIR: number;
+  spearmanTStat: number;
+  positiveICRatio: number;
+}
+
+export interface FactorLayeredResult {
+  horizonDays: number;
+  quintileMeanReturn: [number, number, number, number, number];
+  quintileAnnualReturn: [number, number, number, number, number];
+  spread: number;
+  spreadAnnual: number;
+  spreadTStat: number;
+  monotonic: boolean;
+  observationPeriods: number;
+}
+
+export interface FactorLongShortResult {
+  navCurve: { date: string; nav: number }[];
+  annualReturn: number;
+  annualVol: number;
+  sharpe: number;
+  maxDrawdown: number;
+}
+
+export interface FactorQualificationReport {
+  horizonDaysReference: number;
+  passesIC: boolean;
+  passesIR: boolean;
+  passesTStat: boolean;
+  passesPositiveRatio: boolean;
+  passesLongShort: boolean;
+}
+
+export interface FactorReportView {
+  factorName: string;
+  startDate: string;
+  endDate: string;
+  universeMedianSize: number;
+  observationDays: number;
+  ic: Record<string, FactorICStats>;
+  layered?: FactorLayeredResult;
+  longShort?: FactorLongShortResult;
+  qualified: boolean;
+  qualReport: FactorQualificationReport;
+}
+
+export async function runFactorReport(input: FactorReportInput = {}): Promise<FactorReportView[]> {
+  return apiPost<FactorReportView[]>(`/api/factorlab/reports`, input);
+}
+
+// --- Walk-forward factor IC stability ---------------------------------------
+
+export interface WalkForwardFactorInput {
+  factorName: string;
+  numFolds?: number;
+  horizons?: number[];
+  fixtureName?: string;
+  seedOverride?: number;
+  daysOverride?: number;
+}
+
+export interface FoldICResultView {
+  index: number;
+  startDate: string;
+  endDate: string;
+  observationDays: number;
+  spearmanMean: number;
+  spearmanIR: number;
+  spearmanTStat: number;
+  positiveICRatio: number;
+  longShortSharpe: number;
+  longShortAnnual: number;
+  layeredSpreadAnnual: number;
+  qualified: boolean;
+  error?: string;
+}
+
+export interface WalkForwardFactorResultView {
+  factorName: string;
+  numFolds: number;
+  folds: FoldICResultView[];
+  meanIC22d: number;
+  minIC22d: number;
+  icStabilityRatio: number;
+  allFoldsQualified: boolean;
+  qualifiedFoldCount: number;
+}
+
+export async function runWalkForwardFactor(input: WalkForwardFactorInput): Promise<WalkForwardFactorResultView> {
+  return apiPost<WalkForwardFactorResultView>(`/api/factorlab/walkforward`, input);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4 — Paper Trading (tamper-evident performance archive)
+// ---------------------------------------------------------------------------
+
+export interface PaperPortfolioInput {
+  name: string;
+  strategy: string;
+  market: string;
+  benchmarkSymbol?: string;
+  initialCapital: number;
+}
+
+export interface PaperPortfolioView {
+  id: string;
+  name: string;
+  strategy: string;
+  market: string;
+  benchmarkSymbol?: string;
+  initialCapital: number;
+  currentNav: number;
+  cashBalance: number;
+  createdAt: string;
+  lastRebalanceAt?: string;
+}
+
+export interface ProposeOrderInput {
+  portfolioId: string;
+  symbol: string;
+  action: "BUY" | "SELL" | "REBALANCE";
+  targetWeight?: number;
+  sharesChange?: number;
+  decidedPrice?: number;
+  aiReasoning?: Record<string, unknown>;
+}
+
+export interface PaperOrderView {
+  id: string;
+  portfolioId: string;
+  symbol: string;
+  action: "BUY" | "SELL" | "REBALANCE";
+  targetWeight?: number;
+  sharesChange?: number;
+  decidedAt: string;
+  decidedPrice?: number;
+  executedAt?: string;
+  executedPrice?: number;
+  aiReasoning?: Record<string, unknown>;
+  hashSignature: string;
+  canonicalPayload: string;
+  publicProofURL?: string;
+  otsStatus: "pending" | "submitted" | "confirmed" | "disabled";
+}
+
+export interface PaperNavPointView {
+  date: string;
+  nav: number;
+  dailyReturn?: number;
+  benchmarkNav?: number;
+}
+
+export async function createPaperPortfolio(input: PaperPortfolioInput): Promise<PaperPortfolioView> {
+  return apiPost<PaperPortfolioView>(`/api/papertrading/portfolios`, input);
+}
+
+export async function listPaperPortfolios(): Promise<PaperPortfolioView[]> {
+  return apiGet<PaperPortfolioView[]>(`/api/papertrading/portfolios`);
+}
+
+export async function getPaperPortfolio(portfolioId: string): Promise<PaperPortfolioView> {
+  return apiGet<PaperPortfolioView>(`/api/papertrading/portfolios/${encodeURIComponent(portfolioId)}`);
+}
+
+export async function proposePaperOrder(input: ProposeOrderInput): Promise<PaperOrderView> {
+  return apiPost<PaperOrderView>(`/api/papertrading/orders`, input);
+}
+
+export async function listPaperOrders(portfolioId: string, limit = 100): Promise<PaperOrderView[]> {
+  return apiGet<PaperOrderView[]>(
+    `/api/papertrading/portfolios/${encodeURIComponent(portfolioId)}/orders?limit=${limit}`,
+  );
+}
+
+export async function getPaperNavHistory(portfolioId: string): Promise<PaperNavPointView[]> {
+  return apiGet<PaperNavPointView[]>(
+    `/api/papertrading/portfolios/${encodeURIComponent(portfolioId)}/nav`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 5 — A-share intraday signal dry-run
+// ---------------------------------------------------------------------------
+
+export type CNIntradayMarket = "main_board" | "chinext" | "star" | "st" | "bse";
+export type CNIntradayRuleSet = "conservative" | "aggressive";
+
+export interface CNIntradayBarInput {
+  timestamp: string; // "YYYY-MM-DD HH:MM" or RFC3339
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  amount?: number;
+  bidAskRatio?: number;
+  bigOrderNet?: number;
+}
+
+export interface CNIntradayDryRunInput {
+  symbol: string;
+  name?: string;
+  market: CNIntradayMarket;
+  prevClose: number;
+  bars: CNIntradayBarInput[];
+  nowBeijing?: string;
+  sectorRank?: number;
+  ruleSet?: CNIntradayRuleSet;
+}
+
+export interface CNIntradaySignalView {
+  timestamp: string;
+  symbol: string;
+  name: string;
+  type: "BUY" | "ADD" | "SELL" | "WARNING";
+  price: number;
+  confidence: number;
+  suggestedPosition: number;
+  targetPrice: number;
+  stopLoss: number;
+  reasons: string[];
+  riskWarnings: string[];
+}
+
+export interface CNIntradayFactorTuple {
+  breakout: number;
+  volumeSurge: number;
+  bigInflow: number;
+  orderImbalance: number;
+  sectorRank: number;
+}
+
+export interface CNIntradayFeishuPreview {
+  title: string;
+  lines: string[];
+}
+
+export interface CNIntradayDryRunResult {
+  signal?: CNIntradaySignalView;
+  factorScores: CNIntradayFactorTuple;
+  feishu?: CNIntradayFeishuPreview;
+}
+
+export async function dryRunCNIntradaySignal(input: CNIntradayDryRunInput): Promise<CNIntradayDryRunResult> {
+  return apiPost<CNIntradayDryRunResult>(`/api/cnintraday/signals/dry-run`, input);
 }
 
 export async function getBacktest(fundId: string, jobId: string): Promise<BacktestJob> {
@@ -5317,4 +5661,642 @@ export async function listFundLLMCatalog(fundId: string): Promise<ListFundLLMCat
   return apiGet<ListFundLLMCatalogResponse>(
     `/api/funds/${encodeURIComponent(fundId)}/llm-catalog`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Advisor (大师团队咨询) — migration 098
+// ---------------------------------------------------------------------------
+//
+// Separate from the fund/team subsystem: all endpoints hang off
+// /api/advisor/* and carry no fundId. Auth uses the same session cookie.
+// The whole surface can be 503'd by toggling the `advisor_mode` feature
+// flag in the admin console.
+
+export type AdvisorVerdict =
+  | "STRONG_BUY"
+  | "BUY"
+  | "HOLD"
+  | "AVOID"
+  | "SHORT"
+  | "MIXED"
+  | "SKIP"
+  | "PASS";
+
+export type AdvisorPresetKind = "masters" | "tactics" | "mixed" | "empty";
+
+export interface AdvisorPreset {
+  preset_key: string;
+  label_zh: string;
+  label_en: string;
+  description_zh: string;
+  description_en: string;
+  master_keys: string[];
+  tactic_keys: string[];
+  kind: AdvisorPresetKind;
+  sort_order: number;
+}
+
+export interface AdvisorMasterReport {
+  master_key: string;
+  master_name_zh: string;
+  master_name_en: string;
+  verdict: AdvisorVerdict;
+  confidence: number;
+  thesis: string;
+  key_reasons: string[];
+  key_risks: string[];
+  master_specific?: Record<string, unknown>;
+  red_lines_hit?: string[];
+  llm_model?: string;
+  generated_at: string;
+}
+
+export interface AdvisorTacticReport {
+  tactic_key: string;
+  tactic_name_zh: string;
+  tactic_name_en: string;
+  verdict: string;
+  confidence: number;
+  thesis: string;
+  entry_price_low?: number | null;
+  entry_price_high?: number | null;
+  stop_loss_price?: number | null;
+  target_t1?: number | null;
+  target_t3?: number | null;
+  expected_holding_days?: number | null;
+  score: number;
+  key_reasons: string[];
+  key_risks: string[];
+  red_lines_hit?: string[];
+  market_regime_pass: boolean;
+  market_regime_reason?: string;
+  generated_at: string;
+}
+
+/**
+ * Price-action / momentum / volatility snapshot the master
+ * panel saw when it formed its verdict. Mirrors the Go
+ * agent.MasterTechnicalBlock — see master_agent.go for the
+ * compliance contract (rule 9: model can QUOTE these values
+ * but never project them into price targets / signals).
+ *
+ * Omitted when the wiring layer's OHLC fetcher couldn't reach
+ * the symbol (Yahoo throttled, market unsupported, etc.). The
+ * detail-modal renderer handles the absent case by simply
+ * not showing the technical section.
+ */
+export interface MasterTechnicalBlock {
+  /** UTC RFC3339 of the latest bar used in the computation. */
+  asof?: string;
+  bars_used?: number;
+  last_close?: number;
+  /** Decimals (0.05 = +5%), not percent. */
+  pct_change_1d?: number;
+  pct_change_5d?: number;
+  pct_change_20d?: number;
+  /** Negative when below the 52-week high; 0 at a fresh high. */
+  pct_change_from_52w_high?: number;
+  sma20?: number;
+  sma50?: number;
+  sma200?: number;
+  /** "bullish" | "bearish" | "mixed". */
+  ma_alignment?: string;
+  rsi14?: number;
+  /** "overbought" | "oversold" | "neutral". */
+  rsi14_zone?: string;
+  macd_line?: number;
+  macd_signal?: number;
+  macd_hist?: number;
+  /** "bullish" | "bearish" | "" — fresh cross at latest bar. */
+  macd_cross?: string;
+  atr14_pct_of_price?: number;
+  kdj_k?: number;
+  kdj_d?: number;
+  kdj_j?: number;
+  volume?: number;
+  /** Latest bar / 20-bar SMA. >1 = above average. */
+  relative_volume?: number;
+  support?: number;
+  resistance?: number;
+  sr_window?: number;
+  /** "above_resistance" | "below_support" | "near_resistance" | "near_support" | "". */
+  breakout_state?: string;
+  /** Pre-formatted bullet items, safe to render as-is. */
+  tags?: string[];
+}
+
+export interface AdvisorConsultResponse {
+  consultation_id: string;
+  symbol: string;
+  /**
+   * Issuer's short Chinese / English name (e.g. "德科立",
+   * "Apple Inc."). Omitted when the upstream data provider
+   * could not resolve a name; UI falls back to bare symbol.
+   */
+  symbol_name?: string;
+  preset_key: string;
+  aggregate_verdict: AdvisorVerdict;
+  aggregate_confidence: number;
+  consensus_score: number;
+  master_reports: AdvisorMasterReport[];
+  tactic_reports: AdvisorTacticReport[];
+  /**
+   * Technical snapshot fed into the master panel. Lands on
+   * daily_picks.result_json so the detail-modal renders the
+   * same table on every reader's screen.
+   */
+  technical?: MasterTechnicalBlock;
+  created_at: string;
+}
+
+export interface AdvisorConsultRequest {
+  symbol: string;
+  preset_key: string;
+  market?: string;
+  asset_class?: string;
+  custom_master_keys?: string[];
+  custom_tactic_keys?: string[];
+  notes?: string;
+  price_last?: number;
+  price_change?: number;
+  currency?: string;
+}
+
+export interface AdvisorConsultationSummary {
+  id: string;
+  symbol: string;
+  /** See AdvisorConsultResponse.symbol_name. */
+  symbol_name?: string;
+  market?: string;
+  preset_key: string;
+  aggregate_verdict: AdvisorVerdict;
+  aggregate_confidence: number;
+  consensus_score: number;
+  master_count: number;
+  tactic_count: number;
+  created_at: string;
+}
+
+export interface AdvisorHistoryResponse {
+  consultations: AdvisorConsultationSummary[];
+  details?: AdvisorConsultationDetail[];
+}
+
+export interface AdvisorConsultationDetail {
+  id: string;
+  symbol: string;
+  /** See AdvisorConsultResponse.symbol_name. */
+  symbol_name?: string;
+  market?: string;
+  asset_class?: string;
+  preset_key: string;
+  aggregate_verdict: AdvisorVerdict;
+  aggregate_confidence: number;
+  consensus_score: number;
+  notes?: string;
+  price_at_consult?: number | null;
+  master_reports: AdvisorMasterReport[];
+  tactic_reports: AdvisorTacticReport[];
+  created_at: string;
+}
+
+export interface AdvisorHealthResponse {
+  status: string;
+  masters_loaded: boolean;
+  tactics_loaded: boolean;
+  server_time: string;
+}
+
+export async function fetchAdvisorHealth(): Promise<AdvisorHealthResponse> {
+  return apiGet<AdvisorHealthResponse>("/api/advisor/health");
+}
+
+export async function listAdvisorPresets(): Promise<{ presets: AdvisorPreset[] }> {
+  return apiGet<{ presets: AdvisorPreset[] }>("/api/advisor/presets");
+}
+
+export async function consultAdvisor(req: AdvisorConsultRequest): Promise<AdvisorConsultResponse> {
+  return apiPost<AdvisorConsultResponse>("/api/advisor/consult", req);
+}
+
+export async function listAdvisorHistory(params?: {
+  limit?: number;
+  symbol?: string;
+  preset_key?: string;
+  include_children?: boolean;
+}): Promise<AdvisorHistoryResponse> {
+  const query = new URLSearchParams();
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.symbol) query.set("symbol", params.symbol);
+  if (params?.preset_key) query.set("preset_key", params.preset_key);
+  if (params?.include_children) query.set("include", "children");
+  const qs = query.toString();
+  return apiGet<AdvisorHistoryResponse>(`/api/advisor/history${qs ? `?${qs}` : ""}`);
+}
+
+export async function getAdvisorConsultation(id: string): Promise<AdvisorConsultationDetail> {
+  return apiGet<AdvisorConsultationDetail>(
+    `/api/advisor/consultations/${encodeURIComponent(id)}`,
+  );
+}
+
+// ============================================================================
+// /api/daily-picks — publisher-mode shared cache surface
+// ============================================================================
+
+/**
+ * A single row in the daily picks browse grid. The shape is a
+ * PROJECTION of the underlying daily_picks row — the full
+ * ConsultResponse only ships on the detail endpoint to keep the
+ * list response bounded (50 rows × full panel JSON would be ~1MB).
+ */
+export interface DailyPickRow {
+  symbol: string;
+  /** Issuer's short name, e.g. "Apple Inc.". Optional. */
+  symbol_name?: string;
+  market: string;
+  preset_key: string;
+  /** ISO yyyy-mm-dd. */
+  pick_date: string;
+  aggregate_verdict: AdvisorVerdict;
+  /**
+   * 0-100 (or NEGATIVE for AVOID/SHORT) — see backend
+   * advisor.PublishConsult comment. Browse grid sorts DESC so
+   * strongest BUY floats to the top.
+   */
+  aggregate_score: number;
+  consensus: number;
+  /** Verbatim thesis sentence of the highest-confidence master. */
+  headline_thesis?: string;
+  /** True when the publisher run for this cell failed; UI greys out. */
+  has_error?: boolean;
+}
+
+export interface DailyPicksListResponse {
+  picks: DailyPickRow[];
+  total_count: number;
+  /** Subscriber tier of the requester. */
+  tier: string;
+  /** Days of lag applied to the free tier. */
+  free_lag_days: number;
+  /** ISO yyyy-mm-dd of the newest row in the DB across all tiers. */
+  newest_available_date?: string;
+  /** ISO yyyy-mm-dd of the newest row this tier can see. */
+  newest_for_tier_date?: string;
+  /**
+   * True when today's set exists but the requester's tier can't
+   * see it. UI uses this to render an upgrade overlay over the
+   * "today" tab. False when there's nothing to upgrade for.
+   */
+  upgrade_required_for_today: boolean;
+}
+
+/**
+ * Detail-endpoint response. `pick` is the full ConsultResponse
+ * JSON shape (master_reports, tactic_reports, etc.) so the
+ * existing MasterVerdictCard / TacticVerdictCard render it
+ * unchanged.
+ */
+// ============================================================================
+// /api/trending — compliance-friendly market observation lists
+// ============================================================================
+
+/**
+ * One row in the Most Active by Volume list. Pure data — no
+ * verdicts, no subjective text. The ordering criterion is
+ * disclosed in the response payload (criteria_disclosed).
+ */
+export interface TrendingMostActiveRow {
+  rank: number;
+  symbol: string;
+  symbol_name?: string;
+  last_close: number;
+  /** Decimal, not percent (0.012 = +1.2%). */
+  pct_change_1d: number;
+  volume: number;
+  /** Latest volume / 20-bar SMA volume. >1 = above average. */
+  vol_20d_ratio: number;
+  /** UTC RFC3339 of the latest bar. */
+  asof?: string;
+}
+
+export interface TrendingMostActiveResponse {
+  list_name: string;
+  /** Publicly disclosed objective criteria — the algorithmic-output proof. */
+  criteria_disclosed: string[];
+  market: string;
+  generated_at: string;
+  universe_size: number;
+  results: TrendingMostActiveRow[];
+  /** Bottom-of-page legal disclaimer. */
+  disclaimer: string;
+}
+
+export async function getTrendingMostActive(params?: {
+  market?: string;
+  limit?: number;
+}): Promise<TrendingMostActiveResponse> {
+  const q = new URLSearchParams();
+  if (params?.market) q.set("market", params.market);
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return apiGet<TrendingMostActiveResponse>(
+    `/api/trending/most-active${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export interface DailyPickDetailResponse {
+  pick: AdvisorConsultResponse;
+  symbol: string;
+  symbol_name?: string;
+  market: string;
+  preset_key: string;
+  pick_date: string;
+  tier: string;
+  /**
+   * How many distinct stock-day pairs this user has opened today.
+   * Re-opens of the SAME (stock, day) do not increment — the
+   * counter is "what did you read", not "how many requests did
+   * you fire".
+   */
+  quota_used_today: number;
+  /** -1 = unlimited. */
+  quota_cap_today: number;
+}
+
+export async function listDailyPicks(params?: {
+  market?: string;
+  preset?: string;
+  date?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<DailyPicksListResponse> {
+  const query = new URLSearchParams();
+  if (params?.market) query.set("market", params.market);
+  if (params?.preset) query.set("preset", params.preset);
+  if (params?.date) query.set("date", params.date);
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.offset) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return apiGet<DailyPicksListResponse>(
+    `/api/daily-picks${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export async function getDailyPickDetail(
+  date: string,
+  symbol: string,
+  params?: { market?: string; preset?: string },
+): Promise<DailyPickDetailResponse> {
+  const query = new URLSearchParams();
+  if (params?.market) query.set("market", params.market);
+  if (params?.preset) query.set("preset", params.preset);
+  const qs = query.toString();
+  return apiGet<DailyPickDetailResponse>(
+    `/api/daily-picks/${encodeURIComponent(date)}/${encodeURIComponent(symbol)}${qs ? `?${qs}` : ""}`,
+  );
+}
+
+/**
+ * Admin-only: trigger one full publisher wave synchronously. Used
+ * for ops and the e2e smoke test. Returns the number of picks
+ * written.
+ */
+export async function adminRunDailyPicksOnce(): Promise<{ picks_written: number }> {
+  return apiPost<{ picks_written: number }>("/api/daily-picks/_admin/run-once");
+}
+
+// --- Phase 5: advisor track record ----------------------------------------
+
+export interface AdvisorTrackRecordRow {
+  agent_id: string;
+  agent_name: string;
+  agent_kind: "master" | "tactic" | string;
+  category: string;
+  decisions_count: number;
+  hits_count: number;
+  misses_count: number;
+  hit_rate: number;
+  avg_alpha: number;
+  avg_confidence: number;
+  last_decision_at?: string;
+  updated_at: string;
+}
+
+export interface AdvisorTrackRecordResponse {
+  masters: AdvisorTrackRecordRow[];
+  tactics: AdvisorTrackRecordRow[];
+}
+
+export async function fetchAdvisorTrackRecord(
+  limit?: number,
+): Promise<AdvisorTrackRecordResponse> {
+  const qs = typeof limit === "number" ? `?limit=${limit}` : "";
+  return apiGet<AdvisorTrackRecordResponse>(`/api/advisor/track-record${qs}`);
+}
+
+// ============================================================================
+// Phase A/C — advisor billing summary
+// ============================================================================
+
+export interface AdvisorBillingSummary {
+  plan_tier: string;
+  year_month: string;
+  deep_limit: number;
+  deep_used: number;
+  deep_remaining: number;
+  quick_limit: number;
+  quick_used: number;
+  quick_remaining: number;
+  next_reset_at: string;
+  allow_advisor_byok: boolean;
+  upgrade_suggested?: string;
+  credit_deep_balance?: number;
+  credit_quick_balance?: number;
+  total_purchased_cents?: number;
+}
+
+export async function fetchAdvisorBillingSummary(): Promise<AdvisorBillingSummary> {
+  return apiGet<AdvisorBillingSummary>("/api/advisor/billing/summary");
+}
+
+// ============================================================================
+// Phase B — BYOK key CRUD
+// ============================================================================
+
+export interface AdvisorByokKey {
+  id: string;
+  provider: string;
+  label: string;
+  api_key_fingerprint: string;
+  api_key_preview: string;
+  base_url?: string;
+  model_name?: string;
+  monthly_budget_cents_usd: number;
+  is_active: boolean;
+  last_used_at?: string;
+  last_verified_at?: string;
+  revoked_at?: string;
+  revoked_reason?: string;
+  created_at: string;
+}
+
+export interface AdvisorByokListResponse {
+  keys: AdvisorByokKey[];
+}
+
+export interface AdvisorByokCreateRequest {
+  provider: string;
+  label?: string;
+  api_key: string;
+  base_url?: string;
+  model_name?: string;
+  monthly_budget_cents_usd?: number;
+}
+
+export async function listAdvisorByokKeys(): Promise<AdvisorByokListResponse> {
+  return apiGet<AdvisorByokListResponse>("/api/advisor/byok/keys");
+}
+
+export async function createAdvisorByokKey(
+  req: AdvisorByokCreateRequest,
+): Promise<AdvisorByokKey> {
+  return apiPost<AdvisorByokKey>("/api/advisor/byok/keys", req);
+}
+
+export async function updateAdvisorByokBudget(
+  keyId: string,
+  monthlyBudgetCentsUSD: number,
+): Promise<{ ok: boolean }> {
+  return apiPut<{ ok: boolean }>(`/api/advisor/byok/keys/${encodeURIComponent(keyId)}/budget`, {
+    monthly_budget_cents_usd: monthlyBudgetCentsUSD,
+  });
+}
+
+export async function setAdvisorByokActive(
+  keyId: string,
+  isActive: boolean,
+): Promise<{ ok: boolean; is_active: boolean }> {
+  return apiPut<{ ok: boolean; is_active: boolean }>(
+    `/api/advisor/byok/keys/${encodeURIComponent(keyId)}/active`,
+    { is_active: isActive },
+  );
+}
+
+export async function deleteAdvisorByokKey(
+  keyId: string,
+  reason?: string,
+): Promise<{ ok: boolean }> {
+  return apiRequest<{ ok: boolean }>(`/api/advisor/byok/keys/${encodeURIComponent(keyId)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ reason: reason ?? "user_revoked" }),
+  });
+}
+
+// ============================================================================
+// Phase C — credit packs + checkout + order history
+// ============================================================================
+
+export interface AdvisorCreditPack {
+  sku: string;
+  label_zh: string;
+  label_en: string;
+  description_zh: string;
+  description_en: string;
+  deep_units: number;
+  quick_units: number;
+  price_cents_usd: number;
+  sort_order: number;
+  available: boolean;
+}
+
+export interface AdvisorCreditPackListResponse {
+  packs: AdvisorCreditPack[];
+  checkout_enabled: boolean;
+}
+
+export interface AdvisorCheckoutResponse {
+  order_id: string;
+  checkout_url: string;
+  pack_sku: string;
+}
+
+export interface AdvisorCreditOrder {
+  id: string;
+  pack_sku: string;
+  deep_units_granted: number;
+  quick_units_granted: number;
+  price_cents_usd: number;
+  currency: string;
+  status: "pending" | "paid" | "refunded" | "failed";
+  lemonsqueezy_order_id?: string;
+  checkout_url?: string;
+  paid_at?: string;
+  refunded_at?: string;
+  created_at: string;
+}
+
+export interface AdvisorOrderListResponse {
+  orders: AdvisorCreditOrder[];
+}
+
+export async function listAdvisorCreditPacks(): Promise<AdvisorCreditPackListResponse> {
+  return apiGet<AdvisorCreditPackListResponse>("/api/advisor/credits/packs");
+}
+
+export async function startAdvisorCheckout(
+  sku: string,
+  opts?: { successUrl?: string; cancelUrl?: string; email?: string },
+): Promise<AdvisorCheckoutResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.successUrl) qs.set("success_url", opts.successUrl);
+  if (opts?.cancelUrl) qs.set("cancel_url", opts.cancelUrl);
+  if (opts?.email) qs.set("email", opts.email);
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiPost<AdvisorCheckoutResponse>(
+    `/api/advisor/credits/packs/${encodeURIComponent(sku)}/checkout${tail}`,
+  );
+}
+
+export async function listAdvisorOrders(limit?: number): Promise<AdvisorOrderListResponse> {
+  const qs = typeof limit === "number" ? `?limit=${limit}` : "";
+  return apiGet<AdvisorOrderListResponse>(`/api/advisor/billing/orders${qs}`);
+}
+
+export interface AdvisorBillingCall {
+  id: string;
+  symbol: string;
+  preset_key: string;
+  aggregate_verdict: string;
+  service_unit_source: string;
+  service_unit_cost: number;
+  models_used: string[];
+  byok_used: boolean;
+  created_at: string;
+}
+
+export interface AdvisorBillingCallsResponse {
+  calls: AdvisorBillingCall[];
+}
+
+export async function listAdvisorBillingCalls(opts?: {
+  byokOnly?: boolean;
+  limit?: number;
+}): Promise<AdvisorBillingCallsResponse> {
+  const qs = new URLSearchParams();
+  if (opts?.byokOnly) qs.set("byok", "1");
+  if (typeof opts?.limit === "number") qs.set("limit", String(opts.limit));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<AdvisorBillingCallsResponse>(`/api/advisor/billing/calls${tail}`);
+}
+
+export interface AdvisorByokInfo {
+  egress_ip: string;
+  support_email: string;
+  encrypted_at_rest: boolean;
+  providers_supported: string[];
+}
+
+export async function fetchAdvisorByokInfo(): Promise<AdvisorByokInfo> {
+  return apiGet<AdvisorByokInfo>("/api/advisor/byok/info");
 }

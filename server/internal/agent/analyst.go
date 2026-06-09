@@ -141,6 +141,12 @@ type AnalystInput struct {
 // FundamentalsAnalyst consumes. Strings are pre-formatted so the
 // prompt doesn't need to know how to render NUMERIC columns.
 type FundamentalsBlock struct {
+	// Name is the issuer's short / human-readable name (e.g.
+	// "德科立", "Apple Inc."). Populated by loaders that can
+	// resolve it cheaply (akshare sidecar, Yahoo quoteSummary).
+	// Empty when the provider doesn't know — callers must not
+	// assume non-empty.
+	Name string
 	// QualityScore is the cross-sectional composite z-score
 	// from internal/quality. nil when the symbol isn't in the
 	// scored universe.
@@ -150,12 +156,214 @@ type FundamentalsBlock struct {
 	// owns the canonical name list. Values are raw floats; the
 	// prompt formats them.
 	Metrics map[string]float64
+	// AnnualPeriod / LatestPeriod label the fiscal periods the
+	// numbers above were drawn from (e.g. "2025-12-31" annual,
+	// "2026-03-31" Q1). Optional — providers that don't expose
+	// period metadata leave them empty.
+	//
+	// Surfacing both lets the persona reason about acceleration
+	// vs decay between the last annual and the freshest interim:
+	// e.g. annual rev_growth=+11% but rev_growth_latest=+28% at
+	// "2026-03-31" tells Wood the S-curve just inflected, not
+	// the simple "growth too slow" reading of the annual alone.
+	AnnualPeriod string
+	LatestPeriod string
+	// ListingDate is the company's exchange listing date in
+	// "YYYY-MM-DD" form (e.g. "2022-08-09"). Together with
+	// ListingYears, lets master personas distinguish a
+	// "次新股 N年" from a missing-data condition — without
+	// this, a 2022-listed STAR-market stock gets mechanically
+	// flagged "history.10yr data_unavailable" by 10-year-
+	// horizon personas (Buffett, Graham). Optional; empty
+	// when the provider didn't resolve it.
+	ListingDate  string
+	ListingYears float64
+	// LatestAnnounceDate is the YYYY-MM-DD of the filing the
+	// *_latest metrics were drawn from (e.g. "2026-04-28" for
+	// the Q1 2026 业绩快报). Surfaced to the prompt as an
+	// anchor so the LLM (rule 8 in master_agent.go) can cite a
+	// verifiable announcement date when quoting any *_latest
+	// figure — and so any reviewer can pull the original
+	// announcement off the exchange. Empty when the provider
+	// didn't supply it.
+	LatestAnnounceDate string
+	// LatestSource is the provenance tag (e.g. "eastmoney_yjbb")
+	// for the *_latest fields. Surfaced verbatim so the prompt
+	// can name the data source in citations.
+	LatestSource string
 	// IndustryPeers carries up to ~5 peer symbols so the
 	// analyst can frame relative valuation. Wiring optional.
 	IndustryPeers []string
 	// FilingsURL is the latest 10-K / annual report URL if
 	// available. Empty → no citation in the report.
 	FilingsURL string
+	// History is the multi-year financial series. The slice
+	// is ordered most-recent first; element [0] is the latest
+	// complete fiscal year. nil when the provider doesn't
+	// expose history for the requested market. Consumed by
+	// the /advisor master agents (Buffett / Lynch / Graham /
+	// O'Neil) which need 5-10y ROE, FCF, EPS series to
+	// validate their must_have_criteria. Empty slice = no
+	// history available.
+	History []YearlyMetricsLite
+	// RulePrior is the deterministic, Go-computed evaluation of
+	// each must_have_criteria that the persona declares. The
+	// wiring layer computes these on the cleaned history /
+	// snapshot before the LLM ever sees the prompt — that way
+	// the LLM can't misread a 10-year ROE average. nil when
+	// no rules were evaluable (no history, no snapshot, etc.).
+	RulePrior *RulePriorBlock
+}
+
+// MasterTechnicalBlock is the typed view of price-action /
+// momentum / volatility data the MASTER agents consume in their
+// prompt (and that the daily-picks publisher persists in
+// result_json for the detail UI). Distinct from TechnicalBlock
+// (which carries the AnalystInput shape for the technical
+// AnalystAgent) — the two serve different surfaces:
+//
+//   - TechnicalBlock: AnalystInput → TechnicalAnalyst, structured
+//     for the analyst's per-signal hard-vote map. Internal.
+//   - MasterTechnicalBlock: MasterInput → MasterAgent prompt and
+//     ConsultResponse / daily_picks.result_json. Serialisation +
+//     prompt shape.
+//
+// Populated by the wiring layer from indicator.Snapshot — the
+// agent package intentionally does NOT import internal/indicator
+// to keep the layering one-way (the wiring layer composes
+// indicator → agent, never the reverse).
+//
+// JSON tags: snake_case because this struct is serialised
+// verbatim into daily_picks.result_json under a "technical" key
+// and rendered directly by the React frontend (which expects
+// snake_case throughout). The fields here are deliberately a
+// SUBSET of indicator.Snapshot — only what's relevant for
+// prompt context and UI rendering. Internal computation flags
+// like BBPctPosition stay in indicator.Snapshot.
+//
+// Compliance:
+//
+//	This struct carries raw market data only (close, volumes,
+//	indicator values, S/R levels). It contains zero recommendations.
+//	The master_agent prompt rule 9 forbids the LLM from turning
+//	any of these numbers into a price target or trade signal —
+//	the model can quote them but cannot project them.
+type MasterTechnicalBlock struct {
+	// AsOf is the timestamp of the most recent bar used in the
+	// snapshot computation (UTC, RFC3339 format). Empty when
+	// computation degraded to fallback (no bars).
+	AsOf string `json:"asof,omitempty"`
+
+	// BarsUsed is the number of OHLC bars that fed the computation.
+	// <60 means several derived indicators (SMA200, etc.) may be
+	// zero — see indicator.MinBarsForFullSnapshot.
+	BarsUsed int `json:"bars_used,omitempty"`
+
+	// Latest close + short-window returns. PctChangeNd is the
+	// percentage change between the latest close and the close N
+	// bars ago, expressed as a decimal (0.05 = +5%). Zero when
+	// not enough history is available.
+	LastClose      float64 `json:"last_close,omitempty"`
+	PctChange1D    float64 `json:"pct_change_1d,omitempty"`
+	PctChange5D    float64 `json:"pct_change_5d,omitempty"`
+	PctChange20D   float64 `json:"pct_change_20d,omitempty"`
+	PctChange52WHi float64 `json:"pct_change_from_52w_high,omitempty"` // negative when price is below 52w high
+
+	// Moving averages — all in raw price units.
+	SMA20  float64 `json:"sma20,omitempty"`
+	SMA50  float64 `json:"sma50,omitempty"`
+	SMA200 float64 `json:"sma200,omitempty"`
+	// MAAlignment is the algorithmic classification of the moving
+	// average stack: "bullish" when SMA20>SMA50>SMA200, "bearish"
+	// when reversed, "mixed" otherwise. Empty when not enough
+	// bars to compute SMA200.
+	MAAlignment string `json:"ma_alignment,omitempty"`
+
+	// Momentum & volatility.
+	RSI14        float64 `json:"rsi14,omitempty"`
+	RSI14Zone    string  `json:"rsi14_zone,omitempty"` // "overbought" | "oversold" | "neutral"
+	MACDLine     float64 `json:"macd_line,omitempty"`
+	MACDSignal   float64 `json:"macd_signal,omitempty"`
+	MACDHist     float64 `json:"macd_hist,omitempty"`
+	MACDCross    string  `json:"macd_cross,omitempty"` // "bullish" | "bearish" | ""
+	ATR14PctOfPx float64 `json:"atr14_pct_of_price,omitempty"`
+
+	// KDJ — the de-facto-standard Chinese broker indicator.
+	// J > 90 → "hot"; J < 10 → "cool" (informational only,
+	// not actionable).
+	KDJK float64 `json:"kdj_k,omitempty"`
+	KDJD float64 `json:"kdj_d,omitempty"`
+	KDJJ float64 `json:"kdj_j,omitempty"`
+
+	// Volume.
+	Volume         float64 `json:"volume,omitempty"`
+	RelativeVolume float64 `json:"relative_volume,omitempty"` // latest / 20-bar SMA
+
+	// Support / resistance band over the prior 20 bars (the
+	// current bar is EXCLUDED so the breakout classification
+	// makes sense). Both zero when fewer than 21 bars exist.
+	Support       float64 `json:"support,omitempty"`
+	Resistance    float64 `json:"resistance,omitempty"`
+	SRWindow      int     `json:"sr_window,omitempty"`
+	BreakoutState string  `json:"breakout_state,omitempty"` // "above_resistance" | "below_support" | "near_resistance" | "near_support" | ""
+
+	// Tags is the prompt-friendly bullet list the wiring layer
+	// derives from the snapshot — e.g. "RSI14: 76.3 (overbought)",
+	// "MACD: bullish cross at latest bar". The master prompt
+	// renders these directly; the frontend can use the same list
+	// as readable bullet items so the UI doesn't have to know
+	// the formatting rules.
+	Tags []string `json:"tags,omitempty"`
+}
+
+// YearlyMetricsLite mirrors fundamental.YearlyMetrics one-to-one
+// but lives in the agent package so analyst / master code doesn't
+// have to import the upstream fetcher package. The wiring layer
+// copies fields across at request build time.
+type YearlyMetricsLite struct {
+	Year              int
+	ReturnOnEquity    float64
+	ReturnOnCapital   float64
+	GrossMargin       float64
+	OperatingMargin   float64
+	ProfitMargin      float64
+	FreeCashFlow      float64
+	EPS               float64
+	BookValuePerShare float64
+	DividendPerShare  float64
+	CurrentRatio      float64
+	DebtToEquity      float64
+	RevenueGrowthYoY  float64
+	EarningsGrowthYoY float64
+}
+
+// RulePriorBlock is the precomputed verdict on each persona
+// must_have_criteria. The advisor wiring layer builds one of these
+// per (persona, symbol) at request time and hands it to the
+// MasterAgent so the prompt can pin hard rules.
+type RulePriorBlock struct {
+	// Persona is the persona key the prior was computed for
+	// (e.g. "buffett"). Helps debug when the wiring layer
+	// reuses one block across multiple personas.
+	Persona string
+	// Items lists every criterion, in deterministic order, with
+	// the threshold, the observed value, and PASS/FAIL/UNKNOWN.
+	Items []RulePriorItem
+	// Notes carries free-form caveats the wiring layer wants
+	// to surface to the LLM (e.g. "ROE history only spans 4
+	// years; computed average over 4y not 10y").
+	Notes []string
+}
+
+// RulePriorItem is one criterion evaluation.
+type RulePriorItem struct {
+	Key       string  // e.g. "ROE_10yr_avg"
+	Required  string  // e.g. ">= 15%"
+	Observed  string  // e.g. "12.4% (4yr avg)"
+	Status    string  // PASS / FAIL / UNKNOWN
+	Detail    string  // optional human-readable detail
+	ValueLow  float64 // raw value (low end for range checks)
+	ValueHigh float64 // raw value (high end for range checks)
 }
 
 // QualityScoreLite mirrors internal/quality.Score's prompt-facing

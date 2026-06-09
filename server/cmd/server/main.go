@@ -38,9 +38,14 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/brinson"
+	"github.com/fundai/server/internal/advisor"
+	"github.com/fundai/server/internal/dailypicks"
+	"github.com/fundai/server/internal/advisorbilling"
 	"github.com/fundai/server/internal/broker"
 	"github.com/fundai/server/internal/dbinstr"
 	"github.com/fundai/server/internal/factorexposure"
+	"github.com/fundai/server/internal/cnmarketstructure"
+	"github.com/fundai/server/internal/fundamental"
 	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/fx"
 	"github.com/fundai/server/internal/lotbackfill"
@@ -61,12 +66,14 @@ import (
 	"github.com/fundai/server/internal/securitiesborrow"
 	"github.com/fundai/server/internal/recon"
 	"github.com/fundai/server/internal/surveillance"
+	"github.com/fundai/server/internal/compliance"
 	"github.com/fundai/server/internal/repository"
 	"github.com/fundai/server/internal/scheduler"
 	"github.com/fundai/server/internal/quota"
 	"github.com/fundai/server/internal/secrets"
 	"github.com/fundai/server/internal/stoptrigger"
 	"github.com/fundai/server/internal/subscription"
+	"github.com/fundai/server/internal/userbyok"
 	"github.com/fundai/server/internal/quotecache"
 	"github.com/fundai/server/internal/wsfeed"
 	"github.com/google/uuid"
@@ -703,6 +710,96 @@ type Services struct {
 	// the fund-override hook); written by the fund settings admin
 	// endpoints. Nil-safe.
 	FundLLMOverrideRepo *repository.FundLLMOverrideRepo
+
+	// AdvisorService backs the /advisor consultation surface
+	// (migration 098). Distinct from the fund/team subsystem:
+	// users hit /api/advisor/* without touching any company /
+	// fund / plan / trade. nil-safe: when the DB or persona
+	// JSON aren't loaded the routes return 503.
+	AdvisorService *advisor.Service
+	// advisorFundamentalFetcher is the per-symbol fundamentals
+	// source the advisor's master panel uses. Constructed at
+	// boot from FUNDAMENTAL_* env knobs (same as the workflow
+	// service's fetcher) but kept as a separate handle so
+	// advisor traffic doesn't share the workflow's caching
+	// lifecycle. nil when fundamentals are disabled.
+	advisorFundamentalFetcher fundamental.Fetcher
+
+	// advisorFundamentalHistoryFetcher is the multi-year
+	// historical financial series the advisor uses for Buffett-
+	// grade criteria like "ROE_10yr_avg >= 15%". nil when
+	// FUNDAMENTAL_HISTORY_DISABLED=1 or no provider is wired —
+	// the master agents then degrade to data_unavailable on
+	// history-dependent checks.
+	advisorFundamentalHistoryFetcher fundamental.HistoricalFetcher
+
+	// CNMarketStructureProvider is the A-share intraday + 龙虎榜
+	// + market regime + sector strength data source used by the
+	// advisor /tactic panel and by an admin probe endpoint.
+	// nil-degraded when neither akshare nor an alternative is
+	// wired (CN_MARKETSTRUCTURE_DISABLED=1 or no BASE URL set).
+	CNMarketStructureProvider cnmarketstructure.Provider
+	// CNMarketStructureRegistry is the raw Registry the admin
+	// probe handler reads HealthStats from. nil when the chain
+	// degrades to a single provider or to nil.
+	CNMarketStructureRegistry *cnmarketstructure.Registry
+
+	// AdvisorReputationLoop is the Phase 5 backfill driver that
+	// scans recent advisor_consultations, grades them against
+	// realised price moves over 1/5/21 day horizons, and writes
+	// agent_reputation_outcomes rows with master:* / tactic:*
+	// agent_ids. nil-degraded when AdvisorService or
+	// AgentReputationRepo isn't wired.
+	AdvisorReputationLoop *advisorReputationLoop
+
+	// DailyPicksRepo persists the SHARED-CACHE publisher-mode
+	// rows in daily_picks (migration 106). Wired BEFORE
+	// AdvisorService so the service constructor can pick it up
+	// via WithPicksRepo. nil-degraded when migration 106 isn't
+	// applied — advisor.Service.PublishConsult then returns an
+	// error and the loop logs + no-ops.
+	DailyPicksRepo *dailypicks.Repo
+	// DailyPicksLoop is the nightly /daily-picks publisher
+	// wave (Go cron). Iterates daily_pick_watchlists × preset,
+	// calls advisor.Service.PublishConsult per ticker, UPSERTs
+	// the result into daily_picks. nil-degraded when the repo
+	// or advisor service isn't wired.
+	DailyPicksLoop *dailyPicksLoop
+
+	// AdvisorBillingGate is the Phase A per-user monthly quota
+	// guardrail. Every /api/advisor/consult call runs through
+	// Gate.Check before the panel runs and Gate.Consume after
+	// the panel returns. Plan-derived quotas are pulled from
+	// SubscriptionService.GetEffectivePlan; counters live in
+	// user_advisor_monthly_usage (migration 100).
+	AdvisorBillingGate *advisorbilling.Gate
+
+	// ComplianceRepo persists the SEC disclosure-ack +
+	// phrase-violation audit rows (migration 104). nil-safe:
+	// degraded boots skip the per-request disclosure gate (the
+	// advisor handler fails OPEN — see disclaimerOK in
+	// advisor_handler.go).
+	ComplianceRepo *repository.ComplianceRepo
+	// ComplianceMode is parsed from COMPLIANCE_MODE env once at
+	// boot. Drives whether the advisor service redacts LLM
+	// outputs (Publisher) or passes them through (RIA-registered)
+	// and whether the per-request disclaimer gate is enforced.
+	ComplianceMode compliance.Mode
+
+	// UserBYOKRepo backs the Phase B-2 BYOK CRUD handlers and
+	// the Phase B-2 user-override hook installed on the LLM
+	// router. Reads/writes user_llm_keys (migration 101) with
+	// AES-GCM-encrypted plaintext keys.
+	UserBYOKRepo *userbyok.Repo
+
+	// AdvisorCreditsRepo backs the Phase C-1 credit-pack ledger
+	// (user_advisor_credits + advisor_credit_orders). Plugged
+	// into AdvisorBillingGate so Check/Consume cascade plan →
+	// credits before returning quota exhausted. The same repo
+	// is shared with the LemonSqueezy webhook handler that
+	// credits balances on payment.
+	AdvisorCreditsRepo *advisorbilling.CreditsRepo
+
 	WSFeedConfig            wsFeedConfig
 	WSFeedManager          *wsfeed.Manager
 	WSFeedCache            *quotecache.Cache
@@ -1048,6 +1145,8 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		AnalystReportRepo:   analystreport.NewRepo(db),
 		DebateRepo:          debaterepo.NewRepo(db),
 		AgentReputationRepo: agentreputation.NewRepo(db),
+		ComplianceRepo:      repository.NewComplianceRepo(db),
+		ComplianceMode:      compliance.ParseMode(os.Getenv("COMPLIANCE_MODE")),
 		AlphaLessonRepo:     alphalesson.NewRepo(db),
 		WSFeedConfig:        wsFeedCfg,
 		WSFeedManager:       wsFeedManager,
@@ -1075,6 +1174,31 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	// analysts on their deterministic fallback paths; S8.3 will
 	// swap nil → real llm.LLMClient once CompleteWithSchema lands.
 	services.AnalystPanelProvider = newDefaultAnalystPanelProvider(services)
+
+	// Advisor (/advisor consultation surface, migration 098).
+	// Builds its own fundamental.Fetcher rather than borrowing
+	// the workflowService's so cache lifecycle stays scoped to
+	// the advisor — different TTL strategies can be applied
+	// later without breaking fund analytics. nil-safe: when env
+	// disables fundamentals the master prompts honestly report
+	// data_unavailable instead of fabricating numbers.
+	services.advisorFundamentalFetcher = buildFundamentalFetcherFromEnv()
+	services.advisorFundamentalHistoryFetcher = buildAdvisorFundamentalHistoryFetcherFromEnv()
+	// Daily-picks publisher cache repo (migration 106). Wired
+	// BEFORE buildAdvisorService so the service constructor can
+	// pick it up via the WithPicksRepo option. nil-safe — when
+	// the migration hasn't been applied the repo is still
+	// constructable (it'll just return SQL errors at read /
+	// write time, which surface as a 5xx the loop logs and
+	// retries).
+	if db != nil {
+		services.DailyPicksRepo = dailypicks.NewRepo(db)
+	}
+	// CN market structure (akshare 龙虎榜 / 涨停池 / 市场活跃度) —
+	// powers the /advisor tactic panel in Phase 4 and the admin
+	// probe endpoint registered with the admin handler.
+	services.CNMarketStructureRegistry, services.CNMarketStructureProvider = buildCNMarketStructureProvider()
+	services.AdvisorService = buildAdvisorService(services)
 
 	// S8.2 — install the default Bull/Bear debate provider.
 	// Uses the same nil-LLM path as the panel in S8.1 so the
@@ -1124,6 +1248,66 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 				FundLister:    fundLister,
 				LessonWriter:  services.AlphaLessonRepo,
 			},
+		)
+	}
+
+	// Phase 5 — advisor reputation loop. Independent of the
+	// per-fund loop above: scans advisor_consultations,
+	// grades each (master, tactic) report against realised
+	// price moves, writes master:* / tactic:* rows into
+	// agent_reputation_outcomes (fund_id IS NULL per
+	// migration 099), and refreshes agent_reputation_stats.
+	// nil-safe when AdvisorService or AgentReputationRepo are
+	// absent.
+	if services.AgentReputationRepo != nil && services.AdvisorService != nil {
+		var advReturnsFn AdvisorRealisedReturnFn = nullAdvisorRealisedReturn
+		if advisorOHLC := buildOHLCFetcherFromEnv(); advisorOHLC != nil {
+			advReturnsFn = advisorRealisedReturnFromOHLC(advisorOHLC)
+		}
+		services.AdvisorReputationLoop = newAdvisorReputationLoop(
+			services.AgentReputationRepo,
+			services.AdvisorService.Repo(),
+			advReturnsFn,
+			advisorReputationLoopOptions{},
+		)
+	}
+
+	// Daily-picks publisher loop. Wakes on a fine-grained
+	// CheckInterval, runs each active watchlist's wave after its
+	// scheduled instant (e.g. @daily_after_us_close = 16:30 ET).
+	// nil-degraded when advisor service or repo aren't wired —
+	// the /daily-picks list endpoint still serves whatever
+	// historical rows are in the DB.
+	if services.AdvisorService != nil && services.DailyPicksRepo != nil {
+		services.DailyPicksLoop = newDailyPicksLoop(
+			services.AdvisorService,
+			services.DailyPicksRepo,
+			db,                    // for the wave-cost summary query over usage_entries
+			services.UsageTracker, // force-flush so the summary sees rows the wave just wrote
+			dailyPicksLoopOptions{},
+		)
+	}
+
+	// Phase A — advisor billing gate.
+	// Phase C upgrade — also plug in the credit-pack repo so
+	// the gate cascades plan → credits before returning quota
+	// exhausted. Both repos share the same DB handle.
+	//
+	// Mounted on the wired Services so handleConsult can call
+	// Gate.Check/Consume around every panel run, and the new
+	// GET /api/advisor/billing/summary handler can read the
+	// per-user monthly state.
+	//
+	// nil-safe in two directions:
+	//   - db nil → leave gate nil; handleConsult treats nil as
+	//     "skip gating" so degraded boots (test main) still work.
+	//   - subscription nil → same; the gate dereferences plans
+	//     internally so it can't be wired without one.
+	if db != nil && subscriptionService != nil {
+		services.AdvisorCreditsRepo = advisorbilling.NewCreditsRepo(db)
+		services.AdvisorBillingGate = advisorbilling.NewGate(
+			db, subscriptionService,
+			advisorbilling.WithCreditsRepo(services.AdvisorCreditsRepo),
 		)
 	}
 
@@ -1183,7 +1367,11 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 		WithHoldingsSeriesService(newHoldingsSeriesServiceAdapter(services)).
 		WithABShadowAgentService(abTestAdapter).
 		WithABOperationalAttributionService(abTestAdapter).
-		WithFundAssistService(newFundAssistAdapter(llmRuntime.client))
+		WithFundAssistService(newFundAssistAdapter(llmRuntime.client)).
+		WithFactorLabService(newFactorLabAdapter()).
+		WithPaperTradingService(newPaperTradingAdapter(db)).
+		WithCNIntradayService(newCNIntradayAdapter()).
+		WithComplianceService(newComplianceAdapter(services.ComplianceRepo, services.ComplianceMode))
 	// Phase 3A-5: a SINGLE attribution adapter feeds both the HTTP
 	// surface (GET /api/funds/:id/strategy-attribution) and the
 	// daily-review hook (runDailyAttribution inside the memory
@@ -1268,6 +1456,17 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 	fundLLMOverrideRepo := repository.NewFundLLMOverrideRepo(db)
 	services.FundLLMOverrideRepo = fundLLMOverrideRepo
 	llmRuntime.SetFundLLMOverrideRepo(fundLLMOverrideRepo)
+
+	// Phase B-2/3 — user BYOK key repo + router hook.
+	//
+	// The repo is constructed unconditionally when the DB is
+	// available; the hook only routes when a user has an
+	// active row, so an empty user_llm_keys table is a no-op.
+	// We install the hook even when no users have BYOK keys
+	// yet so the wiring exists for the moment the first key
+	// lands.
+	services.UserBYOKRepo = userbyok.NewRepo(db)
+	llmRuntime.SetUserBYOKRepo(services.UserBYOKRepo)
 
 	// Sprint 9.3 — social sentiment ingestion. The registry
 	// reads per-platform env flags; when no provider is enabled
@@ -2971,7 +3170,15 @@ func isPublicRoute(path string) bool {
 			// adding the route here is the same posture as the
 			// /api/metrics endpoint which is also unprotected by
 			// design.
-			"/api/admin/alerts/webhook":
+			"/api/admin/alerts/webhook",
+			// SEC Marketing Rule requires disclosures to be
+			// served BEFORE the user has authenticated (so the
+			// ComplianceAckModal can render on the welcome /
+			// login page and the unauthenticated landing visitor
+			// sees the "NOT a registered investment adviser"
+			// notice). The endpoint returns text only — no PII —
+			// so anonymous access is safe.
+			"/api/compliance/disclosure":
 			return true
 		default:
 			return false
@@ -5232,6 +5439,20 @@ func main() {
 	if svc.AgentReputationLoop != nil {
 		go func() {
 			svc.AgentReputationLoop.Run(context.Background())
+		}()
+	}
+
+	// Phase 5 — advisor reputation backfill loop. Runs once per
+	// 24h, scoped to advisor_consultations (fund-less). No-op
+	// when AdvisorService or AgentReputationRepo weren't wired.
+	if svc.AdvisorReputationLoop != nil {
+		go func() {
+			svc.AdvisorReputationLoop.Run(context.Background())
+		}()
+	}
+	if svc.DailyPicksLoop != nil {
+		go func() {
+			svc.DailyPicksLoop.Run(context.Background())
 		}()
 	}
 
