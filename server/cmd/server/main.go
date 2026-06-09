@@ -2230,6 +2230,39 @@ func handleLogin(svc *Services, cfg *Config) http.HandlerFunc {
 				})
 				return
 			}
+			// A5: super_admin is the highest-blast-radius role —
+			// they can rotate platform secrets, mint refunds,
+			// approve any user role change. Password-only is not
+			// good enough. If TOTP is missing or only half-enrolled
+			// (row exists but IsEnabled()==false), force them
+			// through the enrollment flow before issuing a session.
+			//
+			// We only attempt this when the deployment has TOTP
+			// fully wired (TOTP_ENCRYPTION_KEY set). On dev installs
+			// without the key the totp handler refuses to register
+			// its routes, so forcing enrollment would lock the
+			// admin out of the platform — fall through to the
+			// regular session in that degenerate case.
+			if isSuperAdminUser(user) && totpFeatureWired() && !totpRowFullyEnabled(row) {
+				grant, expiresAt, mintErr := issueTwoFAEnrollmentGrant(user.ID, cfg)
+				if mintErr != nil {
+					slog.Error("failed to issue 2fa enrollment grant", "request_id", requestID, "user_id", user.ID, "error", mintErr)
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to issue 2fa enrollment grant", "request_id": requestID})
+					return
+				}
+				slog.Info("2fa.enroll_grant_issued",
+					"request_id", requestID,
+					"user_id", user.ID,
+					"role", user.Role,
+				)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"requires_2fa_enrollment": true,
+					"enrollment_grant":        grant,
+					"expires_at":              expiresAt.UTC().Format(time.RFC3339),
+					"request_id":              requestID,
+				})
+				return
+			}
 		}
 		writeAuthSuccess(w, cfg, requestID, user)
 	}
@@ -3178,6 +3211,13 @@ func isPublicRoute(path string) bool {
 		case "/api/health", "/api/version", "/api/metrics", "/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/session",
 			"/api/auth/forgot-password", "/api/auth/reset-password", "/api/auth/wechat-login",
 			"/api/auth/2fa/challenge",
+			// A5: super_admin forced-2FA enrollment. The user has
+			// completed password auth but does NOT yet have a
+			// session — only a short-lived enrollment grant. The
+			// handlers themselves parse + validate the grant
+			// in-body, so session middleware would just turn into
+			// a 401 wall they could never get past.
+			"/api/auth/2fa/enroll-start", "/api/auth/2fa/enroll-complete",
 			// Sprint 12.2 — alertmanager webhook receiver. We let
 			// it bypass the JWT middleware because alertmanager
 			// authenticates with a shared bearer secret

@@ -451,14 +451,15 @@ function persistLogin(payload: LoginResponse): LoginResponse {
   return payload;
 }
 
-// LoginOutcome is what login flows return: either a finalised
-// session, or a 2FA challenge that the caller must satisfy by
-// posting (challenge, code) back to /api/auth/2fa/challenge. The
-// `kind` discriminator keeps the consuming UI exhaustive — TS
-// will refuse to compile without handling both cases.
+// LoginOutcome is what login flows return: a finalised session,
+// a 2FA challenge for users who have already enrolled, or an
+// enrollment requirement for super_admin accounts that have never
+// configured 2FA. The `kind` discriminator keeps the consuming UI
+// exhaustive — TS will refuse to compile without handling all three.
 export type LoginOutcome =
   | { kind: "session"; payload: LoginResponse }
-  | { kind: "challenge"; challenge: string; expiresAt: string };
+  | { kind: "challenge"; challenge: string; expiresAt: string }
+  | { kind: "enrollment_required"; grant: string; expiresAt: string };
 
 async function submitAuth(path: string, body: AuthPayload): Promise<LoginOutcome> {
   const response = await fetch(buildUrl(path), {
@@ -470,15 +471,19 @@ async function submitAuth(path: string, body: AuthPayload): Promise<LoginOutcome
     },
     body: JSON.stringify(body),
   });
-  // We accept three flavours of body:
+  // We accept four flavours of body:
   //   1. classic LoginResponse  → finalise the session.
   //   2. { requires_2fa, challenge, expires_at } → return a
   //      challenge envelope. The caller renders the TOTP prompt
   //      and posts the code to /api/auth/2fa/challenge.
-  //   3. error JSON → throw ApiError as before.
+  //   3. { requires_2fa_enrollment, enrollment_grant, expires_at }
+  //      → A5: super_admin without 2FA enrolled. The caller pivots
+  //      to the enrollment wizard (start → scan QR → verify).
+  //   4. error JSON → throw ApiError as before.
   const payload = (await response.json().catch(() => null)) as
     | LoginResponse
     | (TwoFAChallengeResponse & { request_id?: string })
+    | (TwoFAEnrollmentRequiredResponse & { request_id?: string })
     | null;
   if (!response.ok) {
     const fallback = `登录失败，状态码 ${response.status}`;
@@ -489,10 +494,94 @@ async function submitAuth(path: string, body: AuthPayload): Promise<LoginOutcome
     const ch = payload as TwoFAChallengeResponse;
     return { kind: "challenge", challenge: ch.challenge, expiresAt: ch.expires_at };
   }
+  if (payload && (payload as TwoFAEnrollmentRequiredResponse).requires_2fa_enrollment) {
+    const en = payload as TwoFAEnrollmentRequiredResponse;
+    return { kind: "enrollment_required", grant: en.enrollment_grant, expiresAt: en.expires_at };
+  }
   if (!payload || !(payload as LoginResponse).token || !(payload as LoginResponse).user_id) {
     throw new ApiError("登录失败，响应体异常", response.status, undefined, payload?.request_id);
   }
   return { kind: "session", payload: persistLogin(payload as LoginResponse) };
+}
+
+// TwoFAEnrollmentRequiredResponse is the A5 fork of TwoFAChallengeResponse.
+// Issued at login when the user is super_admin AND has no fully-enrolled
+// TOTP row. The grant token is consumed by /api/auth/2fa/enroll-start +
+// /api/auth/2fa/enroll-complete and is NOT a session — every other
+// endpoint will reject it.
+export interface TwoFAEnrollmentRequiredResponse {
+  requires_2fa_enrollment: true;
+  enrollment_grant: string;
+  expires_at: string;
+}
+
+// TwoFAEnrollmentStartResponse is the shape /enroll-start returns.
+// Identical to the regular /setup response (enrollment is the same
+// underlying flow — only the auth mechanism differs).
+export interface TwoFAEnrollmentStartResponse {
+  secret: string;
+  provisioningUri: string;
+  recoveryCodes: string[];
+  issuer: string;
+  accountLabel: string;
+  digits: number;
+  period: number;
+  algorithm: string;
+}
+
+// startTwoFAEnrollment kicks off the QR-code + recovery-codes
+// phase of forced enrollment. Caller MUST display the recovery
+// codes to the user exactly once and tell them to store the codes
+// somewhere safe — they will not be shown again.
+export async function startTwoFAEnrollment(grant: string): Promise<TwoFAEnrollmentStartResponse> {
+  const response = await fetch(buildUrl("/api/auth/2fa/enroll-start"), {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Request-ID": createRequestId(),
+    },
+    body: JSON.stringify({ grant }),
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | TwoFAEnrollmentStartResponse
+    | { error?: string; detail?: string; request_id?: string }
+    | null;
+  if (!response.ok) {
+    const normalized = normalizeErrorMessage(payload, "2FA enrollment start failed");
+    throw new ApiError(normalized.message, response.status, normalized.detail, (payload as { request_id?: string } | null)?.request_id);
+  }
+  return payload as TwoFAEnrollmentStartResponse;
+}
+
+// completeTwoFAEnrollment verifies the first TOTP code, flips the
+// row to enabled, and returns a real session token in the same
+// response shape /login would have produced for a non-super-admin
+// user. The grant is single-use at the server side — a replay
+// after success returns 404 "not_enrolled" (the row is now in the
+// enabled-without-pending state).
+export async function completeTwoFAEnrollment(grant: string, code: string): Promise<LoginResponse> {
+  const response = await fetch(buildUrl("/api/auth/2fa/enroll-complete"), {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Request-ID": createRequestId(),
+    },
+    body: JSON.stringify({ grant, code }),
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | LoginResponse
+    | { error?: string; detail?: string; request_id?: string }
+    | null;
+  if (!response.ok) {
+    const normalized = normalizeErrorMessage(payload, "2FA enrollment verify failed");
+    throw new ApiError(normalized.message, response.status, normalized.detail, (payload as { request_id?: string } | null)?.request_id);
+  }
+  if (!payload || !(payload as LoginResponse).token || !(payload as LoginResponse).user_id) {
+    throw new ApiError("2FA enrollment finalisation returned an unexpected body", response.status);
+  }
+  return persistLogin(payload as LoginResponse);
 }
 
 export function loginWithPassword(payload: AuthPayload): Promise<LoginOutcome> {

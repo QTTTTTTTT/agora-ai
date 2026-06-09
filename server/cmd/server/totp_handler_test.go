@@ -316,3 +316,159 @@ func TestParseChallenge_RejectsAudienceMismatch(t *testing.T) {
 		t.Errorf("parseChallenge accepted a session token (no aud)")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A5 — super_admin forced enrollment via enrollment grant
+// ---------------------------------------------------------------------------
+
+// TestIssueAndParseEnrollmentGrant guards the round-trip: a freshly
+// minted enrollment grant decodes back to the same userID. Without
+// this, the entire enrollment flow becomes silently broken when
+// signJWTWithAudience or the audience constant drifts.
+func TestIssueAndParseEnrollmentGrant(t *testing.T) {
+	cfg := &Config{JWTSecret: "test-secret"}
+	tok, exp, err := issueTwoFAEnrollmentGrant("admin-1", cfg)
+	if err != nil {
+		t.Fatalf("issueTwoFAEnrollmentGrant: %v", err)
+	}
+	if exp.Before(time.Now()) {
+		t.Errorf("exp = %v, should be in the future", exp)
+	}
+	h := &totpHandler{cfg: cfg}
+	uid, err := h.parseEnrollmentGrant(tok)
+	if err != nil {
+		t.Fatalf("parseEnrollmentGrant: %v", err)
+	}
+	if uid != "admin-1" {
+		t.Errorf("uid = %q, want admin-1", uid)
+	}
+}
+
+// TestParseEnrollmentGrant_RejectsChallengeToken makes sure the
+// audience separation between challenge and enrollment grants is
+// actually enforced. Without this, a stolen challenge token could
+// be passed off as an enrollment grant and trigger a re-enrollment
+// against an existing 2FA-enabled account.
+func TestParseEnrollmentGrant_RejectsChallengeToken(t *testing.T) {
+	cfg := &Config{JWTSecret: "test-secret"}
+	challengeTok, _, err := issueTwoFAChallenge("admin-1", cfg)
+	if err != nil {
+		t.Fatalf("issueTwoFAChallenge: %v", err)
+	}
+	h := &totpHandler{cfg: cfg}
+	if _, err := h.parseEnrollmentGrant(challengeTok); err == nil {
+		t.Errorf("parseEnrollmentGrant accepted a 2fa_challenge audience token")
+	}
+}
+
+// TestParseEnrollmentGrant_RejectsSessionToken is the symmetric guard
+// for the bigger-blast-radius case: a stolen session token must not
+// be promoted into an enrollment grant (which would let the attacker
+// reset 2FA for their own account, the inverse of what we want).
+func TestParseEnrollmentGrant_RejectsSessionToken(t *testing.T) {
+	cfg := &Config{JWTSecret: "test-secret"}
+	sessionTok, _, err := issueSessionTokenWithKid("u", "test-secret", "", time.Hour)
+	if err != nil {
+		t.Fatalf("issueSessionTokenWithKid: %v", err)
+	}
+	h := &totpHandler{cfg: cfg}
+	if _, err := h.parseEnrollmentGrant(sessionTok); err == nil {
+		t.Errorf("parseEnrollmentGrant accepted a regular session token")
+	}
+}
+
+// TestTOTPHandler_EnrollStart_RejectsBadGrant covers the simplest
+// negative path: a junk token in the body returns 401, not a 500
+// or (worse) a 200 with a leaked QR.
+func TestTOTPHandler_EnrollStart_RejectsBadGrant(t *testing.T) {
+	h, _, cleanup := newTOTPTestEnv(t)
+	defer cleanup()
+
+	body, _ := json.Marshal(enrollGrantRequest{Grant: "not-a-jwt"})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/2fa/enroll-start",
+		bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	rr := httptest.NewRecorder()
+	h.handleEnrollStart(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestTOTPHandler_EnrollComplete_RejectsMissingFields guards the
+// shape contract: both grant + code are mandatory. Without the code
+// the handler would happily mint a session against a half-enrolled
+// row, defeating the whole point of forcing enrollment.
+func TestTOTPHandler_EnrollComplete_RejectsMissingFields(t *testing.T) {
+	h, _, cleanup := newTOTPTestEnv(t)
+	defer cleanup()
+
+	cases := []string{
+		`{}`,
+		`{"grant":""}`,
+		`{"code":"123456"}`,
+		`{"grant":"abc"}`, // grant present but no code
+	}
+	for _, raw := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/2fa/enroll-complete",
+			strings.NewReader(raw))
+		req.ContentLength = int64(len(raw))
+		rr := httptest.NewRecorder()
+		h.handleEnrollComplete(rr, req)
+		if rr.Code != http.StatusBadRequest && rr.Code != http.StatusUnauthorized {
+			t.Errorf("body=%q: status = %d, want 400 or 401", raw, rr.Code)
+		}
+	}
+}
+
+// TestIsSuperAdminUser is small but matters: the role string is the
+// gate that decides whether a user is forced through enrollment. A
+// case-sensitivity regression here would silently disable the gate
+// for any deployment that emits "SUPER_ADMIN" or "Super_Admin" from
+// its SSO claim mapping.
+func TestIsSuperAdminUser(t *testing.T) {
+	cases := []struct {
+		role string
+		want bool
+	}{
+		{"super_admin", true},
+		{"SUPER_ADMIN", true},
+		{"  super_admin  ", true},
+		{"Super_Admin", true},
+		{"admin", false},
+		{"user", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		got := isSuperAdminUser(&authenticatedUser{Role: c.role})
+		if got != c.want {
+			t.Errorf("role=%q: got %v, want %v", c.role, got, c.want)
+		}
+	}
+	// Nil receiver is the boot-time degenerate case (handleLogin
+	// shortcircuits before we get here, but the helper should be
+	// safe to call regardless).
+	if isSuperAdminUser(nil) {
+		t.Errorf("isSuperAdminUser(nil) = true, want false")
+	}
+}
+
+// TestTotpRowFullyEnabled covers the nil + half-enrolled cases.
+// A row that exists but never had MarkEnabled called MUST count as
+// NOT enabled; otherwise an admin who abandoned an enrollment would
+// be allowed through on next login with no 2FA in effect.
+func TestTotpRowFullyEnabled(t *testing.T) {
+	if totpRowFullyEnabled(nil) {
+		t.Errorf("nil row should not count as enabled")
+	}
+	// A row with no EnabledAt is pending enrollment.
+	pending := &repository.UserTOTP{}
+	if totpRowFullyEnabled(pending) {
+		t.Errorf("pending row should not count as enabled")
+	}
+	// A row with EnabledAt populated is the only valid "enabled" state.
+	enabled := &repository.UserTOTP{EnabledAt: sql.NullTime{Time: time.Now(), Valid: true}}
+	if !totpRowFullyEnabled(enabled) {
+		t.Errorf("row with EnabledAt should count as enabled")
+	}
+}

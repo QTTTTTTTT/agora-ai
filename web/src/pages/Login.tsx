@@ -2,11 +2,14 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import {
   ApiError,
+  completeTwoFAEnrollment,
   exchangeTwoFAChallenge,
   fetchSession,
   formatApiError,
   loginWithPassword,
   registerWithPassword,
+  startTwoFAEnrollment,
+  type TwoFAEnrollmentStartResponse,
 } from "../lib/api";
 import { useAppPreferences } from "../lib/preferences";
 import { BlackPillButton, MascotAvatar, TabPills } from "../theme";
@@ -71,6 +74,15 @@ const Login: React.FC = () => {
   const [twoFACode, setTwoFACode] = useState("");
   const [twoFARecovery, setTwoFARecovery] = useState("");
   const [twoFAMode, setTwoFAMode] = useState<"code" | "recovery">("code");
+  // A5 — when the server responds with `requires_2fa_enrollment`
+  // (super_admin first-login flow) we hold the grant token here
+  // and pivot the screen into the enrollment wizard. `enrollData`
+  // is populated after /enroll-start returns the QR + recovery
+  // codes; until then we show a small "we need to set up 2FA"
+  // intro screen so the user knows what is happening.
+  const [enrollGrant, setEnrollGrant] = useState<string | null>(null);
+  const [enrollData, setEnrollData] = useState<TwoFAEnrollmentStartResponse | null>(null);
+  const [enrollCode, setEnrollCode] = useState("");
 
   const copy = useMemo(
     () =>
@@ -135,6 +147,27 @@ const Login: React.FC = () => {
               cancel: "Use a different account",
               failed: "Invalid code, please try again.",
             },
+            enroll: {
+              introTitle: "Two-factor authentication required",
+              introBody:
+                "Your account has elevated administrative privileges. The platform requires you to register an authenticator app before issuing a session. This is a one-time setup that takes about a minute.",
+              introCTA: "Begin setup",
+              starting: "Generating setup material...",
+              qrTitle: "Scan or paste into your authenticator",
+              qrBody:
+                "Open Google Authenticator, 1Password, Authy or any TOTP-compatible app. Scan the QR code or paste the secret manually, then enter the first six-digit code below.",
+              uriLabel: "Provisioning URI",
+              secretLabel: "Secret",
+              recoveryTitle: "Recovery codes",
+              recoveryBody:
+                "Save these recovery codes somewhere safe (a password manager, a sealed envelope, an encrypted note). Each code can be used exactly once if you lose access to your authenticator. They WILL NOT be shown again.",
+              codePlaceholder: "First 6-digit code",
+              submit: "Verify and finish setup",
+              submitting: "Verifying...",
+              cancel: "Cancel and sign in as someone else",
+              failed: "Code is invalid or expired; try the next one your authenticator shows.",
+              expired: "Enrollment session expired. Please sign in again to restart.",
+            },
           }
         : {
             checkingSession: "正在检查现有登录会话...",
@@ -195,6 +228,27 @@ const Login: React.FC = () => {
               submitting: "验证中...",
               cancel: "更换账号",
               failed: "验证码无效，请重试。",
+            },
+            enroll: {
+              introTitle: "需要先完成二次验证设置",
+              introBody:
+                "你的账号是平台高权限管理员，必须先绑定身份验证器才能签发会话。这是一次性操作，大约一分钟即可完成。",
+              introCTA: "开始设置",
+              starting: "正在生成设置信息……",
+              qrTitle: "扫码或粘贴至身份验证器",
+              qrBody:
+                "打开 Google Authenticator、1Password、Authy 或任何支持 TOTP 的 App，扫码或手动粘贴下方密钥，然后在最下方输入首个 6 位动态码。",
+              uriLabel: "Provisioning URI",
+              secretLabel: "密钥",
+              recoveryTitle: "恢复码",
+              recoveryBody:
+                "请将以下恢复码保存到安全地方（密码管理器、加密笔记或封存信封等）。每个恢复码仅可使用一次；如果你失去身份验证器访问权限，将通过它们恢复登录。它们不会再次显示。",
+              codePlaceholder: "首个 6 位动态码",
+              submit: "验证并完成设置",
+              submitting: "验证中...",
+              cancel: "取消并切换登录账号",
+              failed: "动态码无效或已过期，请输入下一个验证器显示的动态码。",
+              expired: "设置会话已过期，请重新登录后重试。",
             },
           },
     [language],
@@ -286,6 +340,17 @@ const Login: React.FC = () => {
           setTwoFAMode("code");
           return;
         }
+        // A5 — super_admin needs to enroll a TOTP factor before
+        // we issue a session. Stash the grant; the wizard panel
+        // calls /enroll-start lazily when the user clicks
+        // "Begin setup" so the password screen does not flash a
+        // big block of secrets if the user wandered off.
+        if (outcome.kind === "enrollment_required") {
+          setEnrollGrant(outcome.grant);
+          setEnrollData(null);
+          setEnrollCode("");
+          return;
+        }
       } else {
         await registerWithPassword({
           email: form.email.trim(),
@@ -336,6 +401,51 @@ const Login: React.FC = () => {
     setError(null);
   }
 
+  async function handleBeginEnrollment() {
+    if (!enrollGrant) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const data = await startTwoFAEnrollment(enrollGrant);
+      setEnrollData(data);
+    } catch (err) {
+      const message = err instanceof ApiError && err.status === 401
+        ? copy.enroll.expired
+        : formatApiError(err, copy.enroll.failed);
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        handleCancelEnrollment();
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleSubmitEnrollment(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!enrollGrant) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await completeTwoFAEnrollment(enrollGrant, enrollCode.trim());
+      navigate(redirectTo, { replace: true });
+    } catch (err) {
+      const message = err instanceof ApiError && err.status === 401
+        ? copy.enroll.failed
+        : formatApiError(err, copy.enroll.failed);
+      setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleCancelEnrollment() {
+    setEnrollGrant(null);
+    setEnrollData(null);
+    setEnrollCode("");
+    setError(null);
+  }
+
   // Cream redesign: shared field styles + the inline TabPills
   // tabset for login/register. Keep tw classes hoisted so the
   // 80-line JSX stays readable.
@@ -347,7 +457,104 @@ const Login: React.FC = () => {
   return (
     <div className="flex min-h-screen items-center justify-center px-6 py-12">
       <div className="w-full max-w-md rounded-envelope-lg bg-cream-0 p-8 shadow-envelope ring-1 ring-ink-100/60">
-        {twoFAChallenge ? (
+        {enrollGrant ? (
+          <div>
+            <div className="mb-7 flex items-center gap-3">
+              <MascotAvatar role="risk" size={56} animated />
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sage-700">
+                  FundAI · A5
+                </p>
+                <h1 className="mt-1 text-2xl font-extrabold text-ink-900">
+                  {copy.enroll.introTitle}
+                </h1>
+              </div>
+            </div>
+            {!enrollData ? (
+              <>
+                <p className="mb-6 text-sm leading-6 text-ink-300">{copy.enroll.introBody}</p>
+                {error ? <div className={`${errorBox} mb-4`}>{error}</div> : null}
+                <BlackPillButton
+                  type="button"
+                  size="lg"
+                  block
+                  onClick={handleBeginEnrollment}
+                  disabled={submitting}
+                >
+                  {submitting ? copy.enroll.starting : copy.enroll.introCTA}
+                </BlackPillButton>
+                <button
+                  type="button"
+                  onClick={handleCancelEnrollment}
+                  className="mt-3 w-full rounded-full bg-cream-50 px-4 py-3 text-sm font-medium text-ink-300 ring-1 ring-ink-100 transition hover:text-ink-700"
+                >
+                  {copy.enroll.cancel}
+                </button>
+              </>
+            ) : (
+              <form className="space-y-5" onSubmit={handleSubmitEnrollment}>
+                <div>
+                  <p className="text-sm font-semibold text-ink-700">{copy.enroll.qrTitle}</p>
+                  <p className="mt-1 text-sm leading-6 text-ink-300">{copy.enroll.qrBody}</p>
+                </div>
+                <label className="block text-xs font-medium uppercase tracking-wide text-ink-300">
+                  {copy.enroll.uriLabel}
+                  <textarea
+                    readOnly
+                    value={enrollData.provisioningUri}
+                    onFocus={(e) => e.currentTarget.select()}
+                    rows={3}
+                    className={`${fieldClass} mt-2 break-all font-mono text-[11px] leading-5`}
+                  />
+                </label>
+                <label className="block text-xs font-medium uppercase tracking-wide text-ink-300">
+                  {copy.enroll.secretLabel}
+                  <input
+                    readOnly
+                    value={enrollData.secret}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className={`${fieldClass} mt-2 font-mono text-sm`}
+                  />
+                </label>
+                <div className="rounded-2xl bg-cream-50 p-4 ring-1 ring-ink-100">
+                  <p className="text-sm font-semibold text-ink-700">{copy.enroll.recoveryTitle}</p>
+                  <p className="mt-1 text-xs leading-5 text-ink-300">{copy.enroll.recoveryBody}</p>
+                  <ul className="mt-3 grid grid-cols-2 gap-2 font-mono text-[12px] text-ink-900">
+                    {enrollData.recoveryCodes.map((c) => (
+                      <li key={c} className="rounded-md bg-cream-0 px-2 py-1 ring-1 ring-ink-100">{c}</li>
+                    ))}
+                  </ul>
+                </div>
+                <input
+                  autoFocus
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={8}
+                  value={enrollCode}
+                  onChange={(e) => setEnrollCode(e.target.value.replace(/[^0-9]/g, ""))}
+                  placeholder={copy.enroll.codePlaceholder}
+                  className={`${fieldClass} text-center font-mono text-2xl tracking-widest`}
+                />
+                {error ? <div className={errorBox}>{error}</div> : null}
+                <BlackPillButton
+                  type="submit"
+                  size="lg"
+                  block
+                  disabled={submitting || enrollCode.length < 6}
+                >
+                  {submitting ? copy.enroll.submitting : copy.enroll.submit}
+                </BlackPillButton>
+                <button
+                  type="button"
+                  onClick={handleCancelEnrollment}
+                  className="w-full rounded-full bg-cream-50 px-4 py-3 text-sm font-medium text-ink-300 ring-1 ring-ink-100 transition hover:text-ink-700"
+                >
+                  {copy.enroll.cancel}
+                </button>
+              </form>
+            )}
+          </div>
+        ) : twoFAChallenge ? (
           <div>
             <div className="mb-7 flex items-center gap-3">
               <MascotAvatar role="risk" size={56} animated />

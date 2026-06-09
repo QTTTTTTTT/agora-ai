@@ -52,17 +52,61 @@ import (
 
 const totpEncryptionKeyEnv = "TOTP_ENCRYPTION_KEY"
 
+// totpFeatureWired reports whether this deployment has TOTP
+// crypto configured. handleLogin uses it to decide whether to
+// gate super_admin behind forced enrollment — without the key
+// we can't validate codes and would lock the admin out of the
+// platform, so we fall through to a plain session.
+func totpFeatureWired() bool {
+	return strings.TrimSpace(os.Getenv(totpEncryptionKeyEnv)) != ""
+}
+
+// isSuperAdminUser is the centralised role check used by the
+// forced-enrollment gate. Lowercased comparison so deployments
+// that seed the role from external systems (e.g. an SSO claim)
+// don't trip on case mismatch.
+func isSuperAdminUser(user *authenticatedUser) bool {
+	if user == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(user.Role), "super_admin")
+}
+
+// totpRowFullyEnabled is the nil-safe "user has 2FA active"
+// predicate. A row that exists but never had MarkEnabled called
+// (e.g. the user started enrollment, scanned the QR, and
+// abandoned) counts as NOT enabled — we want to push them back
+// into enroll-complete on next login, not let them through with
+// a half-finished setup.
+func totpRowFullyEnabled(row *repository.UserTOTP) bool {
+	return row != nil && row.IsEnabled()
+}
+
 // twoFAChallengeTTL is the lifetime of a login challenge token. We
 // keep it short — long enough for the user to switch to their
 // authenticator app and type the code, short enough that a stolen
 // token expires before it's useful. 5 minutes balances both.
 const twoFAChallengeTTL = 5 * time.Minute
 
+// twoFAEnrollmentGrantTTL is the lifetime of an enrollment grant
+// token issued at login when a super_admin has no 2FA enrolled yet.
+// 10 minutes is generous: the user has to install an authenticator
+// app, scan a QR, and type the first code. After expiry they have
+// to log in again to restart the flow.
+const twoFAEnrollmentGrantTTL = 10 * time.Minute
+
 // twoFAChallengeAudience is the JWT audience claim for challenge
 // tokens. Using a distinct audience keeps a stolen challenge from
 // being passed off as a regular session token even if signed under
 // the same secret.
 const twoFAChallengeAudience = "2fa_challenge"
+
+// twoFAEnrollmentGrantAudience is the JWT audience claim for the
+// enrollment grant. Same rationale as the challenge audience: a
+// stolen grant cannot be passed as a session because validateJWT
+// audiences are not interchangeable, and the in-handler parsers
+// below explicitly reject any token without the expected audience.
+const twoFAEnrollmentGrantAudience = "2fa_enrollment_grant"
 
 // totpHandler bundles the deps needed by every 2FA endpoint. The
 // encryption AEAD is constructed once at boot so we never re-derive
@@ -118,6 +162,12 @@ func (h *totpHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/2fa/disable", h.handleDisable)
 	mux.HandleFunc("GET /api/auth/2fa/status", h.handleStatus)
 	mux.HandleFunc("POST /api/auth/2fa/challenge", h.handleChallenge)
+	// Enrollment-grant endpoints: used by super_admin first-login
+	// flow when the role is held but TOTP has never been enrolled.
+	// These bypass session auth because the user has no session
+	// yet — the grant token issued at login is the only credential.
+	mux.HandleFunc("POST /api/auth/2fa/enroll-start", h.handleEnrollStart)
+	mux.HandleFunc("POST /api/auth/2fa/enroll-complete", h.handleEnrollComplete)
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +648,234 @@ func (h *totpHandler) parseChallenge(token string) (string, error) {
 		return "", errors.New("token missing subject")
 	}
 	return claims.Subject, nil
+}
+
+// ---------------------------------------------------------------------------
+// Enrollment grant (super_admin first-login forced-2FA flow)
+// ---------------------------------------------------------------------------
+
+// issueTwoFAEnrollmentGrant mints the bearer token a freshly-logged-
+// in super_admin uses to call /2fa/enroll-start + /enroll-complete.
+// Same wire format as issueTwoFAChallenge — only the audience and
+// TTL differ — so frontend code can share the JWT-decoding helper.
+func issueTwoFAEnrollmentGrant(userID string, cfg *Config) (string, time.Time, error) {
+	activeSecret, activeKid := cfg.JWTSecret, ""
+	if ring := cfg.effectiveJWTKeyring(); ring != nil {
+		k := ring.Active()
+		activeSecret, activeKid = k.Secret, k.Kid
+	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(twoFAEnrollmentGrantTTL)
+	tok, err := signJWTWithAudience(userID, twoFAEnrollmentGrantAudience, activeSecret, activeKid, now, expiresAt)
+	return tok, expiresAt, err
+}
+
+// parseEnrollmentGrant mirrors parseChallenge but requires the
+// enrollment-grant audience. Rejecting any other audience prevents
+// a stolen regular session or a stolen 2FA challenge from being
+// promoted into an enrollment grant.
+func (h *totpHandler) parseEnrollmentGrant(token string) (string, error) {
+	ring := h.cfg.effectiveJWTKeyring()
+	if ring == nil {
+		return "", errors.New("jwt keyring not configured")
+	}
+	claims, err := validateJWTWithKeyring(token, ring)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", errors.New("invalid token format")
+	}
+	payloadBytes, err := decodeJWTPart(parts[1])
+	if err != nil {
+		return "", err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return "", err
+	}
+	aud, _ := payload["aud"].(string)
+	if aud != twoFAEnrollmentGrantAudience {
+		return "", errors.New("token is not a 2fa enrollment grant")
+	}
+	if strings.TrimSpace(claims.Subject) == "" {
+		return "", errors.New("token missing subject")
+	}
+	return claims.Subject, nil
+}
+
+// enrollGrantRequest is the shared body shape for both
+// /enroll-start and /enroll-complete.
+type enrollGrantRequest struct {
+	Grant string `json:"grant"`
+	Code  string `json:"code,omitempty"`
+}
+
+// handleEnrollStart accepts a freshly-issued enrollment grant and
+// kicks off the QR + recovery-codes phase. Mirrors handleSetup but
+// the userID comes from the grant claims rather than from the
+// session middleware (which has not run because the user has no
+// session yet).
+//
+// We deliberately allow re-calling this endpoint with a fresh grant
+// when an earlier enrollment was started but never verified: the
+// underlying repo.Enrol upserts the pending row, replacing the old
+// secret. If the user already has TOTP fully enabled, we surface
+// the conflict so the frontend can redirect them to the regular
+// login challenge flow instead.
+func (h *totpHandler) handleEnrollStart(w http.ResponseWriter, r *http.Request) {
+	var body enrollGrantRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeOrderActionJSON(w, http.StatusBadRequest, errorPayload("invalid_body", err.Error()))
+		return
+	}
+	if strings.TrimSpace(body.Grant) == "" {
+		writeOrderActionJSON(w, http.StatusBadRequest, errorPayload("invalid_body", "grant required"))
+		return
+	}
+	userID, err := h.parseEnrollmentGrant(body.Grant)
+	if err != nil {
+		writeOrderActionJSON(w, http.StatusUnauthorized, errorPayload("invalid_grant", err.Error()))
+		return
+	}
+
+	user, err := loadActiveUserByID(r.Context(), h.db, userID)
+	if err != nil {
+		writeOrderActionJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+	label := user.Email
+	if label == "" {
+		label = user.ID
+	}
+
+	enr, err := totp.Enrol(h.cipher, totp.EnrolmentParams{
+		Issuer:      "FundAI",
+		AccountName: label,
+	})
+	if err != nil {
+		writeOrderActionJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+
+	if err := h.repo.Enrol(r.Context(), repository.EnrolParams{
+		UserID:              userID,
+		SecretEncrypted:     enr.EncryptedSecret,
+		Issuer:              enr.Issuer,
+		AccountLabel:        enr.AccountName,
+		Digits:              enr.Digits,
+		PeriodSeconds:       enr.Period,
+		Algorithm:           enr.Algorithm,
+		RecoveryCodesHashed: enr.HashedRecoveryCodes,
+	}); err != nil {
+		if errors.Is(err, repository.ErrTOTPAlreadyEnabled) {
+			writeOrderActionJSON(w, http.StatusConflict, errorPayload("already_enabled", "2FA is already enabled — log in normally and complete the challenge"))
+			return
+		}
+		writeOrderActionJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+
+	h.logAudit(r.Context(), audit.MutationEvent{
+		ActorUserID: userID,
+		Action:      "2fa.enroll_grant_start",
+		TargetType:  "user",
+		TargetID:    userID,
+		Metadata: map[string]any{
+			"client_addr": clientIP(r),
+			"role":        user.Role,
+		},
+	})
+
+	writeOrderActionJSON(w, http.StatusOK, totpSetupResponse{
+		Secret:          enr.PlainSecret,
+		ProvisioningURI: enr.ProvisioningURI,
+		RecoveryCodes:   enr.RecoveryCodes,
+		Issuer:          enr.Issuer,
+		AccountLabel:    enr.AccountName,
+		Digits:          enr.Digits,
+		Period:          enr.Period,
+		Algorithm:       enr.Algorithm,
+	})
+}
+
+// handleEnrollComplete closes the enrollment loop AND mints the
+// real session in one step. The user goes from "just logged in
+// with password" → "2FA enabled + session issued" without ever
+// receiving a 2FA-less session token, which is the whole point of
+// the forced-enrollment flow.
+//
+// On success this writes the same response shape handleLogin would
+// have written for a normal user, so the frontend treats the two
+// paths identically after this point.
+func (h *totpHandler) handleEnrollComplete(w http.ResponseWriter, r *http.Request) {
+	requestID := ensureRequestID(w, r)
+	var body enrollGrantRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeOrderActionJSON(w, http.StatusBadRequest, errorPayload("invalid_body", err.Error()))
+		return
+	}
+	if strings.TrimSpace(body.Grant) == "" {
+		writeOrderActionJSON(w, http.StatusBadRequest, errorPayload("invalid_body", "grant required"))
+		return
+	}
+	if strings.TrimSpace(body.Code) == "" {
+		writeOrderActionJSON(w, http.StatusBadRequest, errorPayload("invalid_body", "code required"))
+		return
+	}
+	userID, err := h.parseEnrollmentGrant(body.Grant)
+	if err != nil {
+		writeOrderActionJSON(w, http.StatusUnauthorized, errorPayload("invalid_grant", err.Error()))
+		return
+	}
+
+	row, err := h.repo.GetByUserID(r.Context(), userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOrderActionJSON(w, http.StatusNotFound, errorPayload("not_enrolled", "no pending 2FA enrolment — call /enroll-start first"))
+		return
+	}
+	if err != nil {
+		writeOrderActionJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+	if err := totp.Verify(h.cipher, totp.VerifyParams{
+		EncryptedSecret: row.SecretEncrypted,
+		Code:            body.Code,
+		Digits:          row.Digits,
+		Period:          row.PeriodSeconds,
+		Algorithm:       row.Algorithm,
+	}); err != nil {
+		_, _ = h.repo.BumpEnrolmentAttempts(r.Context(), userID)
+		writeOrderActionJSON(w, http.StatusUnauthorized, errorPayload("invalid_code", "code does not match"))
+		return
+	}
+	if err := h.repo.MarkEnabled(r.Context(), userID); err != nil {
+		writeOrderActionJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+
+	user, err := loadActiveUserByID(r.Context(), h.db, userID)
+	if err != nil {
+		writeOrderActionJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+
+	h.logAudit(r.Context(), audit.MutationEvent{
+		ActorUserID: userID,
+		Action:      "2fa.enroll_grant_complete",
+		TargetType:  "user",
+		TargetID:    userID,
+		Metadata: map[string]any{
+			"client_addr": clientIP(r),
+			"role":        user.Role,
+		},
+	})
+	writeAuthSuccess(w, h.cfg, requestID, user)
 }
 
 // signJWTWithAudience mints an HS256 JWT carrying sub + aud + exp
