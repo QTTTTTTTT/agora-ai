@@ -190,3 +190,31 @@ func (r *JWTKeyring) LegacyVerificationKeys() [][]byte {
 func ConstantTimeEqualBytes(a, b []byte) bool {
 	return subtle.ConstantTimeCompare(a, b) == 1
 }
+
+// EncryptionSecret returns the symmetric AES-GCM key used to encrypt
+// stored LLM provider API tokens. The canonical name is
+// MODEL_CONFIG_API_KEY_SECRET; API_KEY_ENCRYPTION_SECRET is the older
+// alias kept so legacy deployments do not break on upgrade.
+//
+// Returns "" + nil when neither is set so callers can decide whether
+// to error out or warn (different sites have different appetites:
+// the encryption write path treats it as fatal, the BYOK feature
+// gate treats it as a feature flag).
+//
+// All reads go through FromEnv so the _FILE mount-pattern works
+// uniformly. Before this helper existed, six call sites read these
+// vars via os.Getenv directly, which silently returned "" whenever
+// the operator had switched to MOUNT_FILE mode — leaving file-mounted
+// prod swarms decrypt-broken in subtle ways.
+func EncryptionSecret() (string, error) {
+	for _, name := range []string{"MODEL_CONFIG_API_KEY_SECRET", "API_KEY_ENCRYPTION_SECRET"} {
+		v, err := FromEnv(name)
+		if err != nil {
+			return "", fmt.Errorf("secrets.EncryptionSecret: read %s: %w", name, err)
+		}
+		if s := strings.TrimSpace(v); s != "" {
+			return s, nil
+		}
+	}
+	return "", nil
+}

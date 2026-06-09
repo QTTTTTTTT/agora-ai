@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/fundai/server/internal/api"
+	"github.com/fundai/server/internal/secrets"
 	"github.com/fundai/server/internal/subscription"
 	"github.com/fundai/server/internal/userbyok"
 )
@@ -297,7 +298,10 @@ func (h *advisorBYOKHandler) handleInfo(w http.ResponseWriter, r *http.Request) 
 	if supportEmail == "" {
 		supportEmail = "support@fundai.example"
 	}
-	encryptedAtRest := strings.TrimSpace(os.Getenv("MODEL_CONFIG_API_KEY_SECRET")) != ""
+	encryptedAtRest := false
+	if v, err := secrets.EncryptionSecret(); err == nil && v != "" {
+		encryptedAtRest = true
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"egress_ip":         egress,
 		"support_email":     supportEmail,

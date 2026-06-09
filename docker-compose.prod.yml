@@ -1,9 +1,43 @@
 # =============================================================================
 # docker-compose.prod.yml — single-host production overlay
 # Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build postgres web-search-mcp app
+#
+# Secret material handling
+# ------------------------
+# Application-layer secrets (JWT_SECRET, MODEL_CONFIG_API_KEY_SECRET) are
+# resolved through Docker Compose `secrets:` rather than environment
+# variables. Compose mounts each declared secret as a tmpfs file under
+# /run/secrets/<name> and the server reads them via the `_FILE` suffix
+# resolver in server/internal/secrets/secrets.go:FromEnv. This keeps the
+# plaintext value out of `docker inspect`, `ps -ef` output, and any
+# downstream image / log scraper that snapshots env vars.
+#
+# POSTGRES_PASSWORD stays as an env var because it is embedded inside the
+# DATABASE_URL connection string that the application is given as a
+# single opaque secret; splitting it would force a bootstrap-time URL
+# assembly step that doesn't pay for itself on a single-host compose
+# deploy. Operators on managed Postgres (RDS / Aurora) supply
+# DATABASE_URL directly and never touch POSTGRES_PASSWORD here.
+#
+# Where to put the secret files
+# -----------------------------
+# Default locations are under ./secrets/ relative to this compose file:
+#
+#   ./secrets/jwt_secret
+#   ./secrets/model_config_api_key_secret
+#
+# Override with the *_FILE_PATH env vars below to point at e.g.
+# /run/keys/<name> in a swarm / k8s deployment that wires Docker
+# secrets through some other channel.
 # =============================================================================
 
 name: fundai-simulator-prod
+
+secrets:
+  jwt_secret:
+    file: ${JWT_SECRET_FILE_PATH:-./secrets/jwt_secret}
+  model_config_api_key_secret:
+    file: ${MODEL_CONFIG_API_KEY_SECRET_FILE_PATH:-./secrets/model_config_api_key_secret}
 
 services:
   postgres:
@@ -26,9 +60,22 @@ services:
       # case. Off-host RDS / Aurora / managed Postgres MUST keep this 0
       # and use sslmode=require/verify-full in DATABASE_URL.
       ALLOW_INTERNAL_COMPOSE_DB: ${ALLOW_INTERNAL_COMPOSE_DB:-0}
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET to a strong production secret}
-      MODEL_CONFIG_API_KEY_SECRET: ${MODEL_CONFIG_API_KEY_SECRET:?set MODEL_CONFIG_API_KEY_SECRET to a strong independent production secret}
+      # File-mode secrets: server reads /run/secrets/<name> via
+      # secrets.FromEnv, which prefers the plain env var over the
+      # _FILE path. The base docker-compose.yml ships dev-placeholder
+      # values for JWT_SECRET / MODEL_CONFIG_API_KEY_SECRET so an
+      # `up` without prod overlay still runs; we must explicitly
+      # blank them here, otherwise the merge would let the placeholder
+      # win over the mounted secret. Empty + nonempty _FILE = file
+      # wins, which is what prod wants.
+      JWT_SECRET: ""
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      MODEL_CONFIG_API_KEY_SECRET: ""
+      MODEL_CONFIG_API_KEY_SECRET_FILE: /run/secrets/model_config_api_key_secret
       CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS to your production frontend origin list}
+    secrets:
+      - jwt_secret
+      - model_config_api_key_secret
 
   web-search-mcp:
     ports:

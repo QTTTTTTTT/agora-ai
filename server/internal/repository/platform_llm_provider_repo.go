@@ -24,10 +24,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/fundai/server/internal/secrets"
 	"github.com/fundai/server/internal/subscription"
 	"github.com/google/uuid"
 )
@@ -70,13 +70,18 @@ type PlatformLLMProviderRow struct {
 // MODEL_CONFIG_API_KEY_SECRET on every call so a runtime secret
 // rotation is observed without a router restart. Caller must NOT
 // log or persist the return value.
+//
+// secrets.EncryptionSecret routes through FromEnv so the same value
+// is resolved whether the operator supplies it as an env var or as
+// a file mounted at MODEL_CONFIG_API_KEY_SECRET_FILE (docker / k8s
+// secret pattern).
 func (r *PlatformLLMProviderRow) PlainAPIKey() (string, error) {
-	secret := strings.TrimSpace(os.Getenv("MODEL_CONFIG_API_KEY_SECRET"))
-	if secret == "" {
-		secret = strings.TrimSpace(os.Getenv("API_KEY_ENCRYPTION_SECRET"))
+	secret, err := secrets.EncryptionSecret()
+	if err != nil {
+		return "", err
 	}
 	if secret == "" {
-		return "", errors.New("platform_llm_provider: MODEL_CONFIG_API_KEY_SECRET not set")
+		return "", errors.New("platform_llm_provider: MODEL_CONFIG_API_KEY_SECRET not set (neither env var nor _FILE)")
 	}
 	pt, err := subscription.DecryptAPIKey(r.APIKeyEncrypted, secret)
 	if err != nil {
@@ -454,12 +459,12 @@ func EncryptKey(plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", errors.New("platform_llm_provider_repo: empty plaintext")
 	}
-	secret := strings.TrimSpace(os.Getenv("MODEL_CONFIG_API_KEY_SECRET"))
-	if secret == "" {
-		secret = strings.TrimSpace(os.Getenv("API_KEY_ENCRYPTION_SECRET"))
+	secret, err := secrets.EncryptionSecret()
+	if err != nil {
+		return "", err
 	}
 	if secret == "" {
-		return "", errors.New("platform_llm_provider_repo: MODEL_CONFIG_API_KEY_SECRET not set")
+		return "", errors.New("platform_llm_provider_repo: MODEL_CONFIG_API_KEY_SECRET not set (neither env var nor _FILE)")
 	}
 	return subscription.EncryptAPIKey(plaintext, secret)
 }

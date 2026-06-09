@@ -200,6 +200,49 @@ func TestConstantTimeEqualBytes(t *testing.T) {
 	}
 }
 
+// TestEncryptionSecretReadsFromFile is the regression that proves the
+// `_FILE` mount mode works for the model-config encryption secret.
+// Six callers used to read MODEL_CONFIG_API_KEY_SECRET via os.Getenv
+// directly, silently bypassing the file resolver and breaking every
+// decrypt call on prod swarms that had moved to file-mounted secrets.
+// Single call to EncryptionSecret() now routes all of them through
+// FromEnv, so this one test guards the whole class.
+func TestEncryptionSecretReadsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "key")
+	if err := os.WriteFile(path, []byte("aes-gcm-key-from-mounted-secret\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("MODEL_CONFIG_API_KEY_SECRET", "")
+	t.Setenv("MODEL_CONFIG_API_KEY_SECRET_FILE", path)
+	t.Setenv("API_KEY_ENCRYPTION_SECRET", "")
+
+	got, err := EncryptionSecret()
+	if err != nil {
+		t.Fatalf("EncryptionSecret: %v", err)
+	}
+	if got != "aes-gcm-key-from-mounted-secret" {
+		t.Errorf("expected file contents (trimmed), got %q", got)
+	}
+}
+
+// TestEncryptionSecretFallsBackToLegacyName covers the migration path:
+// deployments still using API_KEY_ENCRYPTION_SECRET (older alias) keep
+// working. Without this back-compat, upgrading to a release that uses
+// EncryptionSecret() would break installs running on the older name.
+func TestEncryptionSecretFallsBackToLegacyName(t *testing.T) {
+	t.Setenv("MODEL_CONFIG_API_KEY_SECRET", "")
+	t.Setenv("API_KEY_ENCRYPTION_SECRET", "legacy-name-value")
+
+	got, err := EncryptionSecret()
+	if err != nil {
+		t.Fatalf("EncryptionSecret: %v", err)
+	}
+	if got != "legacy-name-value" {
+		t.Errorf("expected fallback to legacy var, got %q", got)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

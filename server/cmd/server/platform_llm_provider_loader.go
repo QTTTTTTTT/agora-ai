@@ -40,6 +40,7 @@ import (
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/llm"
 	"github.com/fundai/server/internal/repository"
+	"github.com/fundai/server/internal/secrets"
 	"github.com/google/uuid"
 )
 
@@ -198,12 +199,12 @@ func seedFromEnv(
 	envDefaults LLMDefaultsConfig,
 	auditLogger *audit.DBLogger,
 ) error {
-	secret := strings.TrimSpace(os.Getenv("MODEL_CONFIG_API_KEY_SECRET"))
-	if secret == "" {
-		secret = strings.TrimSpace(os.Getenv("API_KEY_ENCRYPTION_SECRET"))
+	secret, err := secrets.EncryptionSecret()
+	if err != nil {
+		return err
 	}
 	if secret == "" {
-		return errors.New("MODEL_CONFIG_API_KEY_SECRET not set; cannot seed")
+		return errors.New("MODEL_CONFIG_API_KEY_SECRET not set (neither env var nor _FILE); cannot seed")
 	}
 
 	seeded := []string{}

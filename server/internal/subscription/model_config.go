@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/fundai/server/internal/llm"
+	"github.com/fundai/server/internal/secrets"
 	"github.com/google/uuid"
 )
 
@@ -551,12 +552,12 @@ func resolveAPIKeyValue(apiKey string) (string, error) {
 }
 
 func getAPIKeyEncryptionSecret() (string, error) {
-	secret := strings.TrimSpace(os.Getenv("MODEL_CONFIG_API_KEY_SECRET"))
-	if secret == "" {
-		secret = strings.TrimSpace(os.Getenv("API_KEY_ENCRYPTION_SECRET"))
+	secret, err := secrets.EncryptionSecret()
+	if err != nil {
+		return "", err
 	}
 	if secret == "" {
-		return "", fmt.Errorf("api key encryption secret is not configured; set MODEL_CONFIG_API_KEY_SECRET or API_KEY_ENCRYPTION_SECRET")
+		return "", fmt.Errorf("api key encryption secret is not configured; set MODEL_CONFIG_API_KEY_SECRET or API_KEY_ENCRYPTION_SECRET (env var or _FILE mount)")
 	}
 	return secret, nil
 }

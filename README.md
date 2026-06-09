@@ -633,6 +633,33 @@ ai-fund-platform-v3-full/
   让用户重新录入（旧密钥用旧 secret 加密、无法解出）。
 - `CORS_ORIGINS` 逗号分隔；生产必须替换为真实 HTTPS 站点。
 
+**Secret 挂载模式：env vs 文件**
+
+所有上述 secret 都可以走两种解析路径，由 `server/internal/secrets/secrets.go::FromEnv`
+统一处理：
+
+1. **env 模式**（dev / 历史部署）：`JWT_SECRET=...` 直接走环境变量。
+2. **文件模式**（生产推荐）：设 `JWT_SECRET_FILE=/run/secrets/jwt_secret`，把明文写到
+   该路径下，`FromEnv("JWT_SECRET")` 会自动从文件读（trim 尾部换行）。Docker / k8s
+   secrets 原生输出就是这种 tmpfs file 模式，避免明文进 `docker inspect` /
+   `ps auxe` / 任何抓 env 的日志切片。
+
+`docker-compose.prod.yml` 现已默认走文件模式：把 `jwt_secret` 与
+`model_config_api_key_secret` 两个 secret 写到 `./secrets/<name>`（或者通过
+`JWT_SECRET_FILE_PATH` / `MODEL_CONFIG_API_KEY_SECRET_FILE_PATH` 覆盖路径），compose
+会自动把文件挂到 `/run/secrets/<name>`。生成示例：
+
+```bash
+mkdir -p secrets && chmod 700 secrets
+openssl rand -hex 32 > secrets/jwt_secret
+openssl rand -hex 32 > secrets/model_config_api_key_secret
+chmod 600 secrets/*
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d app
+```
+
+要回退到 env 模式：把 compose 里的 `secrets:` 块和 `*_FILE` env 注释掉，恢复成
+`JWT_SECRET: ${JWT_SECRET}` 即可，服务端代码两种模式都接得住。
+
 #### ④ 站点公开地址 / 品牌
 
 - `APP_PUBLIC_URL` 用于构造邮件链接（如 reset:
