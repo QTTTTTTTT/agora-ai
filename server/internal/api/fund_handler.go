@@ -1858,6 +1858,22 @@ type FundHandler struct {
 	// the endpoint returns 503 when unwired so deployments without
 	// LLM keys still work.
 	fundAssist       FundAssistService
+	// factorlab powers the Stage-2 IC/IR/分层 report endpoint
+	// (/api/factorlab/reports). Same nil-safety contract: handler
+	// returns 503 when unwired.
+	factorlab        FactorLabService
+	// paperTrading powers the Stage-4 tamper-evident performance
+	// archive (/api/papertrading/*). Same nil-safety contract.
+	paperTrading     PaperTradingService
+	// cnIntraday powers the Stage-5 A-share intraday signal
+	// dry-run endpoint (/api/cnintraday/signals/dry-run). Live
+	// engine runs out-of-process in cmd/cnintraday-runner.
+	cnIntraday       CNIntradayService
+	// compliance powers the SEC / Marketing-Rule disclosure
+	// surface: user-disclosure acknowledgments + post-LLM
+	// phrase scanner audit. nil-safe: /api/compliance/* returns
+	// 503 and the in-handler scanner becomes a no-op.
+	compliance       ComplianceService
 }
 
 // WithBacktestService wires the Phase 2E backtest service. nil
@@ -1876,6 +1892,45 @@ func (h *FundHandler) WithBacktestService(svc BacktestService) *FundHandler {
 func (h *FundHandler) WithFundAssistService(svc FundAssistService) *FundHandler {
 	if h != nil {
 		h.fundAssist = svc
+	}
+	return h
+}
+
+// WithFactorLabService wires the Stage-2 factor report service.
+// nil disables /api/factorlab/reports with a 503. Idempotent.
+func (h *FundHandler) WithFactorLabService(svc FactorLabService) *FundHandler {
+	if h != nil {
+		h.factorlab = svc
+	}
+	return h
+}
+
+// WithPaperTradingService wires the Stage-4 paper trading service.
+// nil disables /api/papertrading/* with a 503. Idempotent.
+func (h *FundHandler) WithPaperTradingService(svc PaperTradingService) *FundHandler {
+	if h != nil {
+		h.paperTrading = svc
+	}
+	return h
+}
+
+// WithCNIntradayService wires the Stage-5 A-share intraday
+// dry-run service. nil disables /api/cnintraday/* with a 503.
+// Idempotent.
+func (h *FundHandler) WithCNIntradayService(svc CNIntradayService) *FundHandler {
+	if h != nil {
+		h.cnIntraday = svc
+	}
+	return h
+}
+
+// WithComplianceService wires the SEC / Marketing-Rule
+// disclosure-ack + post-LLM phrase scanner audit service. nil
+// disables /api/compliance/* with a 503 and turns the
+// in-handler scanner into a pass-through. Idempotent.
+func (h *FundHandler) WithComplianceService(svc ComplianceService) *FundHandler {
+	if h != nil {
+		h.compliance = svc
 	}
 	return h
 }
@@ -1975,6 +2030,20 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/funds/{fundId}/backtests/sweeps", h.ListSweeps)
 	mux.HandleFunc("GET /api/funds/{fundId}/backtests/sweeps/{sweepId}", h.GetSweep)
 	mux.HandleFunc("GET /api/backtests/sweeps/axes", h.SweepAxisCatalog)
+	mux.HandleFunc("POST /api/factorlab/reports", h.RunFactorReport)
+	mux.HandleFunc("POST /api/factorlab/walkforward", h.RunWalkForwardFactor)
+	mux.HandleFunc("POST /api/papertrading/portfolios", h.CreatePaperPortfolio)
+	mux.HandleFunc("GET /api/papertrading/portfolios", h.ListPaperPortfolios)
+	mux.HandleFunc("GET /api/papertrading/portfolios/{portfolioId}", h.GetPaperPortfolio)
+	mux.HandleFunc("POST /api/papertrading/orders", h.ProposePaperOrder)
+	mux.HandleFunc("GET /api/papertrading/portfolios/{portfolioId}/orders", h.ListPaperOrders)
+	mux.HandleFunc("GET /api/papertrading/portfolios/{portfolioId}/nav", h.GetPaperNavHistory)
+	mux.HandleFunc("POST /api/papertrading/snapshots", h.SnapshotPaperNav)
+	mux.HandleFunc("POST /api/cnintraday/signals/dry-run", h.DryRunCNIntradaySignal)
+	mux.HandleFunc("GET /api/compliance/disclosure", h.GetComplianceDisclosure)
+	mux.HandleFunc("POST /api/compliance/acknowledgments", h.RecordComplianceAck)
+	mux.HandleFunc("GET /api/compliance/acknowledgments", h.ListComplianceAcks)
+	mux.HandleFunc("GET /api/compliance/violations", h.ListComplianceViolations)
 	mux.HandleFunc("GET /api/funds/{fundId}/backtests/{jobId}", h.GetBacktest)
 	mux.HandleFunc("POST /api/funds/{fundId}/backtests/{jobId}/cancel", h.CancelBacktest)
 	mux.HandleFunc("POST /api/funds/{fundId}/promotions", h.ProposePromotion)
