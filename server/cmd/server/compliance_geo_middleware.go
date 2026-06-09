@@ -24,10 +24,22 @@
 //   2. X-Vercel-IP-Country    (Vercel)
 //   3. X-Country               (custom reverse-proxy override)
 //
-// When none of those is present we fail OPEN (no block, no
-// log) because in local dev the absence of a CDN means every
-// request would otherwise be flagged. Production deployments
-// MUST sit behind a CDN that injects one of the headers.
+// When none of those is present we fail OPEN in development
+// (no block, no log) because in local dev the absence of a CDN
+// means every request would otherwise be flagged.
+//
+// In production (APP_ENV=production) we fail CLOSE: any request
+// that reaches the middleware without any recognised geo header
+// is answered with HTTP 503 + a structured slog line (rate-
+// limited to once per minute so a real CDN-less incident does
+// not flood the log). Rationale: the only way a production
+// request can lack the header is (a) the CDN was bypassed
+// (direct-origin hit) or (b) the CDN is misconfigured — either
+// case lets sanctioned-country traffic in unnoticed, so refusing
+// the request is strictly safer than answering it. Uptime
+// monitors and observability scrapers stay on the
+// pathsExemptFromGeoBlock allow-list and so are not affected
+// even when they call from outside the CDN.
 
 package main
 
@@ -35,9 +47,12 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/fundai/server/internal/compliance"
+	"golang.org/x/time/rate"
 )
 
 // pathsExemptFromGeoBlock are health / status / metrics paths
@@ -54,6 +69,14 @@ var pathsExemptFromGeoBlock = map[string]bool{
 }
 
 func complianceGeoMiddleware() func(http.Handler) http.Handler {
+	// Captured once at construction. APP_ENV does not change at
+	// runtime; reading it on every request would be needless work.
+	isProduction := strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
+	// One log per minute, burst of one. Tuned so a real CDN outage
+	// produces a steady drumbeat in stdout without ten thousand
+	// lines per second drowning out the rest of the log feed.
+	missingHeaderLogLimiter := rate.NewLimiter(rate.Every(time.Minute), 1)
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if pathsExemptFromGeoBlock[r.URL.Path] {
@@ -62,6 +85,23 @@ func complianceGeoMiddleware() func(http.Handler) http.Handler {
 			}
 			country := resolveCountryHeader(r)
 			subRegion := resolveSubRegionHeader(r)
+			// Production fail-close: missing CDN header means the
+			// request bypassed the geo enforcement perimeter. We
+			// refuse rather than serve, even though the visitor
+			// might be in an allowed country, because we cannot
+			// prove they are. Dev / staging keep fail-open so
+			// `curl localhost:8080/api/funds` still works.
+			if country == "" && isProduction {
+				if missingHeaderLogLimiter.Allow() {
+					slog.Warn("compliance.geo.missing_cdn_header",
+						"path", r.URL.Path,
+						"method", r.Method,
+						"remote_addr", r.RemoteAddr,
+						"hint", "production traffic must transit a CDN that sets CF-IPCountry, X-Vercel-IP-Country, or X-Country")
+				}
+				writeGeoHeaderMissing(w)
+				return
+			}
 			decision := compliance.GeoDecideEx(country, subRegion)
 			// Stamp the response with the resolved country for
 			// downstream observability and (in EU's case) for the
@@ -135,5 +175,21 @@ func writeGeoBlock(w http.ResponseWriter, d compliance.Decision) {
 		"country":      d.CountryCode,
 		"rule":         d.RuleID,
 		"authority":    "https://www.treasury.gov/resource-center/sanctions/SDN-List",
+	})
+}
+
+// writeGeoHeaderMissing is the production fail-close response.
+// We deliberately do NOT echo the request path or any header
+// data back to the caller — the response body is identical for
+// every blocked request so a scanner cannot probe which paths
+// would have served had a header been forged.
+func writeGeoHeaderMissing(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":  "geo_resolution_unavailable",
+		"reason": "Required CDN geo headers missing; production traffic must transit a CDN.",
 	})
 }
