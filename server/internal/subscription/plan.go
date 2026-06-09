@@ -39,6 +39,18 @@ type Plan struct {
 	SimulationCapital float64  `json:"simulation_capital"`
 	IncludedTokens    int64    `json:"included_tokens"`
 	Description       string   `json:"description"`
+
+	// Phase A — advisor 模式按次服务费配额。-1 表示无限。
+	// 计费单位为 service unit:
+	//   advisor deep consult (10 大师 / 4 战法 panel) = 1 unit
+	//   advisor quick consult (单大师 / 单战法)        = 1 quick unit
+	AdvisorDeepUnitsPerMonth  int `json:"advisor_deep_units_per_month"`
+	AdvisorQuickUnitsPerMonth int `json:"advisor_quick_units_per_month"`
+
+	// Phase B — 是否允许在 /advisor 模式接入 user-BYOK。
+	// 与 AllowCustomKey 不同：那是 fund 维度的「用户级 model_config」；
+	// 这是 advisor 维度的「用户 LLM key 加密存储 + UserOverrideHook」。
+	AllowAdvisorBYOK bool `json:"allow_advisor_byok"`
 }
 
 // 预定义计划
@@ -56,6 +68,10 @@ var Plans = map[PlanTier]*Plan{
 		SimulationCapital: 100000,
 		IncludedTokens:    500000,
 		Description:       "体验AI基金模拟的基础版本",
+
+		AdvisorDeepUnitsPerMonth:  5,
+		AdvisorQuickUnitsPerMonth: 15,
+		AllowAdvisorBYOK:          false,
 	},
 	PlanPro: {
 		Tier: PlanPro, Name: "专业版", PriceCentsMonth: 9900,
@@ -70,6 +86,10 @@ var Plans = map[PlanTier]*Plan{
 		SimulationCapital: 10000000,
 		IncludedTokens:    0,
 		Description:       "专业投资者的AI投研团队",
+
+		AdvisorDeepUnitsPerMonth:  100,
+		AdvisorQuickUnitsPerMonth: -1,
+		AllowAdvisorBYOK:          true,
 	},
 	PlanPremium: {
 		Tier: PlanPremium, Name: "旗舰版", PriceCentsMonth: 24900,
@@ -84,6 +104,10 @@ var Plans = map[PlanTier]*Plan{
 		SimulationCapital: 100000000,
 		IncludedTokens:    0,
 		Description:       "全功能AI基金公司模拟",
+
+		AdvisorDeepUnitsPerMonth:  500,
+		AdvisorQuickUnitsPerMonth: -1,
+		AllowAdvisorBYOK:          true,
 	},
 	PlanEnterprise: {
 		Tier: PlanEnterprise, Name: "企业版", PriceCentsMonth: 99900,
@@ -98,6 +122,10 @@ var Plans = map[PlanTier]*Plan{
 		SimulationCapital: 0,
 		IncludedTokens:    0,
 		Description:       "企业级私有化部署",
+
+		AdvisorDeepUnitsPerMonth:  -1,
+		AdvisorQuickUnitsPerMonth: -1,
+		AllowAdvisorBYOK:          true,
 	},
 }
 

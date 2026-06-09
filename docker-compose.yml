@@ -95,6 +95,13 @@ services:
       MCP_AKSHARE_URL: ${MCP_AKSHARE_URL:-}
       MCP_TA_LIB_URL: "http://ta-lib-mcp:3003"
       MCP_WEB_SEARCH_URL: ${MCP_WEB_SEARCH_URL:-http://web-search-mcp:3004}
+      # A-share fundamentals (PE/PB/ROE/营收增速/市值) for the advisor
+      # master agents. The sidecar in services/akshare-fundamental wraps
+      # the akshare Python lib behind the four-endpoint contract the
+      # Go provider (internal/fundamental/provider_akshare.go) expects.
+      # Leave empty to disable — masters then fall back to
+      # "data_unavailable" honestly instead of hallucinating.
+      AKSHARE_FUNDAMENTAL_URL: ${AKSHARE_FUNDAMENTAL_URL:-http://akshare-fundamental:8001}
       # Market data
       QUANTDINGER_URL: ${QUANTDINGER_URL:-}
       MARKETDATA_QUOTE_PROVIDERS: ${MARKETDATA_QUOTE_PROVIDERS:-quantdinger}
@@ -248,6 +255,38 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # A-share fundamentals sidecar (PE / PB / ROE / 营收增速 / 市值 / 等)
+  # for the advisor master agents. Built from services/akshare-fundamental
+  # — a thin Flask wrapper around the akshare Python lib. Matches the
+  # contract in server/internal/fundamental/provider_akshare.go:
+  # GET /api/fundamental?symbol=<code>&market=a_share -> {"data": {...}}.
+  # No API key needed; data comes from public eastmoney / 同花顺 endpoints.
+  akshare-fundamental:
+    build:
+      context: ./services/akshare-fundamental
+      dockerfile: Dockerfile
+    image: fundai-akshare-fundamental:latest
+    container_name: fundai-akshare-fundamental
+    restart: unless-stopped
+    environment:
+      PORT: "8001"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WEB_CONCURRENCY: "2"
+    networks:
+      - mcp-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     deploy:
       resources:
         limits:

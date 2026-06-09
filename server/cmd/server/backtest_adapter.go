@@ -551,19 +551,21 @@ func translateSubmitInput(in api.SubmitBacktestInput) backtest.Request {
 		})
 	}
 	req := backtest.Request{
-		FundID:           in.FundID,
-		Name:             in.Name,
-		Market:           in.Market,
-		Symbols:          in.Symbols,
-		InitialPositions: positions,
-		Start:            in.Start.UTC(),
-		End:              in.End.UTC(),
-		InitialCash:      in.InitialCash,
-		BaseCurrency:     in.BaseCurrency,
-		SlippageBps:      in.SlippageBps,
-		CommissionBps:    in.CommissionBps,
-		MaxOrdersPerDay:  in.MaxOrdersPerDay,
-		EngineKind:       in.EngineKind,
+		FundID:             in.FundID,
+		Name:               in.Name,
+		Market:             in.Market,
+		Symbols:            in.Symbols,
+		InitialPositions:   positions,
+		Start:              in.Start.UTC(),
+		End:                in.End.UTC(),
+		InitialCash:        in.InitialCash,
+		BaseCurrency:       in.BaseCurrency,
+		SlippageBps:        in.SlippageBps,
+		CommissionBps:      in.CommissionBps,
+		MaxOrdersPerDay:    in.MaxOrdersPerDay,
+		EngineKind:         in.EngineKind,
+		BenchmarkSymbol:    in.BenchmarkSymbol,
+		RebalanceFrequency: in.RebalanceFrequency,
 	}
 	if in.WalkForward != nil {
 		req.WalkForward = &backtest.WalkForwardSpec{
@@ -624,15 +626,17 @@ func translateRequestEcho(req backtest.Request) *api.BacktestRequestEcho {
 		})
 	}
 	echo := &api.BacktestRequestEcho{
-		Symbols:          req.Symbols,
-		Start:            req.Start,
-		End:              req.End,
-		InitialCash:      req.InitialCash,
-		BaseCurrency:     req.BaseCurrency,
-		SlippageBps:      req.SlippageBps,
-		CommissionBps:    req.CommissionBps,
-		MaxOrdersPerDay:  req.MaxOrdersPerDay,
-		InitialPositions: positions,
+		Symbols:            req.Symbols,
+		Start:              req.Start,
+		End:                req.End,
+		InitialCash:        req.InitialCash,
+		BaseCurrency:       req.BaseCurrency,
+		SlippageBps:        req.SlippageBps,
+		CommissionBps:      req.CommissionBps,
+		MaxOrdersPerDay:    req.MaxOrdersPerDay,
+		InitialPositions:   positions,
+		BenchmarkSymbol:    req.BenchmarkSymbol,
+		RebalanceFrequency: req.RebalanceFrequency,
 	}
 	if req.WalkForward != nil {
 		echo.WalkForward = &api.WalkForwardInput{
@@ -673,24 +677,42 @@ func translateResultView(r *backtest.Result) *api.BacktestResultView {
 			Confidence: t.Confidence,
 		})
 	}
+	bench := make([]api.BacktestBenchmarkPoint, 0, len(r.BenchmarkCurve))
+	for _, p := range r.BenchmarkCurve {
+		bench = append(bench, api.BacktestBenchmarkPoint{
+			Date:  p.Date,
+			Close: p.Close,
+			Nav:   p.Nav,
+			Pct:   p.Pct,
+		})
+	}
 	return &api.BacktestResultView{
 		InitialCash: r.InitialCash,
 		FinalNav:    r.FinalNav,
 		NavCurve:    curve,
 		Trades:      trades,
 		Metrics: api.BacktestMetricsView{
-			CumulativeReturn:  r.Metrics.CumulativeReturn,
-			AnnualizedReturn:  r.Metrics.AnnualizedReturn,
-			Volatility:        r.Metrics.Volatility,
-			SharpeRatio:       r.Metrics.SharpeRatio,
-			MaxDrawdown:       r.Metrics.MaxDrawdown,
-			WinRate:           r.Metrics.WinRate,
-			TradeCount:        r.Metrics.TradeCount,
-			WinningTradeCount: r.Metrics.WinningTradeCount,
-			LosingTradeCount:  r.Metrics.LosingTradeCount,
+			CumulativeReturn:          r.Metrics.CumulativeReturn,
+			AnnualizedReturn:          r.Metrics.AnnualizedReturn,
+			Volatility:                r.Metrics.Volatility,
+			SharpeRatio:               r.Metrics.SharpeRatio,
+			MaxDrawdown:               r.Metrics.MaxDrawdown,
+			WinRate:                   r.Metrics.WinRate,
+			TradeCount:                r.Metrics.TradeCount,
+			WinningTradeCount:         r.Metrics.WinningTradeCount,
+			LosingTradeCount:          r.Metrics.LosingTradeCount,
+			BenchmarkCumulativeReturn: r.Metrics.BenchmarkCumulativeReturn,
+			ExcessReturn:              r.Metrics.ExcessReturn,
+			ExcessMaxDrawdown:         r.Metrics.ExcessMaxDrawdown,
+			Alpha:                     r.Metrics.Alpha,
+			Beta:                      r.Metrics.Beta,
+			TrackingError:             r.Metrics.TrackingError,
+			InformationRatio:          r.Metrics.InformationRatio,
 		},
-		CompletedAt: r.CompletedAt,
-		WalkForward: translateWalkForwardResult(r.WalkForward),
+		CompletedAt:     r.CompletedAt,
+		WalkForward:     translateWalkForwardResult(r.WalkForward),
+		BenchmarkSymbol: r.BenchmarkSymbol,
+		BenchmarkCurve:  bench,
 	}
 }
 

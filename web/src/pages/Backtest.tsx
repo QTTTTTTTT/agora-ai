@@ -24,7 +24,10 @@ import {
 } from "../lib/api";
 import { useNavigate } from "react-router-dom";
 import { formatDateForLanguage, formatDateTimeForLanguage, formatNumberForLanguage, useAppPreferences, type AppLanguage } from "../lib/preferences";
+import { ComplianceBanner } from "../components/ComplianceBanner";
 import { computeDeepBacktestMetrics } from "../lib/stats/backtestMetrics";
+import BacktestPerformancePanel from "../components/BacktestPerformancePanel";
+import FactorReportPanel from "../components/FactorReportPanel";
 
 // Default form values are intentionally conservative: 6-month
 // window, $100k starting cash, fallback engine. Operators in
@@ -236,6 +239,12 @@ function buildCopy(language: AppLanguage) {
       engineLLM: "LLM PM Agent",
       engineDebate: "LLM + multi-agent debate",
       engineWarn: "LLM-backed runs call the model once per simulated day. Budget accordingly.",
+      benchmark: "Benchmark symbol",
+      benchmarkHint: "Optional. Tracks (strategy − benchmark) excess return + alpha/beta/IR. Common: SPY, QQQ, IWM, 000300.SH.",
+      rebalanceFreq: "Rebalance frequency",
+      rebalanceDaily: "Daily (default)",
+      rebalanceWeekly: "Weekly",
+      rebalanceMonthly: "Monthly (Stage 1 US SaaS)",
       runIt: "Run backtest",
       runningLabel: "Running…",
       results: "Results",
@@ -364,6 +373,12 @@ function buildCopy(language: AppLanguage) {
     engineLLM: "LLM PM Agent",
     engineDebate: "LLM + 多智能体辩论",
     engineWarn: "LLM 回测每个交易日都会调用模型，请评估预算后再开启。",
+    benchmark: "基准指数",
+    benchmarkHint: "可选。开启后画三线图（策略/基准/超额）并计算 alpha/beta/信息比率。常用：SPY、QQQ、IWM、000300.SH。",
+    rebalanceFreq: "调仓频率",
+    rebalanceDaily: "每日（默认）",
+    rebalanceWeekly: "每周",
+    rebalanceMonthly: "每月（Stage 1 美股 SaaS 配置）",
     runIt: "开始回测",
     runningLabel: "运行中…",
     results: "结果",
@@ -870,6 +885,7 @@ const Backtest: React.FC = () => {
         <h1 className="text-2xl font-semibold text-gray-900">{copy.title}</h1>
         <p className="mt-1 max-w-3xl text-sm text-gray-500">{copy.subtitle}</p>
       </header>
+      <ComplianceBanner surface="backtest" />
 
       {error && (
         <div className="rounded border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{error}</div>
@@ -996,6 +1012,34 @@ const Backtest: React.FC = () => {
                 {copy.engineWarn}
               </p>
             )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-gray-700">{copy.benchmark}</span>
+                <input
+                  type="text"
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm uppercase"
+                  placeholder="SPY"
+                  value={form.benchmarkSymbol ?? ""}
+                  onChange={(e) => setForm({ ...form, benchmarkSymbol: e.target.value.toUpperCase() })}
+                />
+              </label>
+              <label className="block">
+                <span className="text-gray-700">{copy.rebalanceFreq}</span>
+                <select
+                  className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
+                  value={form.rebalanceFrequency ?? "daily"}
+                  onChange={(e) =>
+                    setForm({ ...form, rebalanceFrequency: e.target.value as BacktestSubmitInput["rebalanceFrequency"] })
+                  }
+                >
+                  <option value="daily">{copy.rebalanceDaily}</option>
+                  <option value="weekly">{copy.rebalanceWeekly}</option>
+                  <option value="monthly">{copy.rebalanceMonthly}</option>
+                </select>
+              </label>
+            </div>
+            <p className="text-[11px] text-gray-500">{copy.benchmarkHint}</p>
 
             <label className="flex items-center gap-2 text-xs text-gray-700">
               <input
@@ -1357,6 +1401,16 @@ const Backtest: React.FC = () => {
                 <p className="text-sm text-red-700">{selected.error}</p>
               ) : selected.result ? (
                 <div className="space-y-4">
+                  <BacktestPerformancePanel
+                    benchmarkSymbol={selected.result.benchmarkSymbol}
+                    benchmarkCurve={selected.result.benchmarkCurve}
+                    navCurve={selected.result.navCurve}
+                    metrics={selected.result.metrics}
+                    initialCash={selected.result.initialCash}
+                    finalNav={selected.result.finalNav}
+                    language={language}
+                  />
+                  <FactorReportPanel language={language} />
                   <MetricsGrid copy={copy} metrics={selected.result.metrics} initial={selected.result.initialCash} final={selected.result.finalNav} language={language} />
                   <DeepMetricsPanel
                     navCurve={selected.result.navCurve}

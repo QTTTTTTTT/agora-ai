@@ -112,6 +112,14 @@ type ModelRouter struct {
 	// the A/B hook and per-user resolution. See fund_override_hook.go
 	// for the priority-chain rationale. nil = no fund overrides.
 	fundOverrideHook FundOverrideHook
+
+	// Phase B-2 — user-supplied BYOK key hook. Sits ABOVE
+	// fundOverrideHook so /advisor consultations (FundID = "")
+	// route through the user's personal key, while fund-mode
+	// calls still respect the strategy owner's fund override.
+	// See user_override_hook.go for the priority-chain rationale.
+	// nil = no user-level BYOK overrides.
+	userOverrideHook UserOverrideHook
 }
 
 // NewModelRouter 创建 ModelRouter。
@@ -198,6 +206,26 @@ func (r *ModelRouter) ResolveModel(ctx context.Context, req *ChatRequest) (*Mode
 		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
 			cfg := decision.Config.Clone()
 			r.ensureAPIKey(cfg, owner)
+			return r.finalizeConfig(ctx, req, tier, cfg)
+		}
+	}
+
+	// --- 1.55. Phase B-2 — user-supplied BYOK key override ---
+	// Sits ABOVE FundOverrideHook so /advisor consultations
+	// (which carry no FundID) route through the user's personal
+	// key. The hook implementation MUST gate itself on req.FundID
+	// being empty; we don't re-check here so this layer stays
+	// fund-agnostic and the policy lives next to the hook.
+	//
+	// Unlike fund overrides, we DO NOT call ensureAPIKey: the
+	// hook is required to return a config with the user's
+	// plaintext key already decrypted. That's the whole point
+	// of BYOK — the platform's pooled key never touches the
+	// outbound HTTP call.
+	if hook := r.userOverrideHook; hook != nil {
+		if decision := hook(ctx, req); decision != nil && decision.Config != nil {
+			cfg := decision.Config.Clone()
+			cfg.UsesCustomKey = true
 			return r.finalizeConfig(ctx, req, tier, cfg)
 		}
 	}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // ErrLLMBudgetExceeded is returned by BudgetService.Check when the user
@@ -163,6 +165,15 @@ func (s *BudgetService) GetBudget(ctx context.Context, userID, fundID string) (*
 		return nil, nil
 	}
 	if err != nil {
+		// llm_budgets.fund_id is a UUID column. When a caller hands us a
+		// non-UUID fundID (e.g. a surface sentinel that slipped past type
+		// checking) Postgres rejects with 22P02 "invalid input syntax for
+		// type uuid". Treat that the same as "no fund row found" so the
+		// caller can fall through to the user-wide row instead of bricking
+		// the LLM call with an opaque DB error.
+		if isInvalidUUIDError(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("budget service: get budget: %w", err)
 	}
 	if fund.Valid {
@@ -392,4 +403,19 @@ func nullableFloat(v *float64) any {
 		return nil
 	}
 	return *v
+}
+
+// isInvalidUUIDError reports whether err is the Postgres "22P02 invalid
+// input syntax for type uuid" the driver raises when a string that
+// isn't a valid UUID is bound to a UUID column. SQLSTATE 22P02 is the
+// generic "invalid_text_representation" class, but the only place a
+// UUID parameter is bound in this package is llm_budgets.fund_id, so
+// matching on the class is sufficient and we don't need to brittly
+// pattern-match the error message text.
+func isInvalidUUIDError(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "22P02"
+	}
+	return false
 }

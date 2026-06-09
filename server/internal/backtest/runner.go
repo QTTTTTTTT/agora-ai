@@ -72,6 +72,12 @@ func (r *Runner) Run(ctx context.Context, req Request, progress *Progress) (*Res
 	var trades []TradeEvent
 	lastPrices := map[string]float64{}
 
+	// Pre-fetch the benchmark in one shot (same as universe
+	// symbols). Failures degrade silently — the result just
+	// won't carry the BenchmarkCurve and the UI hides the
+	// "超额收益" line.
+	benchmarkBars := r.fetchBenchmark(ctx, req)
+
 	for i, day := range tradingDays {
 		if err := ctx.Err(); err != nil {
 			if progress != nil {
@@ -88,12 +94,20 @@ func (r *Runner) Run(ctx context.Context, req Request, progress *Progress) (*Res
 				lastPrices[sym] = px
 			}
 		}
-		// Decision step: skip on day 0 because we don't yet have
-		// a population to compare against (the engine works on
-		// trailing windows and the universe still uses today's
-		// close to size buys).
-		dayTrades := r.runDecisionStep(ctx, req, port, history, closes, lastPrices, day)
-		trades = append(trades, dayTrades...)
+		// Stage 1: gate the decision step by RebalanceFrequency.
+		// On non-rebalance days we still mark-to-market the
+		// portfolio (snapshot below) but skip the engine call —
+		// the NAV moves with the held positions' close prices,
+		// the strategy "holds".
+		var dayTrades []TradeEvent
+		var prevDay time.Time
+		if i > 0 {
+			prevDay = tradingDays[i-1]
+		}
+		if shouldRebalance(req, day, prevDay, i == 0) {
+			dayTrades = r.runDecisionStep(ctx, req, port, history, closes, lastPrices, day)
+			trades = append(trades, dayTrades...)
+		}
 		snap := port.snapshot(day, closes, lastPrices)
 		curve = append(curve, snap)
 		if progress != nil {
@@ -106,23 +120,112 @@ func (r *Runner) Run(ctx context.Context, req Request, progress *Progress) (*Res
 		}
 	}
 
+	benchmarkCurve := buildBenchmarkCurve(benchmarkBars, tradingDays, openingNav)
+	metrics := computeMetrics(curve, trades)
+	if len(benchmarkCurve) == len(curve) && len(benchmarkCurve) >= 2 {
+		applyBenchmarkMetrics(&metrics, curve, benchmarkCurve)
+	}
+
 	result := &Result{
-		FundID:      req.FundID,
-		Name:        req.Name,
-		EngineKind:  req.EngineKind,
-		Start:       tradingDays[0],
-		End:         tradingDays[len(tradingDays)-1],
-		InitialCash: openingNav,
-		FinalNav:    curve[len(curve)-1].Nav,
-		NavCurve:    curve,
-		Trades:      trades,
-		Metrics:     computeMetrics(curve, trades),
-		CompletedAt: time.Now().UTC(),
+		FundID:          req.FundID,
+		Name:            req.Name,
+		EngineKind:      req.EngineKind,
+		Start:           tradingDays[0],
+		End:             tradingDays[len(tradingDays)-1],
+		InitialCash:     openingNav,
+		FinalNav:        curve[len(curve)-1].Nav,
+		NavCurve:        curve,
+		Trades:          trades,
+		Metrics:         metrics,
+		CompletedAt:     time.Now().UTC(),
+		BenchmarkSymbol: req.BenchmarkSymbol,
+		BenchmarkCurve:  benchmarkCurve,
 	}
 	if progress != nil {
 		progress.markStatus("completed", nil)
 	}
 	return result, nil
+}
+
+// fetchBenchmark pulls the benchmark symbol from the same
+// ohlc.Fetcher as the strategy universe. Returns nil (not an
+// error) when no benchmark was requested or the upstream couldn't
+// satisfy the request — benchmark is decorative, never blocking.
+func (r *Runner) fetchBenchmark(ctx context.Context, req Request) []ohlc.Bar {
+	if r == nil || r.OHLC == nil {
+		return nil
+	}
+	sym := strings.ToUpper(strings.TrimSpace(req.BenchmarkSymbol))
+	if sym == "" {
+		return nil
+	}
+	windowDays := int(req.End.Sub(req.Start).Hours()/24.0) + 1
+	lookback := int(float64(windowDays)*1.1) + 20
+	if lookback > 2000 {
+		lookback = 2000
+	}
+	endPad := req.End.Add(24 * time.Hour)
+	bars, err := r.OHLC.Fetch(ctx, ohlc.FetchRequest{
+		Symbol:    sym,
+		Market:    req.Market,
+		Interval:  ohlc.IntervalDay,
+		LookbackN: lookback,
+		EndTime:   endPad,
+	})
+	if err != nil || len(bars) == 0 {
+		return nil
+	}
+	return bars
+}
+
+// buildBenchmarkCurve aligns benchmark bars to the strategy's
+// trading-day calendar so the SPA can plot them on the same X
+// axis without alignment math. Missing bars carry-forward the
+// previous close (last-observation-carried-forward) so the
+// excess-return arithmetic doesn't divide by zero. Returns nil
+// when no benchmark data was available.
+func buildBenchmarkCurve(bars []ohlc.Bar, days []time.Time, openingNav float64) []BenchmarkPoint {
+	if len(bars) == 0 || len(days) == 0 || openingNav <= 0 {
+		return nil
+	}
+	dayKey := func(t time.Time) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	byDay := make(map[time.Time]float64, len(bars))
+	for _, b := range bars {
+		if b.Close > 0 {
+			byDay[dayKey(b.Time)] = b.Close
+		}
+	}
+	// Find day-0 close: walk forward from days[0] until we hit
+	// a bar. If the benchmark only starts mid-window (e.g. you
+	// asked for a 5y window but the index ETF is newer), use
+	// the first available close as the anchor.
+	var anchor float64
+	for _, d := range days {
+		if c, ok := byDay[d]; ok {
+			anchor = c
+			break
+		}
+	}
+	if anchor <= 0 {
+		return nil
+	}
+	out := make([]BenchmarkPoint, 0, len(days))
+	lastClose := anchor
+	for _, d := range days {
+		if c, ok := byDay[d]; ok && c > 0 {
+			lastClose = c
+		}
+		pct := (lastClose / anchor) - 1.0
+		out = append(out, BenchmarkPoint{
+			Date:  d,
+			Close: lastClose,
+			Nav:   openingNav * (lastClose / anchor),
+			Pct:   pct,
+		})
+	}
+	return out
 }
 
 // runDecisionStep runs the engine for one trading day and applies
@@ -343,7 +446,41 @@ func applyRequestDefaults(req Request) Request {
 	if strings.TrimSpace(out.BaseCurrency) == "" {
 		out.BaseCurrency = "USD"
 	}
+	// Rebalance default depends on market because the two
+	// product lines have different cadences: US monthly (Stage 1
+	// SaaS), A-share daily (existing intraday research). Caller
+	// can always override.
+	if strings.TrimSpace(out.RebalanceFrequency) == "" {
+		out.RebalanceFrequency = RebalanceDaily
+	} else {
+		out.RebalanceFrequency = strings.ToLower(strings.TrimSpace(out.RebalanceFrequency))
+	}
+	// Stage 1 benchmark defaulting: pick a sensible index per
+	// market when the operator forgets to set one. They can
+	// still pass "" to opt out — empty string here means the
+	// caller already chose to skip the benchmark leg.
+	out.BenchmarkSymbol = strings.ToUpper(strings.TrimSpace(out.BenchmarkSymbol))
 	return out
+}
+
+// shouldRebalance returns true when the runner should invoke the
+// decision engine on the given day per Request.RebalanceFrequency.
+// Always true on day 0 so the runner gets one chance to size into
+// positions; otherwise we'd be flat for the whole first month.
+func shouldRebalance(req Request, day, prevDay time.Time, isFirstDay bool) bool {
+	if isFirstDay {
+		return true
+	}
+	switch req.RebalanceFrequency {
+	case RebalanceWeekly:
+		_, prevWeek := prevDay.ISOWeek()
+		_, curWeek := day.ISOWeek()
+		return curWeek != prevWeek || prevDay.Year() != day.Year()
+	case RebalanceMonthly:
+		return prevDay.Month() != day.Month() || prevDay.Year() != day.Year()
+	default:
+		return true
+	}
 }
 
 // canonicalSymbols merges Request.Symbols + InitialPositions into a

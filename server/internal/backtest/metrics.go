@@ -134,6 +134,118 @@ func computeWinRate(series []float64) float64 {
 	return float64(wins) / float64(len(series))
 }
 
+// applyBenchmarkMetrics fills the benchmark-relative block of a
+// Metrics struct in-place. The runner only calls this when
+// benchmarkCurve and navCurve are the same length AND there are
+// at least two points to differentiate — degenerate inputs leave
+// the fields at zero.
+//
+// The OLS regression for alpha/beta uses daily fractional
+// returns; alpha is then × 252 to annualise. Tracking error is
+// the annualised stdev of (strategy_daily - benchmark_daily) and
+// the information ratio is excess-daily-mean × 252 / tracking_error.
+// We intentionally don't subtract a risk-free rate from alpha —
+// the rest of the metrics package assumes rf=0 and keeping the
+// convention consistent makes back-of-the-envelope checks easier.
+func applyBenchmarkMetrics(m *Metrics, navCurve []NavPoint, benchmarkCurve []BenchmarkPoint) {
+	if m == nil || len(navCurve) != len(benchmarkCurve) || len(navCurve) < 2 {
+		return
+	}
+	first := benchmarkCurve[0].Pct
+	last := benchmarkCurve[len(benchmarkCurve)-1].Pct
+	// Pct on the curve is already (close/anchor - 1) which is
+	// the cumulative return relative to day 0. So
+	// BenchmarkCumulativeReturn == last - first; in practice
+	// first should always be 0 but we subtract for safety in
+	// case anchor logic ever shifts.
+	m.BenchmarkCumulativeReturn = last - first
+	m.ExcessReturn = m.CumulativeReturn - m.BenchmarkCumulativeReturn
+
+	stratDaily := buildDailyReturns(navCurve)
+	benchDaily := buildBenchmarkDailyReturns(benchmarkCurve)
+	if len(stratDaily) != len(benchDaily) || len(stratDaily) < 2 {
+		return
+	}
+
+	// OLS for beta + alpha. cov / var on daily fractions, alpha
+	// annualised by × 252. Guard against zero-variance benchmark
+	// (e.g. flatline ETF in a short window).
+	stratMean := meanOf(stratDaily)
+	benchMean := meanOf(benchDaily)
+	var cov, varB float64
+	for i := range stratDaily {
+		ds := stratDaily[i] - stratMean
+		db := benchDaily[i] - benchMean
+		cov += ds * db
+		varB += db * db
+	}
+	denom := float64(len(stratDaily) - 1)
+	if denom > 0 {
+		cov /= denom
+		varB /= denom
+	}
+	if varB > 0 {
+		m.Beta = cov / varB
+		m.Alpha = (stratMean - m.Beta*benchMean) * 252.0
+	}
+
+	excessDaily := make([]float64, len(stratDaily))
+	for i := range stratDaily {
+		excessDaily[i] = stratDaily[i] - benchDaily[i]
+	}
+	te := annualisedStdev(excessDaily)
+	m.TrackingError = te
+	if te > 0 {
+		m.InformationRatio = (meanOf(excessDaily) * 252.0) / te
+	}
+
+	// Excess drawdown: build a synthetic equity curve where the
+	// strategy returns are deflated by the benchmark return. We
+	// use the pct-difference curve directly (strategy_pct -
+	// benchmark_pct) and walk peak-to-trough on (1 + excess).
+	excessEq := make([]float64, len(navCurve))
+	for i := range navCurve {
+		stratPct := 0.0
+		if navCurve[0].Nav > 0 {
+			stratPct = navCurve[i].Nav/navCurve[0].Nav - 1.0
+		}
+		excessEq[i] = 1.0 + (stratPct - benchmarkCurve[i].Pct)
+	}
+	peak := excessEq[0]
+	worst := 0.0
+	for _, v := range excessEq {
+		if v > peak {
+			peak = v
+		}
+		if peak > 0 {
+			dd := v/peak - 1.0
+			if dd < worst {
+				worst = dd
+			}
+		}
+	}
+	m.ExcessMaxDrawdown = worst
+}
+
+// buildBenchmarkDailyReturns is the BenchmarkPoint equivalent of
+// buildDailyReturns. Uses Pct field because day-over-day
+// fractional returns are derivable from (1+pct_t)/(1+pct_{t-1})-1.
+func buildBenchmarkDailyReturns(curve []BenchmarkPoint) []float64 {
+	if len(curve) < 2 {
+		return nil
+	}
+	out := make([]float64, 0, len(curve)-1)
+	for i := 1; i < len(curve); i++ {
+		prev := 1.0 + curve[i-1].Pct
+		cur := 1.0 + curve[i].Pct
+		if prev <= 0 {
+			continue
+		}
+		out = append(out, cur/prev-1.0)
+	}
+	return out
+}
+
 // countTradeWinsLosses walks the trade log and counts how many
 // closing trades realized positive vs negative P&L. The runner
 // records the realized P&L delta in TradeEvent.Reason when it's a

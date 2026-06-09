@@ -229,6 +229,18 @@ func parseYahooQuoteSummary(body []byte, symbol string) (*Metrics, error) {
 		if ts := rawFloat(price["regularMarketTime"]); ts > 0 {
 			m.AsOf = time.Unix(int64(ts), 0).UTC()
 		}
+		// Yahoo populates several name variants in the price module.
+		// Preference order: longName (full official, "NVIDIA
+		// Corporation") → shortName ("NVIDIA Corp") → displayName
+		// (rarely set, branded name like "NVIDIA"). We pick longName
+		// first because frontends show "{name} ({symbol})" and the
+		// full form reads more naturally to a US-equity user.
+		for _, key := range []string{"longName", "shortName", "displayName"} {
+			if name, ok := price[key].(string); ok && name != "" {
+				m.Name = name
+				break
+			}
+		}
 	}
 	if m.AsOf.IsZero() {
 		m.AsOf = time.Now().UTC()

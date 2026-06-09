@@ -154,6 +154,7 @@ func parseAkshareMetrics(body []byte, symbol string) (*Metrics, error) {
 	}
 
 	m := &Metrics{Symbol: symbol, Source: "akshare", AsOf: time.Now().UTC()}
+	m.Name = strings.TrimSpace(akString(row, "name", "stock_name", "company_name", "证券简称", "股票简称", "证券名称"))
 	m.PE = akFloat(row, "pe", "pe_ratio", "PE", "trailing_pe", "市盈率")
 	m.ForwardPE = akFloat(row, "forward_pe", "forwardPE", "动态市盈率")
 	m.PB = akFloat(row, "pb", "pb_ratio", "PB", "市净率")
@@ -163,6 +164,31 @@ func parseAkshareMetrics(body []byte, symbol string) (*Metrics, error) {
 	m.ReturnOnEquity = akFloat(row, "roe", "ROE", "净资产收益率")
 	m.RevenueGrowth = akFloat(row, "revenue_growth", "营收增长率", "营业收入同比")
 	m.EarningsGrowth = akFloat(row, "earnings_growth", "净利润增长率", "净利润同比")
+	// Latest-period YoY growth, when the upstream has reported a
+	// quarter past the last annual. Empty/zero ⇒ no fresher print
+	// than the annual.
+	m.RevenueGrowthLatest = akFloat(row, "revenue_growth_latest", "revenue_growth_q", "营业收入同比_最新")
+	m.EarningsGrowthLatest = akFloat(row, "earnings_growth_latest", "earnings_growth_q", "净利润同比_最新")
+	m.LatestPeriod = strings.TrimSpace(akString(row, "latest_period", "latest_report_date", "最新报告期"))
+	m.AnnualPeriod = strings.TrimSpace(akString(row, "annual_period", "annual_report_date", "年报报告期"))
+	// Listing tenure — sidecar resolves this via cninfo's company
+	// profile (stock_profile_cninfo) so we can feed the LLM a real
+	// "company age" rather than implicitly assuming every issuer
+	// has 10+ years of history. See rule 7 in master_agent.go.
+	m.ListingDate = strings.TrimSpace(akString(row, "listing_date", "ipo_date", "上市日期", "listing_dt"))
+	m.ListingYears = akFloat(row, "listing_years", "listing_age_years", "上市年限")
+	// Citation metadata from 业绩快报 (sidecar's _latest_yjbb_em).
+	// See rule 8 in master_agent.go — when these are present the LLM
+	// is required to cite latest_announce_date alongside any
+	// *_latest figure it quotes, so external reviewers can verify
+	// the number against the original company filing.
+	m.LatestRevenue = akFloat(row, "latest_revenue", "latest_period_revenue", "营业总收入_最新")
+	m.LatestNetIncome = akFloat(row, "latest_net_income", "latest_period_net_income", "净利润_最新")
+	m.LatestAnnounceDate = strings.TrimSpace(akString(row, "latest_announce_date", "announce_date", "最新公告日期"))
+	m.LatestRevenueQoQ = akFloat(row, "latest_revenue_qoq", "revenue_growth_qoq", "营收环比")
+	m.LatestNetIncomeQoQ = akFloat(row, "latest_net_income_qoq", "earnings_growth_qoq", "净利润环比")
+	m.GrossMarginLatest = akFloat(row, "gross_margin_latest", "gross_margin_q", "销售毛利率")
+	m.LatestSource = strings.TrimSpace(akString(row, "latest_source", "数据源"))
 	m.DebtToEquity = akFloat(row, "debt_to_equity", "资产负债率")
 	m.MarketCap = akFloat(row, "market_cap", "marketCap", "总市值")
 	m.Beta = akFloat(row, "beta", "贝塔")
@@ -177,6 +203,23 @@ func parseAkshareMetrics(body []byte, symbol string) (*Metrics, error) {
 		return nil, ErrNoData
 	}
 	return m, nil
+}
+
+// akString returns the first string-valued field under any of the
+// supplied keys. Numbers and bools are skipped (those are for
+// akFloat); a JSON ``null`` is treated as missing. Returned strings
+// are NOT trimmed — the caller decides whether whitespace matters.
+func akString(row map[string]any, keys ...string) string {
+	for _, key := range keys {
+		v, ok := row[key]
+		if !ok {
+			continue
+		}
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // akFloat tolerates the same numeric soup the ohlc Akshare parser

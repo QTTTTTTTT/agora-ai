@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/lib/pq"
 )
 
 func newBudgetMock(t *testing.T) (*BudgetService, sqlmock.Sqlmock, func()) {
@@ -198,6 +199,50 @@ func TestSnapshotReturnsCurrentSpend(t *testing.T) {
 	}
 	if snap.DailySpendCents != 42.5 || snap.MonthlySpendCents != 1234.0 {
 		t.Errorf("unexpected spend: %+v", snap)
+	}
+}
+
+// TestCheckFallsThroughWhenFundIDNotUUID is the regression test for
+// the advisor-mode breakage where the LLM client was stamping a
+// string sentinel ("advisor") into ChatRequest.FundID. Postgres
+// rejected the bind on llm_budgets.fund_id (UUID) with SQLSTATE 22P02
+// and the resulting opaque DB error bricked every advisor consultation
+// with "llm_error:budget service: get budget: pq: invalid input
+// syntax for type uuid". GetBudget must now swallow 22P02 like a
+// missing row so resolveLimit can fall through to the user-wide cap.
+func TestCheckFallsThroughWhenFundIDNotUUID(t *testing.T) {
+	svc, mock, done := newBudgetMock(t)
+	defer done()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT user_id, fund_id, daily_limit_cents")).
+		WithArgs("user-a", "advisor").
+		WillReturnError(&pq.Error{Code: "22P02", Message: `invalid input syntax for type uuid: "advisor"`})
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT user_id, fund_id, daily_limit_cents")).
+		WithArgs("user-a").
+		WillReturnError(sql.ErrNoRows)
+
+	if err := svc.Check(context.Background(), "user-a", "advisor"); err != nil {
+		t.Fatalf("expected fall-through to no-cap, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+// TestCheckPropagatesNon22P02DBErrors confirms we only swallow the
+// specific invalid-UUID case — every other DB-level failure must
+// still surface so the LLM gate can fail closed.
+func TestCheckPropagatesNon22P02DBErrors(t *testing.T) {
+	svc, mock, done := newBudgetMock(t)
+	defer done()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT user_id, fund_id, daily_limit_cents")).
+		WithArgs("user-a", "fund-x").
+		WillReturnError(&pq.Error{Code: "53300", Message: "too many connections"})
+
+	err := svc.Check(context.Background(), "user-a", "fund-x")
+	if err == nil {
+		t.Fatal("expected pool exhaustion to propagate, got nil")
 	}
 }
 

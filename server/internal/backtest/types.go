@@ -112,7 +112,35 @@ type Request struct {
 	// independently before stitching the results. Plain runs
 	// leave this nil. See walkforward.go.
 	WalkForward *WalkForwardSpec
+
+	// BenchmarkSymbol is the ticker the runner tracks alongside
+	// the strategy so the UI can render an excess-return curve
+	// (策略收益 - 基准收益). Treated like any other OHLC fetch —
+	// resolved through the same ohlc.Fetcher and Market the
+	// strategy uses, so a US-equity backtest defaults to fetching
+	// SPY/QQQ/IWM from Yahoo, an A-share run defaults to a CSI
+	// index from Akshare. Empty disables the benchmark leg.
+	BenchmarkSymbol string
+
+	// RebalanceFrequency throttles how often the decision engine
+	// is invoked. "daily" (default) runs the engine every
+	// trading day, "weekly" only on the first trading day of
+	// each ISO week, "monthly" only on the first trading day of
+	// each calendar month. The Stage-1 US monthly product runs
+	// at "monthly"; the existing A-share runs stay "daily".
+	//
+	// Non-decision days still update the NAV from market prices
+	// — buy-and-hold style — so the curve stays smooth.
+	RebalanceFrequency string
 }
+
+// RebalanceFrequency values understood by validateRequest /
+// runner.shouldRebalance.
+const (
+	RebalanceDaily   = "daily"
+	RebalanceWeekly  = "weekly"
+	RebalanceMonthly = "monthly"
+)
 
 // InitialPosition is a pre-loaded holding. Used when the operator
 // wants to backtest "what would have happened if I had bought 100
@@ -169,6 +197,28 @@ type Result struct {
 	// Result already aggregate across folds — this struct adds
 	// the per-fold breakdown the UI uses for the fold table.
 	WalkForward *WalkForwardResult
+
+	// BenchmarkSymbol echoes the Request field so consumers
+	// don't have to keep state to know which index was tracked.
+	BenchmarkSymbol string
+
+	// BenchmarkCurve is the same-length-as-NavCurve series of
+	// a buy-and-hold position in BenchmarkSymbol sized to
+	// InitialCash on day 0. Nil when BenchmarkSymbol was empty
+	// or the upstream couldn't return any bars. The UI uses
+	// (strategy_pct - benchmark_pct) to render the gold "超额"
+	// line in the screenshot.
+	BenchmarkCurve []BenchmarkPoint
+}
+
+// BenchmarkPoint mirrors a NavPoint but for the buy-and-hold
+// benchmark sleeve. Pct is the cumulative return relative to
+// day 0 (0.18 = +18%) — that's the field the SPA actually plots.
+type BenchmarkPoint struct {
+	Date  time.Time
+	Close float64
+	Nav   float64 // notional NAV: InitialCash × (close/close_0)
+	Pct   float64 // (close/close_0) - 1
 }
 
 // NavPoint is a single day's portfolio valuation.
@@ -210,6 +260,36 @@ type Metrics struct {
 	TradeCount       int
 	WinningTradeCount int // trades that closed profitably (round-trip P&L > 0)
 	LosingTradeCount  int
+
+	// --- Benchmark-relative block (Stage 1) -----------------
+	// All zero when BenchmarkSymbol is empty / benchmark fetch
+	// failed. Populated only when len(BenchmarkCurve) ==
+	// len(NavCurve).
+
+	// BenchmarkCumulativeReturn is the benchmark's same-window
+	// total return. Used in the KPI strip as "基准收益".
+	BenchmarkCumulativeReturn float64
+	// ExcessReturn = CumulativeReturn - BenchmarkCumulativeReturn.
+	// Kept as a precomputed field because the UI plots it
+	// explicitly and we want one source of truth.
+	ExcessReturn float64
+	// ExcessMaxDrawdown is the worst peak-to-trough of the
+	// running excess curve. Negative number (-0.07 = -7%).
+	ExcessMaxDrawdown float64
+	// Alpha is the annualised intercept of an OLS regression of
+	// the strategy's daily returns on the benchmark's daily
+	// returns. Risk-free rate = 0.
+	Alpha float64
+	// Beta is the slope of the same OLS regression. 1.0 means
+	// the strategy moves 1:1 with the benchmark; <1 = defensive.
+	Beta float64
+	// TrackingError is the annualised stdev of (strategy_daily
+	// - benchmark_daily). The denominator of the information
+	// ratio.
+	TrackingError float64
+	// InformationRatio is annualised excess-return mean divided
+	// by tracking error. Comparable to Sharpe but vs benchmark.
+	InformationRatio float64
 }
 
 // Progress tracks runner advancement. The runner updates it after

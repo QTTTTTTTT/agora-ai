@@ -75,6 +75,15 @@ type SubmitBacktestInput struct {
 	CommissionBps    float64                    `json:"commissionBps,omitempty"`
 	MaxOrdersPerDay  int                        `json:"maxOrdersPerDay,omitempty"`
 	EngineKind       string                     `json:"engineKind,omitempty"`
+	// BenchmarkSymbol is the index ticker to track alongside the
+	// strategy so the UI can plot a third "超额收益" line and the
+	// metrics block carries alpha/beta/IR. Optional — empty
+	// disables the benchmark leg.
+	BenchmarkSymbol string `json:"benchmarkSymbol,omitempty"`
+	// RebalanceFrequency = "daily" | "weekly" | "monthly".
+	// Defaults to "daily". The Stage-1 US SaaS product runs
+	// "monthly"; A-share intraday keeps "daily".
+	RebalanceFrequency string `json:"rebalanceFrequency,omitempty"`
 	// WalkForward, when non-nil, asks the runner to perform a
 	// chunked out-of-sample validation: split the window into
 	// NumFolds equal test segments, optionally with a leading
@@ -129,28 +138,42 @@ type BacktestProgressView struct {
 // BacktestRequestEcho echoes the original submission so clients
 // don't need to maintain their own copy.
 type BacktestRequestEcho struct {
-	Symbols         []string                  `json:"symbols"`
-	Start           time.Time                 `json:"start"`
-	End             time.Time                 `json:"end"`
-	InitialCash     float64                   `json:"initialCash"`
-	BaseCurrency    string                    `json:"baseCurrency,omitempty"`
-	SlippageBps     float64                   `json:"slippageBps"`
-	CommissionBps   float64                   `json:"commissionBps"`
-	MaxOrdersPerDay int                       `json:"maxOrdersPerDay"`
-	InitialPositions []BacktestInitialPosition `json:"initialPositions,omitempty"`
-	WalkForward     *WalkForwardInput         `json:"walkForward,omitempty"`
+	Symbols            []string                  `json:"symbols"`
+	Start              time.Time                 `json:"start"`
+	End                time.Time                 `json:"end"`
+	InitialCash        float64                   `json:"initialCash"`
+	BaseCurrency       string                    `json:"baseCurrency,omitempty"`
+	SlippageBps        float64                   `json:"slippageBps"`
+	CommissionBps      float64                   `json:"commissionBps"`
+	MaxOrdersPerDay    int                       `json:"maxOrdersPerDay"`
+	InitialPositions   []BacktestInitialPosition `json:"initialPositions,omitempty"`
+	WalkForward        *WalkForwardInput         `json:"walkForward,omitempty"`
+	BenchmarkSymbol    string                    `json:"benchmarkSymbol,omitempty"`
+	RebalanceFrequency string                    `json:"rebalanceFrequency,omitempty"`
 }
 
 // BacktestResultView is the final output. Wraps the NAV curve and
 // trades in JSON-friendly shapes.
 type BacktestResultView struct {
-	InitialCash float64                  `json:"initialCash"`
-	FinalNav    float64                  `json:"finalNav"`
-	NavCurve    []BacktestNavPoint       `json:"navCurve"`
-	Trades      []BacktestTradeEvent     `json:"trades"`
-	Metrics     BacktestMetricsView      `json:"metrics"`
-	CompletedAt time.Time                `json:"completedAt,omitempty"`
-	WalkForward *WalkForwardResultView   `json:"walkForward,omitempty"`
+	InitialCash     float64                `json:"initialCash"`
+	FinalNav        float64                `json:"finalNav"`
+	NavCurve        []BacktestNavPoint     `json:"navCurve"`
+	Trades          []BacktestTradeEvent   `json:"trades"`
+	Metrics         BacktestMetricsView    `json:"metrics"`
+	CompletedAt     time.Time              `json:"completedAt,omitempty"`
+	WalkForward     *WalkForwardResultView `json:"walkForward,omitempty"`
+	BenchmarkSymbol string                 `json:"benchmarkSymbol,omitempty"`
+	BenchmarkCurve  []BacktestBenchmarkPoint `json:"benchmarkCurve,omitempty"`
+}
+
+// BacktestBenchmarkPoint is one row of the buy-and-hold benchmark
+// sleeve aligned to the strategy's trading-day calendar. The SPA
+// plots (strategy_pct - pct) as the "超额收益" gold line.
+type BacktestBenchmarkPoint struct {
+	Date  time.Time `json:"date"`
+	Close float64   `json:"close"`
+	Nav   float64   `json:"nav"`
+	Pct   float64   `json:"pct"`
 }
 
 // WalkForwardResultView is the JSON-friendly per-fold breakdown
@@ -214,6 +237,15 @@ type BacktestMetricsView struct {
 	TradeCount        int     `json:"tradeCount"`
 	WinningTradeCount int     `json:"winningTradeCount"`
 	LosingTradeCount  int     `json:"losingTradeCount"`
+	// Benchmark-relative metrics (Stage 1). All zero when the
+	// run had no benchmark or only had a 1-day window.
+	BenchmarkCumulativeReturn float64 `json:"benchmarkCumulativeReturn,omitempty"`
+	ExcessReturn              float64 `json:"excessReturn,omitempty"`
+	ExcessMaxDrawdown         float64 `json:"excessMaxDrawdown,omitempty"`
+	Alpha                     float64 `json:"alpha,omitempty"`
+	Beta                      float64 `json:"beta,omitempty"`
+	TrackingError             float64 `json:"trackingError,omitempty"`
+	InformationRatio          float64 `json:"informationRatio,omitempty"`
 }
 
 // ErrBacktestUnconfigured is returned when the BacktestService

@@ -940,6 +940,26 @@ type geminiGenerationConfig struct {
 	// responseSchema, when set, makes Gemini enforce the schema.
 	ResponseMimeType string          `json:"responseMimeType,omitempty"`
 	ResponseSchema   json.RawMessage `json:"responseSchema,omitempty"`
+
+	// ThinkingConfig is opt-in for Gemini 2.5+/3.x preview models
+	// that emit internal reasoning tokens. Setting ThinkingBudget
+	// caps how many tokens the model is allowed to spend thinking
+	// before it has to emit the visible answer. Without a cap the
+	// model can blow through MaxOutputTokens entirely on hidden
+	// thoughts and return an empty `text` field (finishReason =
+	// MAX_TOKENS), which manifests downstream as "no json object
+	// found" parse failures. Pointer so the field is omitted on
+	// non-thinking models that would 400 on the unknown key.
+	ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type geminiThinkingConfig struct {
+	// ThinkingBudget is the max tokens the model may spend thinking
+	// before it must emit the final answer. Use -1 for "dynamic"
+	// (model chooses), 0 to disable thinking entirely, or a positive
+	// integer to cap. We default to a positive cap so a single
+	// runaway thought chain can't truncate the visible response.
+	ThinkingBudget int `json:"thinkingBudget"`
 }
 
 type geminiResponse struct {
@@ -949,16 +969,166 @@ type geminiResponse struct {
 				Text string `json:"text"`
 			} `json:"parts"`
 		} `json:"content"`
+		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
 	UsageMetadata struct {
 		PromptTokenCount     int `json:"promptTokenCount"`
 		CandidatesTokenCount int `json:"candidatesTokenCount"`
 		TotalTokenCount      int `json:"totalTokenCount"`
+		ThoughtsTokenCount   int `json:"thoughtsTokenCount"`
 	} `json:"usageMetadata"`
 	Error *struct {
 		Message string `json:"message"`
 		Status  string `json:"status"`
 	} `json:"error,omitempty"`
+}
+
+// geminiUnsupportedSchemaKeys are JSON-Schema keywords that Gemini's
+// responseSchema (an OpenAPI 3.0 Schema subset) does not recognize.
+// Sending any of these makes Gemini reject the whole request with
+// "Unknown name <key> at 'generation_config.response_schema'" (400).
+//
+// The list is conservative: we drop only keys that are confirmed
+// unsupported, leaving OpenAPI-flavoured keys (type, properties,
+// required, items, enum, format, minimum, maximum, minItems, maxItems,
+// description, nullable, anyOf, etc.) untouched.
+var geminiUnsupportedSchemaKeys = map[string]struct{}{
+	"additionalProperties":   {},
+	"$schema":                {},
+	"$id":                    {},
+	"$ref":                   {},
+	"$defs":                  {},
+	"$comment":               {},
+	"definitions":            {},
+	"patternProperties":      {},
+	"unevaluatedProperties":  {},
+	"unevaluatedItems":       {},
+	"dependentRequired":      {},
+	"dependentSchemas":       {},
+	"if":                     {},
+	"then":                   {},
+	"else":                   {},
+	"contains":               {},
+	"minContains":            {},
+	"maxContains":            {},
+	"prefixItems":            {},
+	"examples":               {},
+}
+
+// sanitizeGeminiSchema rewrites a JSON-Schema document into a form
+// Gemini's responseSchema accepts. It drops the keys listed in
+// geminiUnsupportedSchemaKeys at every nesting level and leaves the
+// rest of the structure intact. On any parse error the original bytes
+// are returned as-is — the upstream 400 is more diagnostic than a
+// silent re-shape.
+func sanitizeGeminiSchema(raw []byte) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var node any
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	cleaned := stripUnsupportedKeys(node, geminiUnsupportedSchemaKeys)
+	out, err := json.Marshal(cleaned)
+	if err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	return out
+}
+
+// stripUnsupportedKeys walks the decoded JSON tree depth-first and
+// removes every map entry whose key is in deny. It returns a new tree
+// rather than mutating in place so callers can keep the original.
+func stripUnsupportedKeys(node any, deny map[string]struct{}) any {
+	switch v := node.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, child := range v {
+			if _, drop := deny[k]; drop {
+				continue
+			}
+			out[k] = stripUnsupportedKeys(child, deny)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = stripUnsupportedKeys(child, deny)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// isGeminiThinkingModel reports whether a Gemini model name belongs
+// to a family that emits internal reasoning tokens
+// (`usageMetadata.thoughtsTokenCount > 0`). For these models the
+// `maxOutputTokens` budget covers thinking + visible answer
+// combined, so a fixed 4096 cap on a chatty 2000-token system
+// prompt can leave zero tokens for the JSON reply and silently
+// truncate the response to empty.
+//
+// Covers the families currently in production at Google + relays:
+//   - gemini-2.5-* (pro/flash thinking)
+//   - gemini-3.x-* (pro/flash preview, thinking-by-default)
+//
+// We deliberately match on family prefixes rather than the full
+// model name so newer point releases pick up the bigger envelope
+// automatically.
+func isGeminiThinkingModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return false
+	}
+	thinkingPrefixes := []string{
+		"gemini-2.5",
+		"gemini-3.",
+		"gemini-3-",
+	}
+	for _, p := range thinkingPrefixes {
+		if strings.HasPrefix(m, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// geminiThinkingBudget returns the (maxOutputTokens, thinkingBudget)
+// pair to send to Gemini for a thinking-capable model given the
+// caller's requested cap. The contract is:
+//
+//   - the *visible* answer must always have at least
+//     geminiMinVisibleBudgetTokens to spend, even if thinking
+//     consumes its full budget
+//   - thinking should be capped at geminiMaxThinkingBudgetTokens so
+//     a runaway chain-of-thought can't burn the entire envelope
+//   - we never *shrink* what the caller asked for: if the caller
+//     asked for 16384 tokens we keep 16384
+//
+// callerMax == 0 means "let the provider default win"; we still
+// return a sane floor in that case so the visible answer is
+// protected.
+func geminiThinkingBudget(callerMax int) (maxOutput, thinkingCap int) {
+	const (
+		minVisible        = 3072
+		defaultThinkCap   = 4096
+		thinkingHeadroom  = 4096
+		defaultOutputBase = 8192
+	)
+	thinkingCap = defaultThinkCap
+	switch {
+	case callerMax <= 0:
+		maxOutput = defaultOutputBase
+	case callerMax < minVisible+thinkingHeadroom:
+		// Caller asked for too small an envelope to fit both a
+		// useful thinking pass and a useful answer. Bump it.
+		maxOutput = minVisible + thinkingHeadroom
+	default:
+		maxOutput = callerMax
+	}
+	return maxOutput, thinkingCap
 }
 
 func (c *MultiProviderClient) callGemini(ctx context.Context, config *ModelConfig, req ChatRequest) (*ChatResponse, error) {
@@ -993,10 +1163,25 @@ func (c *MultiProviderClient) callGemini(ctx context.Context, config *ModelConfi
 	// S8.3 — Gemini structured output.
 	wantsJSONObject := strings.EqualFold(strings.TrimSpace(req.ResponseFormat), "json_object")
 	wantsJSONSchema := strings.EqualFold(strings.TrimSpace(req.ResponseFormat), "json_schema")
-	needGenCfg := config.MaxTokens > 0 || config.Temperature > 0 || wantsJSONObject || wantsJSONSchema
+	isThinking := isGeminiThinkingModel(config.ModelName)
+	needGenCfg := config.MaxTokens > 0 || config.Temperature > 0 || wantsJSONObject || wantsJSONSchema || isThinking
 	if needGenCfg {
 		body.GenerationConfig = &geminiGenerationConfig{}
-		if config.MaxTokens > 0 {
+		if isThinking {
+			// Thinking-capable Gemini models (2.5+/3.x) count their
+			// internal reasoning tokens against maxOutputTokens. A
+			// chatty 2000-token persona prompt easily provokes a
+			// 3000+ token thought chain, which on a 4096 cap
+			// truncates the visible JSON answer to empty and surfaces
+			// downstream as "no json object found" parse failures.
+			// Bump the envelope and cap thinking explicitly so the
+			// visible response always has headroom.
+			maxOut, thinkCap := geminiThinkingBudget(config.MaxTokens)
+			body.GenerationConfig.MaxOutputTokens = maxOut
+			body.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
+				ThinkingBudget: thinkCap,
+			}
+		} else if config.MaxTokens > 0 {
 			body.GenerationConfig.MaxOutputTokens = config.MaxTokens
 		}
 		if config.Temperature > 0 {
@@ -1006,7 +1191,13 @@ func (c *MultiProviderClient) callGemini(ctx context.Context, config *ModelConfi
 			body.GenerationConfig.ResponseMimeType = "application/json"
 		}
 		if wantsJSONSchema && len(req.ResponseSchema) > 0 {
-			body.GenerationConfig.ResponseSchema = append(json.RawMessage(nil), req.ResponseSchema...)
+			// Gemini's responseSchema is a strict subset of OpenAPI 3.0
+			// Schema and rejects vanilla JSON-Schema keywords with
+			// "Unknown name ... at 'generation_config.response_schema'"
+			// (400 invalid_request). Strip the unsupported keywords so
+			// the agent layer can keep one OpenAI-compatible schema and
+			// not have to fork per provider.
+			body.GenerationConfig.ResponseSchema = sanitizeGeminiSchema(req.ResponseSchema)
 		}
 	}
 
@@ -1047,14 +1238,46 @@ func (c *MultiProviderClient) callGemini(ctx context.Context, config *ModelConfi
 		return nil, &llmRequestError{Provider: config.Provider, Model: config.ModelName, Reason: "empty_candidates", Message: "provider returned empty candidates", Retryable: false}
 	}
 
+	cand := gResp.Candidates[0]
 	var contentParts []string
-	for _, part := range gResp.Candidates[0].Content.Parts {
+	for _, part := range cand.Content.Parts {
 		if text := strings.TrimSpace(part.Text); text != "" {
 			contentParts = append(contentParts, text)
 		}
 	}
 	if len(contentParts) == 0 {
-		return nil, &llmRequestError{Provider: config.Provider, Model: config.ModelName, Reason: "empty_content", Message: "provider returned empty content", Retryable: false}
+		// Empty visible content on a thinking model almost always means
+		// the model spent the whole maxOutputTokens budget on internal
+		// thinking and had nothing left to emit. Surface that as a
+		// distinct retryable error so the operator can tell it apart
+		// from a model that genuinely refused / safety-blocked, and so
+		// we can retry with a bigger budget next time.
+		if strings.EqualFold(cand.FinishReason, "MAX_TOKENS") {
+			return nil, &llmRequestError{
+				Provider: config.Provider,
+				Model:    config.ModelName,
+				Reason:   "max_tokens_truncated",
+				Message: fmt.Sprintf(
+					"provider truncated response: thoughts=%d, candidates=%d, total=%d, maxOutputTokens=%d (visible text was empty)",
+					gResp.UsageMetadata.ThoughtsTokenCount,
+					gResp.UsageMetadata.CandidatesTokenCount,
+					gResp.UsageMetadata.TotalTokenCount,
+					body.GenerationConfig.MaxOutputTokens,
+				),
+				Retryable: true,
+			}
+		}
+		return nil, &llmRequestError{
+			Provider: config.Provider,
+			Model:    config.ModelName,
+			Reason:   "empty_content",
+			Message: fmt.Sprintf("provider returned empty content (finishReason=%q, thoughts=%d, candidates=%d)",
+				cand.FinishReason,
+				gResp.UsageMetadata.ThoughtsTokenCount,
+				gResp.UsageMetadata.CandidatesTokenCount,
+			),
+			Retryable: false,
+		}
 	}
 
 	inputTokens := gResp.UsageMetadata.PromptTokenCount

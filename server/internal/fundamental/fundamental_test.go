@@ -276,6 +276,337 @@ func TestAkshareProviderParsesBareObject(t *testing.T) {
 	}
 }
 
+// TestAkshareProviderConsumesSidecarPayload pins the wire-format
+// contract between the Go provider and the in-repo Python sidecar at
+// services/akshare-fundamental. The body is a verbatim sample
+// captured from a live `/api/fundamental?symbol=688205&market=a_share`
+// call against the sidecar — if the sidecar ever drops or renames a
+// field the Go parser depends on, this test fails before the change
+// hits production.
+//
+// The sidecar deliberately ships only the statement-derived metrics
+// (ROE / margins / growth) because eastmoney's live-quote endpoint
+// (`push2.eastmoney.com`) is not reliably reachable from outside CN
+// and so PE / PB / market_cap aren't included. If a future deployment
+// adds those, extend this fixture rather than relaxing the parser.
+func TestAkshareProviderConsumesSidecarPayload(t *testing.T) {
+	// Captured from a live `/api/fundamental?symbol=688205` call
+	// after the sidecar started shipping annual + latest-period
+	// growth side-by-side, plus the listing-tenure block. The
+	// 2025 annual prints earnings down -28.77% but the 2026-Q1
+	// print already shows +35.08% — surfacing both is what stops
+	// Wood's persona from giving stale AVOID verdicts on names
+	// that just inflected. listing_date / listing_years are
+	// surfaced so 10y-horizon personas can stop flagging
+	// "history.10yr data_unavailable" on a 2022-IPO 次新股.
+	// gross_margin_latest / latest_revenue / latest_net_income /
+	// latest_*_qoq / latest_announce_date / latest_source — added
+	// for rule-8 citation support. Without these the LLM can quote
+	// a percent like '+27.97%' but never an absolute number or an
+	// announce date, and a reviewer can't trace the figure back to
+	// the source filing.
+	const body = `{"data":{"annual_period":"2025-12-31","currency":"CNY",` +
+		`"earnings_growth":-0.287683,"earnings_growth_latest":0.350823,` +
+		`"gross_margin_latest":0.257339594,` +
+		`"latest_announce_date":"2026-04-28",` +
+		`"latest_net_income":19639010,"latest_net_income_qoq":-0.375526,` +
+		`"latest_period":"2026-03-31",` +
+		`"latest_revenue":254444250,"latest_revenue_qoq":-0.096262,` +
+		`"latest_source":"eastmoney_yjbb",` +
+		`"listing_date":"2022-08-09","listing_years":3.83,` +
+		`"name":"德科立",` +
+		`"operating_margin":0.07761,"profit_margin":0.076629,` +
+		`"revenue_growth":0.109933,"revenue_growth_latest":0.279698,` +
+		`"roe":0.0309,"symbol":"688205"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	p := &AkshareProvider{BaseURL: srv.URL}
+
+	m, err := p.Fetch(context.Background(), FetchRequest{Symbol: "688205", Market: "a_share"})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if m.Name != "德科立" {
+		t.Errorf("name got %q want %q", m.Name, "德科立")
+	}
+	if m.AnnualPeriod != "2025-12-31" {
+		t.Errorf("AnnualPeriod got %q want 2025-12-31", m.AnnualPeriod)
+	}
+	if m.LatestPeriod != "2026-03-31" {
+		t.Errorf("LatestPeriod got %q want 2026-03-31", m.LatestPeriod)
+	}
+	if m.RevenueGrowthLatest != 0.279698 {
+		t.Errorf("RevenueGrowthLatest got %v want 0.279698", m.RevenueGrowthLatest)
+	}
+	if m.EarningsGrowthLatest != 0.350823 {
+		t.Errorf("EarningsGrowthLatest got %v want 0.350823", m.EarningsGrowthLatest)
+	}
+	if m.ReturnOnEquity != 0.0309 {
+		t.Errorf("roe got %v want 0.0309", m.ReturnOnEquity)
+	}
+	if m.ProfitMargin != 0.076629 {
+		t.Errorf("profit_margin got %v want 0.076629", m.ProfitMargin)
+	}
+	if m.OperatingMargin != 0.07761 {
+		t.Errorf("operating_margin got %v want 0.07761", m.OperatingMargin)
+	}
+	if m.RevenueGrowth != 0.109933 {
+		t.Errorf("revenue_growth got %v want 0.109933", m.RevenueGrowth)
+	}
+	if m.EarningsGrowth != -0.287683 {
+		t.Errorf("earnings_growth got %v want -0.287683", m.EarningsGrowth)
+	}
+	if m.ListingDate != "2022-08-09" {
+		t.Errorf("ListingDate got %q want 2022-08-09", m.ListingDate)
+	}
+	if m.ListingYears != 3.83 {
+		t.Errorf("ListingYears got %v want 3.83", m.ListingYears)
+	}
+	// Citation block: announce_date / absolute revenue + net
+	// income / QoQ deltas / latest gross margin / provenance tag.
+	// Each one is the input rule-8 in master_agent.go uses to
+	// force the LLM to write '2026Q1（公告日 2026-04-28）营收
+	// 2.54 亿元，同比 +27.97%' style citations.
+	if m.LatestAnnounceDate != "2026-04-28" {
+		t.Errorf("LatestAnnounceDate got %q want 2026-04-28", m.LatestAnnounceDate)
+	}
+	if m.LatestRevenue != 254444250 {
+		t.Errorf("LatestRevenue got %v want 254444250", m.LatestRevenue)
+	}
+	if m.LatestNetIncome != 19639010 {
+		t.Errorf("LatestNetIncome got %v want 19639010", m.LatestNetIncome)
+	}
+	if m.LatestRevenueQoQ != -0.096262 {
+		t.Errorf("LatestRevenueQoQ got %v want -0.096262", m.LatestRevenueQoQ)
+	}
+	if m.LatestNetIncomeQoQ != -0.375526 {
+		t.Errorf("LatestNetIncomeQoQ got %v want -0.375526", m.LatestNetIncomeQoQ)
+	}
+	if m.GrossMarginLatest != 0.257339594 {
+		t.Errorf("GrossMarginLatest got %v want 0.257339594", m.GrossMarginLatest)
+	}
+	if m.LatestSource != "eastmoney_yjbb" {
+		t.Errorf("LatestSource got %q want eastmoney_yjbb", m.LatestSource)
+	}
+	if m.Currency != "CNY" {
+		t.Errorf("currency got %q want CNY", m.Currency)
+	}
+	// FormatForPrompt is the actual sink into the LLM prompt — pin
+	// that the percent-formatting and ordering survive the
+	// round-trip, since this is the string the master agents see.
+	got := m.FormatForPrompt()
+	for _, want := range []string{
+		"688205:", "ROE 3.1%", "net margin 7.7%", "op margin 7.8%",
+		"rev growth +11.0%", "eps growth -28.8%",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("FormatForPrompt missing %q in %q", want, got)
+		}
+	}
+}
+
+// TestAkshareNameAliases pins the alternate Chinese-language keys
+// the sidecar (or a future provider) might use to ship the issuer
+// name. parseAkshareMetrics has to recognise all of them so a
+// schema rename on the upstream side doesn't silently drop the name.
+//
+// We exercise parseAkshareMetrics through its real signature
+// (raw JSON body + symbol) — that's also what the HTTP path uses,
+// so the test covers JSON decoding alias-resolution end-to-end.
+func TestAkshareNameAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"canonical_name", `{"name":"德科立","roe":0.05}`, "德科立"},
+		{"stock_name", `{"stock_name":"贵州茅台","roe":0.4}`, "贵州茅台"},
+		{"company_name", `{"company_name":"宁德时代","roe":0.2}`, "宁德时代"},
+		{"zh_证券简称", `{"证券简称":"比亚迪","roe":0.18}`, "比亚迪"},
+		{"zh_股票简称", `{"股票简称":"平安银行","roe":0.1}`, "平安银行"},
+		{"zh_证券名称", `{"证券名称":"中国平安","roe":0.12}`, "中国平安"},
+		{"missing_name", `{"roe":0.1}`, ""},
+		{"wrapped_data", `{"data":{"name":"德科立","roe":0.05}}`, "德科立"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := parseAkshareMetrics([]byte(tc.body), "688205")
+			if err != nil {
+				t.Fatalf("parseAkshareMetrics: %v", err)
+			}
+			if m.Name != tc.want {
+				t.Errorf("Name got %q want %q", m.Name, tc.want)
+			}
+		})
+	}
+}
+
+// TestAkshareListingTenureAliases pins the field-name aliases the
+// parser accepts for ListingDate / ListingYears. The sidecar ships
+// canonical English names today, but providers wired in from other
+// channels (e.g. a future eastmoney route, or a Chinese-language
+// dump) may use 上市日期 / 上市年限 instead. Locking the aliases
+// down here means a schema rename on the upstream side surfaces as
+// a test failure rather than a silent prompt regression.
+func TestAkshareListingTenureAliases(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantDate  string
+		wantYears float64
+	}{
+		{"canonical_english", `{"listing_date":"2022-08-09","listing_years":3.83,"roe":0.03}`, "2022-08-09", 3.83},
+		{"zh_chinese_keys", `{"上市日期":"2022-08-09","上市年限":3.83,"roe":0.03}`, "2022-08-09", 3.83},
+		{"alt_ipo_date", `{"ipo_date":"2022-08-09","listing_age_years":3.83,"roe":0.03}`, "2022-08-09", 3.83},
+		{"date_only_no_tenure", `{"listing_date":"2022-08-09","roe":0.03}`, "2022-08-09", 0},
+		{"absent_both", `{"roe":0.03}`, "", 0},
+		{"wrapped_data_envelope", `{"data":{"listing_date":"2022-08-09","listing_years":3.83,"roe":0.03}}`, "2022-08-09", 3.83},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := parseAkshareMetrics([]byte(tc.body), "688205")
+			if err != nil {
+				t.Fatalf("parseAkshareMetrics: %v", err)
+			}
+			if m.ListingDate != tc.wantDate {
+				t.Errorf("ListingDate got %q want %q", m.ListingDate, tc.wantDate)
+			}
+			if m.ListingYears != tc.wantYears {
+				t.Errorf("ListingYears got %v want %v", m.ListingYears, tc.wantYears)
+			}
+		})
+	}
+}
+
+// TestAkshareCitationMetadataAliases pins the alternate field names
+// parseAkshareMetrics accepts for the rule-8 citation block (absolute
+// revenue / net income, announce date, QoQ deltas, gross margin,
+// source tag). The canonical sidecar (services/akshare-fundamental)
+// emits English snake_case keys, but a future provider could ship
+// the same payload using the Chinese column names from the upstream
+// 业绩快报 endpoint or with slight naming variations. Locking the
+// aliases here means a schema rename surfaces as a test failure
+// rather than a silent prompt regression where the LLM stops citing
+// announce dates.
+func TestAkshareCitationMetadataAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		// Pointer-style assertion so an absent field stays at the
+		// zero value rather than getting compared as 0 == ""; we
+		// only set the field we're exercising in each case.
+		check func(*testing.T, *Metrics)
+	}{
+		{
+			"canonical_english",
+			`{"latest_revenue":254444250,"latest_net_income":19639010,` +
+				`"latest_announce_date":"2026-04-28","latest_revenue_qoq":-0.0963,` +
+				`"latest_net_income_qoq":-0.3755,"gross_margin_latest":0.2573,` +
+				`"latest_source":"eastmoney_yjbb","roe":0.03}`,
+			func(t *testing.T, m *Metrics) {
+				if m.LatestRevenue != 254444250 {
+					t.Errorf("LatestRevenue got %v", m.LatestRevenue)
+				}
+				if m.LatestAnnounceDate != "2026-04-28" {
+					t.Errorf("LatestAnnounceDate got %q", m.LatestAnnounceDate)
+				}
+				if m.GrossMarginLatest != 0.2573 {
+					t.Errorf("GrossMarginLatest got %v", m.GrossMarginLatest)
+				}
+				if m.LatestSource != "eastmoney_yjbb" {
+					t.Errorf("LatestSource got %q", m.LatestSource)
+				}
+			},
+		},
+		{
+			"alt_period_prefix",
+			`{"latest_period_revenue":254444250,"latest_period_net_income":19639010,` +
+				`"announce_date":"2026-04-28","revenue_growth_qoq":-0.0963,` +
+				`"earnings_growth_qoq":-0.3755,"gross_margin_q":0.2573,` +
+				`"数据源":"sina","roe":0.03}`,
+			func(t *testing.T, m *Metrics) {
+				if m.LatestRevenue != 254444250 {
+					t.Errorf("LatestRevenue got %v (alt key)", m.LatestRevenue)
+				}
+				if m.LatestNetIncome != 19639010 {
+					t.Errorf("LatestNetIncome got %v (alt key)", m.LatestNetIncome)
+				}
+				if m.LatestAnnounceDate != "2026-04-28" {
+					t.Errorf("LatestAnnounceDate got %q (alt key)", m.LatestAnnounceDate)
+				}
+				if m.LatestRevenueQoQ != -0.0963 {
+					t.Errorf("LatestRevenueQoQ got %v (alt key)", m.LatestRevenueQoQ)
+				}
+				if m.LatestNetIncomeQoQ != -0.3755 {
+					t.Errorf("LatestNetIncomeQoQ got %v (alt key)", m.LatestNetIncomeQoQ)
+				}
+				if m.GrossMarginLatest != 0.2573 {
+					t.Errorf("GrossMarginLatest got %v (alt key)", m.GrossMarginLatest)
+				}
+				if m.LatestSource != "sina" {
+					t.Errorf("LatestSource got %q (zh alias)", m.LatestSource)
+				}
+			},
+		},
+		{
+			"zh_chinese_keys",
+			`{"营业总收入_最新":254444250,"净利润_最新":19639010,` +
+				`"最新公告日期":"2026-04-28","营收环比":-0.0963,` +
+				`"净利润环比":-0.3755,"销售毛利率":0.2573,"roe":0.03}`,
+			func(t *testing.T, m *Metrics) {
+				if m.LatestRevenue != 254444250 {
+					t.Errorf("LatestRevenue got %v (zh key)", m.LatestRevenue)
+				}
+				if m.LatestAnnounceDate != "2026-04-28" {
+					t.Errorf("LatestAnnounceDate got %q (zh key)", m.LatestAnnounceDate)
+				}
+				if m.LatestRevenueQoQ != -0.0963 {
+					t.Errorf("LatestRevenueQoQ got %v (zh key)", m.LatestRevenueQoQ)
+				}
+				if m.GrossMarginLatest != 0.2573 {
+					t.Errorf("GrossMarginLatest got %v (zh key)", m.GrossMarginLatest)
+				}
+			},
+		},
+		{
+			// Defensive: sidecar drops the entire citation block
+			// (older sidecar version, or eastmoney_yjbb upstream
+			// failure). Parser should leave the fields at zero
+			// rather than panicking.
+			"absent_block",
+			`{"roe":0.03}`,
+			func(t *testing.T, m *Metrics) {
+				if m.LatestRevenue != 0 || m.LatestAnnounceDate != "" || m.LatestSource != "" {
+					t.Errorf("expected zero-valued citation block, got %+v", m)
+				}
+			},
+		},
+		{
+			"wrapped_data_envelope",
+			`{"data":{"latest_revenue":254444250,"latest_announce_date":"2026-04-28","roe":0.03}}`,
+			func(t *testing.T, m *Metrics) {
+				if m.LatestRevenue != 254444250 {
+					t.Errorf("LatestRevenue got %v (envelope)", m.LatestRevenue)
+				}
+				if m.LatestAnnounceDate != "2026-04-28" {
+					t.Errorf("LatestAnnounceDate got %q (envelope)", m.LatestAnnounceDate)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := parseAkshareMetrics([]byte(tc.body), "688205")
+			if err != nil {
+				t.Fatalf("parseAkshareMetrics: %v", err)
+			}
+			tc.check(t, m)
+		})
+	}
+}
+
 // Akshare Supports() requires BaseURL to claim a market.
 func TestAkshareProviderSupportsRequiresBaseURL(t *testing.T) {
 	p := &AkshareProvider{}
