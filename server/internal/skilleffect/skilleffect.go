@@ -24,11 +24,11 @@
 // ---------------------
 // A skill is "auto-deprecated" when:
 //
-//   * SampleCount ≥ MinSampleSize (default 25) — we don't pull
+//   - SampleCount ≥ MinSampleSize (default 25) — we don't pull
 //     the rug after 3 plans.
-//   * HitRate < HitRateFloor (default 0.45) — i.e. it fires but
+//   - HitRate < HitRateFloor (default 0.45) — i.e. it fires but
 //     correlates with hits less often than a coin flip.
-//   * MeanAlpha < AlphaFloor (default −0.0) — mean alpha goes
+//   - MeanAlpha < AlphaFloor (default −0.0) — mean alpha goes
 //     negative (the skill actively hurts when applied).
 //
 // All three thresholds must trip simultaneously. The package
@@ -42,8 +42,8 @@
 //
 // SCOPE
 // -----
-//   * Owns the Observation value type, Tracker, Aggregate report.
-//   * Does NOT own persistence or the agent_skills table mutation.
+//   - Owns the Observation value type, Tracker, Aggregate report.
+//   - Does NOT own persistence or the agent_skills table mutation.
 package skilleffect
 
 import (
