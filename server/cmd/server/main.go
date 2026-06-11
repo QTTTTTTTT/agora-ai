@@ -173,6 +173,19 @@ type Config struct {
 	// back to a single-key ring built from JWTSecret. Nil only in tests
 	// that construct Config{} manually.
 	JWTKeyring              *secrets.JWTKeyring
+	// KeyringManager is the A4 atomic-pointer wrapper that the
+	// rotation outbox handler swaps into when it mints a new key.
+	// effectiveJWTKeyring() prefers this over the static JWTKeyring
+	// field so a rotation that landed after process boot is visible
+	// to every subsequent request without restart. Nil in unit
+	// tests that pre-date the manager — those keep using the
+	// JWTKeyring field unchanged.
+	KeyringManager          *secrets.KeyringManager
+	// JWTRotationInterval is the cadence at which the trigger
+	// goroutine emits secret.rotate.jwt events. Zero / negative
+	// disables the trigger entirely so existing deployments don't
+	// start rotating until an operator opts in via JWT_ROTATION_INTERVAL.
+	JWTRotationInterval     time.Duration
 	SessionTTL              time.Duration
 	ModelConfigAPIKeySecret string
 	CORSOrigins             []string
@@ -297,6 +310,13 @@ func LoadConfig() *Config {
 		cfg.CORSOrigins = []string{"http://localhost:3000", "http://localhost:5173"}
 	}
 
+	// A4: how often the trigger goroutine asks "is the active key
+	// older than this?". Zero / unset disables auto-rotation entirely
+	// and the platform falls back to the manual `INSERT INTO
+	// outbox_events` path operators have always had. Production
+	// deployments should opt in with a value like 720h (30 days).
+	cfg.JWTRotationInterval = envDuration("JWT_ROTATION_INTERVAL", 0)
+
 	// F29: assemble the JWT keyring after JWTSecret has settled. Errors
 	// are deferred to validateConfig so LoadConfig stays infallible
 	// (matches its callers' expectations); a nil keyring will surface
@@ -313,14 +333,96 @@ func LoadConfig() *Config {
 	return cfg
 }
 
-// effectiveJWTKeyring returns cfg.JWTKeyring when set, otherwise
-// builds a single-key ring from cfg.JWTSecret. Tests that construct
-// Config{JWTSecret: "x"} without going through LoadConfig rely on this
-// fallback; production wiring always populates JWTKeyring up front so
-// this branch is a no-op there.
+// loadDBKeyringInto materialises a *secrets.JWTKeyring from the
+// jwt_keyring table by decrypting every row's secret under the
+// platform KEK. Returns (nil, nil) when the table is empty so the
+// caller knows to fall through to the env-derived ring. A decrypt
+// failure on ANY row is fatal (no partial ring) — letting a
+// half-decrypted ring sign tokens would be worse than refusing to
+// load the ring at all.
+func loadDBKeyringInto(ctx context.Context, store secrets.KeyringStore) (*secrets.JWTKeyring, error) {
+	rows, err := store.ListAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	kek, err := secrets.EncryptionSecret()
+	if err != nil {
+		return nil, err
+	}
+	if kek == "" {
+		return nil, errors.New("loadDBKeyringInto: encryption secret unavailable")
+	}
+	pts := make(map[string]string, len(rows))
+	for _, r := range rows {
+		pt, err := subscription.DecryptAPIKey(string(r.SecretEncrypted), kek)
+		if err != nil {
+			return nil, fmt.Errorf("loadDBKeyringInto: decrypt kid=%q: %w", r.Kid, err)
+		}
+		pts[r.Kid] = pt
+	}
+	return secrets.BuildKeyringFromStored(rows, pts)
+}
+
+// seedKeyringFromEnv is the first-boot bootstrap: write the
+// env-derived active key into jwt_keyring so the rotation trigger
+// has an aging anchor. Idempotent: if a row already exists with
+// the same kid the AppendActive transaction fails on UNIQUE(kid)
+// and we surface no error (race with a peer replica). Inactive
+// env keys are intentionally NOT seeded — keeping them in-memory
+// for the verification path is enough; persisting them creates
+// noise in the DB without buying anything.
+func seedKeyringFromEnv(ctx context.Context, store secrets.KeyringStore, ring *secrets.JWTKeyring) error {
+	if ring == nil {
+		return errors.New("seedKeyringFromEnv: nil ring")
+	}
+	active := ring.Active()
+	if active.Secret == "" {
+		return errors.New("seedKeyringFromEnv: env ring has no active secret")
+	}
+	kek, err := secrets.EncryptionSecret()
+	if err != nil {
+		return err
+	}
+	if kek == "" {
+		return errors.New("seedKeyringFromEnv: encryption secret unavailable")
+	}
+	cipherText, err := subscription.EncryptAPIKey(active.Secret, kek)
+	if err != nil {
+		return fmt.Errorf("seedKeyringFromEnv: encrypt: %w", err)
+	}
+	kid := active.Kid
+	if kid == "" {
+		kid = "env-bootstrap"
+	}
+	return store.AppendActive(ctx, secrets.StoredKey{
+		Kid:               kid,
+		SecretEncrypted:   []byte(cipherText),
+		SecretFingerprint: secrets.FingerprintKey(active.Secret),
+		IsActive:          true,
+	})
+}
+
+// effectiveJWTKeyring returns the live ring, preferring the A4
+// hot-swappable KeyringManager when present. Falls back to the
+// static JWTKeyring field (legacy tests + boot-time pre-manager
+// window) and finally synthesises a single-key ring from
+// cfg.JWTSecret so tests that construct Config{JWTSecret: "x"}
+// keep working without any wiring change.
+//
+// Production wiring populates KeyringManager during startup; from
+// that moment on every request reads through the atomic.Pointer
+// and the rotation handler's Swap is the only writer.
 func (cfg *Config) effectiveJWTKeyring() *secrets.JWTKeyring {
 	if cfg == nil {
 		return nil
+	}
+	if cfg.KeyringManager != nil {
+		if ring := cfg.KeyringManager.Get(); ring != nil {
+			return ring
+		}
 	}
 	if cfg.JWTKeyring != nil {
 		return cfg.JWTKeyring
@@ -5563,6 +5665,47 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A4 — assemble the live KeyringManager from the union of
+	// env-supplied keys and any persisted rows in jwt_keyring.
+	// Policy:
+	//   * jwt_keyring table empty -> env-derived ring is the ring,
+	//     identical to pre-A4 behaviour. First rotation will
+	//     persist a row and from then on DB is canonical.
+	//   * jwt_keyring table non-empty -> DB rows are the ring;
+	//     env keys are ignored. This lets an operator point a
+	//     fresh deploy at an existing DB and pick up the right
+	//     active key without restating it in JWT_SECRETS_JSON.
+	// Failure to assemble the DB-backed ring is non-fatal — we
+	// fall back to the env ring so a botched key encryption can't
+	// brick login on every replica.
+	if cfg.JWTKeyring != nil {
+		cfg.KeyringManager = secrets.NewKeyringManager(cfg.JWTKeyring)
+		if store := secrets.NewPostgresKeyringStore(db); store != nil {
+			ctx := context.Background()
+			if dbRing, err := loadDBKeyringInto(ctx, store); err == nil && dbRing != nil {
+				cfg.KeyringManager.Swap(dbRing)
+				slog.Info("jwt_keyring: DB-backed ring loaded; ignoring env-derived keys",
+					"active_kid", dbRing.Active().Kid)
+			} else if err != nil {
+				slog.Warn("jwt_keyring: DB load failed; falling back to env-derived ring",
+					"error", err)
+			} else if cfg.JWTRotationInterval > 0 {
+				// Empty table + rotation enabled — seed the env
+				// active key so the trigger has something to age.
+				// Without this, the trigger sits in sql.ErrNoRows
+				// forever and rotation never happens. Seed is
+				// idempotent at the DB layer (UNIQUE(kid)) so a
+				// race between two replicas resolves to one row.
+				if err := seedKeyringFromEnv(ctx, store, cfg.JWTKeyring); err != nil {
+					slog.Warn("jwt_keyring: seed-from-env failed; automatic rotation will be inert",
+						"error", err)
+				} else {
+					slog.Info("jwt_keyring: seeded from env active key")
+				}
+			}
+		}
+	}
+
 	// Initialize services.
 	svc, err := initServices(db, cfg)
 	if err != nil {
@@ -5651,15 +5794,32 @@ func main() {
 
 	// Migration 112 — transactional outbox flusher. Drains
 	// outbox_events via SELECT … FOR UPDATE SKIP LOCKED so
-	// multi-replica deploys are safe. v1 handler is the bundled
-	// LoggingHandler which just records the event in slog; real
-	// downstream sinks (Kafka, S3, public provenance feed) are
-	// chained in via MultiHandler in a follow-up PR. The flusher
-	// runs unconditionally — an empty queue is the cheap idle path.
+	// multi-replica deploys are safe. The flusher runs
+	// unconditionally — an empty queue is the cheap idle path.
+	//
+	// A4 plumbs the JWT-rotation handler into the same flusher
+	// via MultiHandler. cfg.KeyringManager is populated upstream
+	// (right after the DB pool comes up) — if it's nil here the
+	// rotation handler degrades to a nil receiver and silently
+	// ignores rotation events instead of dead-lettering them.
 	{
+		keyringStore := secrets.NewPostgresKeyringStore(db)
+		var keyringStoreI secrets.KeyringStore = keyringStore
+		if keyringStore == nil {
+			keyringStoreI = secrets.NoopKeyringStore{}
+		}
+		rotationH := newJWTRotationHandler(jwtRotationHandlerOptions{
+			Manager:    cfg.KeyringManager,
+			Store:      keyringStoreI,
+			SessionTTL: cfg.SessionTTL,
+			Logger:     slog.Default(),
+		})
 		flusher := outbox.NewFlusher(
 			db,
-			outbox.LoggingHandler(slog.Default()),
+			outbox.MultiHandler(
+				outbox.LoggingHandler(slog.Default()),
+				rotationH,
+			),
 			outbox.FlusherOptions{
 				PollInterval:   10 * time.Second,
 				BatchSize:      64,
@@ -5670,6 +5830,19 @@ func main() {
 		go func() {
 			_ = flusher.Run(context.Background())
 		}()
+		// A4 trigger: enqueue secret.rotate.jwt events on the
+		// configured cadence. JWT_ROTATION_INTERVAL=0 disables
+		// the cron and operators can still rotate manually via
+		// `INSERT INTO outbox_events`.
+		if cfg.JWTRotationInterval > 0 && keyringStore != nil {
+			trigger := newJWTRotationTrigger(jwtRotationTriggerOptions{
+				DB:       db,
+				Store:    keyringStoreI,
+				Interval: cfg.JWTRotationInterval,
+				Logger:   slog.Default(),
+			})
+			go trigger.Run(context.Background())
+		}
 	}
 
 	// Phase 5 — advisor reputation backfill loop. Runs once per

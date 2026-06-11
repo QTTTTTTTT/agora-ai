@@ -629,6 +629,16 @@ ai-fund-platform-v3-full/
 - 多 key 轮换：写 `JWT_SECRETS_JSON=[{"kid":"k2","secret":"...","active":true},
   {"kid":"k1","secret":"..."}]`，`active=true` 的 key 用来签新 token，其它 key
   仅用来校验未过期的旧 token，做无停机轮换。
+- **自动轮换（A4）**：设 `JWT_ROTATION_INTERVAL=720h`（=30d）即可启用基于
+  `jwt_keyring` 表 + `outbox_events` 的自动轮换：进程内 1h 一次 tick 检查
+  `active` key 年龄，超期就向 outbox 写一条 `secret.rotate.jwt`，由统一的
+  flusher 调用 rotation handler 真正铸新 key、demote 旧 active、热 swap
+  in-memory ring、按 `3×SESSION_TTL` 清理过期 verification-only key。
+  默认值 `0` 表示关闭，行为与历史一致（手动重启或手写 `JWT_SECRETS_JSON`
+  仍然有效）。第一次启用时若表为空，会用当前 env active key 自播一行作为
+  老化锚点。多副本部署：rotation handler 是幂等的（DB 唯一约束 + outbox
+  SKIP LOCKED），triggered 的事件多写一份只是导致一次额外轮换，更安全
+  而非更危险。
 - `MODEL_CONFIG_API_KEY_SECRET` 改值后，已存进 DB 的第三方模型 API key 需要
   让用户重新录入（旧密钥用旧 secret 加密、无法解出）。
 - `CORS_ORIGINS` 逗号分隔；生产必须替换为真实 HTTPS 站点。
