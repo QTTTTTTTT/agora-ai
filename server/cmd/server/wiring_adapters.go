@@ -344,7 +344,35 @@ func newLLMRuntimeWithProviderRepo(
 	// 按 (owner, provider) 维度做限流和熔断，避免一个 fund owner
 	// 把另一个 owner 的额度或下游 provider 打爆。
 	client.SetOwnerLimiter(llm.NewOwnerLimiter(llm.DefaultLimiterConfig()))
-	client.SetChatCache(llm.NewChatCache(llm.ChatCacheConfig{Enabled: true, TTL: 10 * time.Minute, MaxEntries: 1024}))
+	// B1 — per-step TTL tiering. The default 10m TTL stays for
+	// interactive prompts (debate / pm_decision / fund_assist /
+	// macro_brief etc — every invocation should retry the LLM
+	// because the surrounding state is changing). Long-lived
+	// entries are reserved for prompts whose inputs are stable
+	// for the full trading day:
+	//   * advisor_master / advisor_tactic — daily picks master
+	//     analyst output; same ticker + same fundamentals all day.
+	//   * news_sentiment — sentiment buckets over the same news
+	//     batch; the batch itself is dated.
+	//   * research_synthesis_* — multi-step research the workflow
+	//     scheduler runs at most once per ticker per day.
+	// MaxEntries jumps from 1024 to 4096 because daily-picks visits
+	// 50+ tickers × 4 presets per run and we want them all to
+	// survive the same cache window. ~8 MB at 2 KB/entry, well
+	// inside the container budget.
+	client.SetChatCache(llm.NewChatCache(llm.ChatCacheConfig{
+		Enabled:    true,
+		TTL:        10 * time.Minute,
+		MaxEntries: 4096,
+		TTLByStep: map[string]time.Duration{
+			"advisor_master":              24 * time.Hour,
+			"advisor_tactic":              24 * time.Hour,
+			"news_sentiment":              24 * time.Hour,
+			"research_synthesis_macro":    24 * time.Hour,
+			"research_synthesis_industry": 24 * time.Hour,
+			"research_synthesis_company":  24 * time.Hour,
+		},
+	}))
 	client.SetCallBudgetLimiter(llm.NewCallBudgetLimiter(llm.DefaultCallBudgetConfig()))
 	// F14: dollar-cap hard gate. Wraps subscription.BudgetService so
 	// errors satisfy both subscription.IsLLMBudgetExceeded (admin UI)

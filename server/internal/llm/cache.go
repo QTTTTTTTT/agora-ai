@@ -10,15 +10,33 @@ import (
 )
 
 // ChatCacheConfig configures the in-process exact-match LLM cache.
+//
+// TTL is the default per-entry lifetime. TTLByStep lets callers
+// override on a per-StepName basis so deterministic prompts
+// (e.g. daily picks, advisor master analysis) can cache for 24h
+// while interactive prompts (debate, chat) keep the short 10m
+// default. Map keys match `ChatRequest.StepName` (trimmed).
+//
+// Empty / missing TTLByStep keys → the default TTL applies, so
+// adopting the per-step tiering is purely additive — existing
+// callers don't break if they don't populate the map.
 type ChatCacheConfig struct {
 	Enabled    bool
 	TTL        time.Duration
+	TTLByStep  map[string]time.Duration
 	MaxEntries int
 }
 
+// chatCacheEntry now carries its resolved TTL so different entries
+// can age out at different cadences. Storing TTL on the entry
+// (rather than re-looking it up at Get/evict time) means a cache
+// hot-swap of the TTLByStep map only affects entries inserted AFTER
+// the swap — already-cached responses keep the TTL they were
+// inserted with, which is the consistent behaviour for an LRU.
 type chatCacheEntry struct {
 	resp      *ChatResponse
 	createdAt time.Time
+	ttl       time.Duration
 }
 
 type chatCacheInflight struct {
@@ -41,7 +59,8 @@ type ChatCacheLease struct {
 type ChatCache struct {
 	mu         sync.Mutex
 	enabled    bool
-	ttl        time.Duration
+	defaultTTL time.Duration
+	ttlByStep  map[string]time.Duration // copied at construction; immutable
 	maxEntries int
 	items      map[string]chatCacheEntry
 	inflight   map[string]*chatCacheInflight
@@ -55,15 +74,46 @@ func NewChatCache(cfg ChatCacheConfig) *ChatCache {
 	}
 	maxEntries := cfg.MaxEntries
 	if maxEntries <= 0 {
-		maxEntries = 1024
+		// Post-A4 default. The cache is process-local memory; 4096
+		// exact-match entries at ~2 KB avg = ~8 MB, well inside the
+		// container budget. Bumping the ceiling means daily-picks
+		// reruns hit the same cached master analysis across the
+		// dozens of candidate tickers we visit per preset.
+		maxEntries = 4096
+	}
+	byStep := make(map[string]time.Duration, len(cfg.TTLByStep))
+	for k, v := range cfg.TTLByStep {
+		key := strings.TrimSpace(k)
+		if key == "" || v <= 0 {
+			continue
+		}
+		byStep[key] = v
 	}
 	return &ChatCache{
 		enabled:    cfg.Enabled,
-		ttl:        ttl,
+		defaultTTL: ttl,
+		ttlByStep:  byStep,
 		maxEntries: maxEntries,
 		items:      make(map[string]chatCacheEntry),
 		inflight:   make(map[string]*chatCacheInflight),
 	}
+}
+
+// TTLForStep returns the effective TTL the cache would apply to a
+// `Set` call for the given StepName. Exposed for tests + admin
+// surfaces ("how long is this prompt cached?") so the lookup logic
+// stays in one place.
+func (c *ChatCache) TTLForStep(stepName string) time.Duration {
+	if c == nil {
+		return 0
+	}
+	step := strings.TrimSpace(stepName)
+	if step != "" {
+		if ttl, ok := c.ttlByStep[step]; ok && ttl > 0 {
+			return ttl
+		}
+	}
+	return c.defaultTTL
 }
 
 func (c *ChatCache) Get(key string) (*ChatResponse, bool) {
@@ -76,21 +126,29 @@ func (c *ChatCache) Get(key string) (*ChatResponse, bool) {
 	if !ok {
 		return nil, false
 	}
-	if time.Since(entry.createdAt) > c.ttl {
+	if time.Since(entry.createdAt) > entry.ttl {
 		delete(c.items, key)
 		return nil, false
 	}
 	return cloneCachedChatResponse(entry.resp), true
 }
 
-func (c *ChatCache) Set(key string, resp *ChatResponse) {
+// Set stores resp under key with a TTL resolved from stepName.
+// stepName may be empty — the default TTL applies.
+//
+// The signature change (vs the pre-B1 `Set(key, resp)`) is the
+// reason the production call site in client.go was updated to
+// thread `req.StepName` through. Tests can pass "" if they don't
+// care about per-step tiering.
+func (c *ChatCache) Set(key, stepName string, resp *ChatResponse) {
 	if c == nil || !c.enabled || strings.TrimSpace(key) == "" || resp == nil || strings.TrimSpace(resp.Content) == "" {
 		return
 	}
+	ttl := c.TTLForStep(stepName)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	c.items[key] = chatCacheEntry{resp: cloneChatResponse(resp), createdAt: now}
+	c.items[key] = chatCacheEntry{resp: cloneChatResponse(resp), createdAt: now, ttl: ttl}
 	c.evictLocked(now)
 }
 
@@ -140,7 +198,7 @@ func (l *ChatCacheLease) Finish(resp *ChatResponse, err error) {
 
 func (c *ChatCache) evictLocked(now time.Time) {
 	for key, entry := range c.items {
-		if now.Sub(entry.createdAt) > c.ttl {
+		if now.Sub(entry.createdAt) > entry.ttl {
 			delete(c.items, key)
 		}
 	}

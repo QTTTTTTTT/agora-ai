@@ -136,7 +136,7 @@ func TestLLMTimeoutConstants(t *testing.T) {
 func TestChatCacheExactMatchAndExpiry(t *testing.T) {
 	cache := NewChatCache(ChatCacheConfig{Enabled: true, TTL: 20 * time.Millisecond, MaxEntries: 10})
 	key := "same-prompt"
-	cache.Set(key, &ChatResponse{Content: "cached", InputTokens: 10, OutputTokens: 5, TotalCost: 1, TotalPrice: 2, LatencyMs: 123})
+	cache.Set(key, "", &ChatResponse{Content: "cached", InputTokens: 10, OutputTokens: 5, TotalCost: 1, TotalPrice: 2, LatencyMs: 123})
 
 	got, ok := cache.Get(key)
 	if !ok {
@@ -149,6 +149,55 @@ func TestChatCacheExactMatchAndExpiry(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	if _, ok := cache.Get(key); ok {
 		t.Fatal("expected cache entry to expire")
+	}
+}
+
+// TestChatCachePerStepTTL verifies B1: the per-StepName TTL map
+// overrides the default TTL only for matching steps, and entries
+// inserted for different steps age out independently.
+func TestChatCachePerStepTTL(t *testing.T) {
+	cache := NewChatCache(ChatCacheConfig{
+		Enabled:    true,
+		TTL:        15 * time.Millisecond,
+		MaxEntries: 10,
+		TTLByStep: map[string]time.Duration{
+			"long_lived": 200 * time.Millisecond,
+		},
+	})
+
+	// Sanity-check the public resolver.
+	if got, want := cache.TTLForStep("long_lived"), 200*time.Millisecond; got != want {
+		t.Fatalf("TTLForStep(long_lived) = %s, want %s", got, want)
+	}
+	if got, want := cache.TTLForStep("default_step"), 15*time.Millisecond; got != want {
+		t.Fatalf("TTLForStep(default_step) = %s, want %s", got, want)
+	}
+	if got, want := cache.TTLForStep(""), 15*time.Millisecond; got != want {
+		t.Fatalf("TTLForStep(empty) = %s, want %s", got, want)
+	}
+
+	cache.Set("long-k", "long_lived", &ChatResponse{Content: "long"})
+	cache.Set("short-k", "default_step", &ChatResponse{Content: "short"})
+
+	// After the short TTL but before the long TTL: short evicted,
+	// long still present.
+	time.Sleep(30 * time.Millisecond)
+	if _, ok := cache.Get("short-k"); ok {
+		t.Fatalf("default-TTL entry should have expired after 30ms")
+	}
+	if _, ok := cache.Get("long-k"); !ok {
+		t.Fatalf("per-step TTL entry was wrongly evicted before its 200ms TTL")
+	}
+}
+
+// TestChatCacheMaxEntriesDefault locks in the post-B1 capacity
+// bump (1024 -> 4096). A regression here is a cost regression —
+// daily-picks reruns blow the cache and pay double for the same
+// prompt — so it's worth a dedicated assertion.
+func TestChatCacheMaxEntriesDefault(t *testing.T) {
+	cache := NewChatCache(ChatCacheConfig{Enabled: true})
+	if cache.maxEntries != 4096 {
+		t.Fatalf("expected default MaxEntries to be 4096, got %d", cache.maxEntries)
 	}
 }
 

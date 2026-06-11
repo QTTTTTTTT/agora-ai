@@ -559,7 +559,7 @@ func (c *MultiProviderClient) chatWithResolvedConfig(ctx context.Context, req Ch
 	}
 
 	if cache != nil {
-		cache.Set(cacheKey, resp)
+		cache.Set(cacheKey, req.StepName, resp)
 	}
 
 	return resp, nil
