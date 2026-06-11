@@ -280,7 +280,7 @@ func (a *MasterAgent) Analyze(ctx context.Context, in MasterInput) (MasterReport
 		GeneratedAt:  a.now(),
 		Verdict:      "HOLD",
 		Confidence:   30,
-		Thesis:       fmt.Sprintf("%s (%s) 暂无足够数据形成强观点。", a.persona.NameZh, a.persona.NameEn),
+		Thesis:       fmt.Sprintf("%s (%s): insufficient data to form a strong view at this time.", a.persona.NameEn, a.persona.NameZh),
 		KeyReasons:   []string{"insufficient_data"},
 		KeyRisks:     []string{"data_unavailable"},
 		LLMModel:     "fallback",
@@ -378,7 +378,7 @@ func (a *MasterAgent) Analyze(ctx context.Context, in MasterInput) (MasterReport
 			GeneratedAt:  a.now(),
 			Verdict:      "HOLD",
 			Confidence:   30,
-			Thesis:       fmt.Sprintf("%s 模型输出未通过校验，保守给出 HOLD。", a.persona.NameZh),
+			Thesis:       fmt.Sprintf("%s: model output failed validation; defaulting to a conservative HOLD.", a.persona.NameEn),
 			KeyReasons:   []string{"model_output_invalid"},
 			KeyRisks:     []string{err.Error()},
 			LLMModel:     "fallback",
@@ -405,49 +405,89 @@ func (a *MasterAgent) complete(ctx context.Context, sys, user string) (string, e
 // fields) as a reference, so masters with bespoke frameworks
 // (Munger's biases, Lynch's six categories, CANSLIM, etc.) get
 // their sections in front of the LLM without per-master code.
+//
+// Output language contract: the prompt is written in English and
+// instructs the model to respond in English. The persona JSON
+// itself can contain Chinese descriptions (philosophy, must-have
+// criteria, etc.) — modern LLMs read them as context but obey
+// the prompt's "respond in English" instruction. This is the
+// 6/11/2026 reset: previously the entire prompt was Chinese, so
+// even when the UI ran with language=en-US the
+// daily_picks.result_json was filled with Chinese thesis blobs
+// the user couldn't read. Switching the prompt to English makes
+// English the default; rare Chinese-UI readers will be served
+// via a future translation layer.
 func (a *MasterAgent) buildSystemPrompt() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "你是 %s（%s），一位风格定位为 \"%s\" 的投资大师。\n",
-		a.persona.NameZh, a.persona.NameEn, a.persona.Style)
+	fmt.Fprintf(&b, "You are %s (%s), an investment master whose style is \"%s\".\n",
+		a.persona.NameEn, a.persona.NameZh, a.persona.Style)
 	if a.persona.HoldingPeriod != "" {
-		fmt.Fprintf(&b, "你的典型持有期：%s。\n", a.persona.HoldingPeriod)
+		fmt.Fprintf(&b, "Your typical holding period: %s.\n", a.persona.HoldingPeriod)
 	}
 	if a.persona.Philosophy != "" {
-		fmt.Fprintf(&b, "你的核心投资哲学：%s\n", a.persona.Philosophy)
+		fmt.Fprintf(&b, "Your core investment philosophy: %s\n", a.persona.Philosophy)
 	}
-	b.WriteString("\n你必须严格按照下面的人格 JSON 中描述的框架进行分析（包含 must_have_criteria / red_lines / qualitative_filters / 估值方法 / 输出格式 等所有字段）。\n")
-	b.WriteString("当你判断时，请遵守：\n")
-	b.WriteString("1) 数据缺失时，必须在 key_reasons 里诚实写 'data_unavailable: <字段>'，不要编造数字；\n")
-	b.WriteString("2) red_lines_hit 数组里每一项必须是 persona 红线列表中的【原词短语】（≤ 30 个汉字 / 80 字符），不要写解释、不要写推理过程、不要写 \"此处修正/暂未触及/Wait/Ignore\" 等元语言；若未触发任何红线，直接输出 []；\n")
-	b.WriteString("3) verdict 必须从 verdict_enum 中选一项（若该 persona 定义了的话）；\n")
-	b.WriteString("4) 仅输出一个 JSON 对象，不要 markdown 围栏，不要解释性前言。\n")
+	b.WriteString("\nYou MUST analyse strictly within the framework described in the persona JSON below " +
+		"(including must_have_criteria / red_lines / qualitative_filters / valuation_method / output_format and every other field).\n")
+	b.WriteString("When forming your judgement, observe these rules:\n")
+	b.WriteString("1) Whenever a data point is missing, write 'data_unavailable: <field>' in key_reasons honestly. Never fabricate numbers.\n")
+	b.WriteString("2) Every entry in the red_lines_hit array MUST be a verbatim short phrase from the persona's red_lines list (<=80 characters). " +
+		"Do NOT add explanations, internal monologue, or meta-language such as \"corrected here\", \"not yet triggered\", \"Wait\", \"Ignore\". " +
+		"If no red line is triggered, return [].\n")
+	b.WriteString("3) verdict MUST be one of the values in verdict_enum (when the persona defines one).\n")
+	b.WriteString("4) Output exactly ONE JSON object. No markdown fences, no preamble, no explanation outside the JSON.\n")
 	// Rule 5 — disambiguation. Without this the model writes
-	// "最新季度增速回升至27.97%" without saying which quarter,
-	// and a downstream reader (or reviewing AI) defaults the
-	// referent to the wrong period and judges us factually wrong.
-	// The prompt already exposes annual_period + latest_period
-	// labels in the user message; this rule forces the LLM to
-	// quote them back instead of using generic "近期/最新季度".
-	b.WriteString("5) 在 thesis / key_reasons / key_risks 中引用任何来自 fund.* 的百分比或绝对值时，必须显式带上该数字所对应的财报期间，且优先采用 'YYYY年Q[1-4]' 或 'YYYY 年报' 的写法（例如 '2026Q1 营收同比 +27.97%'、'2025 年报归母净利同比 -28.77%'）。禁止使用 '最新季度' / '近期' / '当前' / '近一年' 等模糊措辞替代具体期间。如果 prompt 中给出的 annual_period / latest_period 缺失，则不要引用对应字段。\n")
-	// Rule 6 — quality gap. earnings_growth_yoy 与
-	// revenue_growth_yoy 一正一负、且绝对差大于 20 个百分点
-	// 时，是经典的"增收不增利"信号，应当在 key_risks 里单独
-	// 标出。Wood / Lynch 这类成长派 persona 历史上会被营收数据
-	// 牵着走，对净利崩塌着墨不足；这条规则把判断 explicit 化。
-	b.WriteString("6) 当 fund.revenue_growth_yoy 与 fund.earnings_growth_yoy 同时存在且符号相反（即营收增长 > 0 而盈利下滑 < 0，或反之），并且二者绝对值之差 >= 20 个百分点时，必须在 key_risks 中显式列出 '增收不增利' 或 '增利不增收' 类型的风险条目，引用具体数字与期间，且不得仅在 thesis 中一笔带过。这是 quality-gap 信号，许多成长派 persona 容易忽略。\n")
-	// Rule 7 — listing tenure. 当 listing_years 提供且 < 10
-	// 时，凡是"需要 10 年历史"的 must-have（如穿越周期、十年
-	// 自由现金流、长期股息记录等）应在 key_reasons 中标为
-	// "listing_lt_10y:N" 而不是直接 "data_unavailable"，
-	// 避免把次新股的结构性限制当成公司基本面缺陷。
-	b.WriteString("7) 当 prompt 中给出 listing_years 字段时（公司上市年限），若该值 < 10，针对'需要 10 年以上历史数据'的条件（如穿越周期能力、十年自由现金流、十年股息记录等），请用 'listing_lt_10y:N年' 的标签代替 'data_unavailable:<字段>'，不要把次新股的结构性限制当成公司基本面缺陷扣分。仍然可以指出'历史样本不足以验证长期穿越能力'作为风险，但请明确归因为上市年限而非财务披露问题。\n")
-	b.WriteString("8) 当 prompt 中给出 latest_announce_date 字段时，引用任何以 _latest 结尾的 fund.* 字段（如 fund.revenue_growth_yoy_latest、fund.latest_revenue、fund.latest_net_income、fund.latest_revenue_qoq、fund.gross_margin_latest 等）必须做到三件事：①明确写出 latest_period 对应的财报期间（如 '2026Q1'），②写出 latest_announce_date 公告日（如 '公告日 2026-04-28'），③在百分比之外同时给出至少一个绝对值（如 '营收 2.54 亿元' 或 '净利润 1964 万元'，单位用万元/亿元，保留 2 位有效数字）。示例：'2026Q1（公告日 2026-04-28）营收 2.54 亿元，同比 +27.97%，但环比 -9.63% 显示动能见顶'。这是为了让任何外部读者都能凭借'公告日 + 绝对值'两个锚点回到原始公告核对数字，避免出现无法溯源的孤立百分比。同时，当 latest_*_qoq 与 latest_*_yoy 出现明显反向（一个 > 0 一个 < 0）时，必须在 key_reasons 或 key_risks 中把'YoY 增长但 QoQ 下滑'类的动能反转信号显式列为一条独立条目。\n")
+	// "latest quarterly growth rebounded to 27.97%" without
+	// saying which quarter, and a downstream reader (or
+	// reviewing AI) defaults the referent to the wrong period
+	// and judges us factually wrong. The prompt already exposes
+	// annual_period + latest_period labels in the user message;
+	// this rule forces the LLM to quote them back instead of
+	// using generic "recent / current / latest quarter".
+	b.WriteString("5) Whenever you cite any percentage or absolute value drawn from a fund.* field in the thesis / key_reasons / key_risks, " +
+		"you MUST explicitly attach the fiscal period that figure belongs to. Prefer the form 'YYYY-Q[1-4]' or 'YYYY annual report' " +
+		"(e.g. 'YoY revenue growth +27.97% in 2026-Q1', '2025 annual report attributable net income -28.77% YoY'). " +
+		"Do NOT use vague phrases like 'latest quarter' / 'recently' / 'current' / 'over the past year' as a substitute. " +
+		"If the prompt's annual_period or latest_period label for that figure is missing, do not cite the field at all.\n")
+	// Rule 6 — quality gap. earnings_growth_yoy and
+	// revenue_growth_yoy with opposite signs and a >20 ppt
+	// magnitude gap is the classic "revenue up, profits down"
+	// (or vice versa) signal. Wood / Lynch growth-style
+	// personas historically over-weight the revenue line and
+	// under-flag the earnings collapse; this rule makes the
+	// judgement explicit.
+	b.WriteString("6) When fund.revenue_growth_yoy and fund.earnings_growth_yoy are both present with opposite signs " +
+		"(i.e. revenue growth > 0 while earnings growth < 0, or the reverse) AND the absolute gap between them is >= 20 percentage points, " +
+		"you MUST list a 'revenue-up-profit-down' or 'profit-up-revenue-down' risk explicitly in key_risks, citing the actual numbers and the fiscal period. " +
+		"Do NOT bury this signal as a passing remark in the thesis. This is a quality-gap signal that growth-style personas tend to overlook.\n")
+	// Rule 7 — listing tenure. When listing_years < 10, the
+	// must-haves that demand 10y of history (cross-cycle
+	// resilience, 10y free cash flow, long dividend record)
+	// should be tagged 'listing_lt_10y:N' rather than
+	// 'data_unavailable:<field>', so a recently-IPO'd company
+	// isn't penalised as a fundamental defect for a structural
+	// constraint.
+	b.WriteString("7) When the prompt provides listing_years (the company's years since IPO) and the value is < 10, " +
+		"any condition that demands 10+ years of history (cross-cycle resilience, 10-year free cash flow record, multi-year dividend history, etc.) " +
+		"should be tagged in key_reasons as 'listing_lt_10y:N years' rather than 'data_unavailable:<field>'. " +
+		"Do NOT score the structural newness of a young listing as a fundamental flaw. " +
+		"You may still flag 'historical sample insufficient to verify long-cycle resilience' as a risk, " +
+		"but make the attribution explicit (years public, not disclosure quality).\n")
+	b.WriteString("8) When latest_announce_date is provided in the prompt, every reference to a fund.*_latest field " +
+		"(fund.revenue_growth_yoy_latest, fund.latest_revenue, fund.latest_net_income, fund.latest_revenue_qoq, fund.gross_margin_latest, etc.) " +
+		"MUST do three things in the same sentence: (i) name the latest_period (e.g. '2026-Q1'); " +
+		"(ii) cite latest_announce_date (e.g. 'announced 2026-04-28'); " +
+		"(iii) accompany every percentage with at least one absolute value to two significant figures (e.g. 'revenue $254M' or 'net income $19.6M'). " +
+		"Example: '2026-Q1 (announced 2026-04-28) revenue $254M, +27.97% YoY but -9.63% QoQ shows momentum peaking.' " +
+		"This anchoring lets any external reader trace the figure back to the original filing using the announce date and the absolute amount. " +
+		"Additionally, when latest_*_qoq and latest_*_yoy disagree in sign (one > 0 and the other < 0), " +
+		"you MUST list the 'YoY-up-but-QoQ-down' (or vice versa) momentum-reversal signal as its OWN dedicated entry in key_reasons or key_risks.\n")
 	// Rule 9 — technical-analysis citation. Prompt may carry a
 	// 'technical snapshot' block with closed prices, moving
 	// averages, RSI, MACD, KDJ, support/resistance, etc. The
 	// LLM MUST be able to QUOTE those values (e.g. "RSI14 78
 	// overbought, price 5% above 20D high") but MUST NOT turn
-	// them into a price target / stop loss / 买点 / 目标位.
+	// them into a price target, stop loss, or buy / sell point.
 	// The Publisher-mode phrase scanner (compliance/scanner.go)
 	// will redact such phrases server-side, but redaction makes
 	// the output read awkwardly — far better to never emit them.
@@ -461,15 +501,38 @@ func (a *MasterAgent) buildSystemPrompt() string {
 	//     SMA20>SMA50>SMA200 alignment"
 	//
 	// What's forbidden:
-	//   - forecast: "price target $150" / "目标价 $150"
-	//   - directive: "entry at $128" / "买点在 $128"
-	//   - signal claim: "golden cross signal triggered" /
-	//     "金叉信号确认"
-	//   - imperative: "go long" / "建议买入"
+	//   - forecast: "price target $150"
+	//   - directive: "entry at $128"
+	//   - signal claim: "golden cross signal triggered"
+	//   - imperative: "go long" / "buy here"
 	//
 	// The technical block, when present, is FACT. The persona's
 	// reasoning ABOUT the fact stays a research observation.
-	b.WriteString("9) 当 prompt 中给出 '--- technical snapshot ---' 段时，你可以在 thesis / key_reasons / key_risks 中引用其中的具体数值（如 'RSI14 78 处于超买区'、'2026-06-08 收盘 $128.50 站上 20 日高位 $125.30'、'MA20>MA50>MA200 显示多头排列'），但必须遵守以下硬约束：①禁止给出任何形式的价格预测、目标价、止损/止盈位、买点/卖点、入场/出场点（无论数值或区间）；②禁止把均线交叉描述为'信号确认/触发/即将形成'（如'金叉信号' / 'golden cross triggered'），只能描述为已观察到的事件（如'MA5 于 2026-06-05 上穿 MA20'）；③禁止使用'建议买入/卖出/加仓/减仓'、'go long/short'、'strong buy/sell rating'等含有动作指令的措辞；④技术面只能作为基本面判断的辅助信息，不得替代基本面构成核心论点。如果只有技术面信号而基本面缺失，请在 key_reasons 中明确标注 'technical_only_signal'，并保持保守 verdict。\n")
+	b.WriteString("9) When the prompt includes a '--- technical snapshot ---' section, you may cite specific values from it in the thesis / key_reasons / key_risks " +
+		"(e.g. 'RSI14 78 in overbought territory', '2026-06-08 close $128.50 broke the 20-day high $125.30', 'MA20>MA50>MA200 indicates multi-timeframe uptrend'), " +
+		"but you MUST observe the following hard constraints: " +
+		"(i) NEVER provide any form of price forecast, target price, stop-loss / take-profit level, buy-point / sell-point, or entry / exit level (numeric or range); " +
+		"(ii) NEVER describe a moving-average crossover as 'signal confirmed / triggered / about to form' (e.g. 'golden cross triggered'); " +
+		"only describe it as an observed past event (e.g. 'MA5 crossed above MA20 on 2026-06-05'); " +
+		"(iii) NEVER use action-imperative language such as 'recommend buying / selling / adding to position / trimming', 'go long / short', 'strong buy / sell rating'; " +
+		"(iv) the technical view must SUPPORT — never REPLACE — a fundamentals-based core argument. " +
+		"If only a technical signal is available and fundamentals are missing, tag 'technical_only_signal' explicitly in key_reasons and keep the verdict conservative.\n")
+	// Rule 10 — output language. Explicit, terminal, and at the
+	// end of the rule list so it's the last thing the model
+	// reads before producing JSON. Even though the persona JSON
+	// (philosophy / must_have_criteria / red_lines) may contain
+	// Chinese phrases, the structured output fields the user
+	// sees in the UI must be English so that switching the UI
+	// to en-US shows English content. The verbatim red-line
+	// short phrases are the one exception — they MUST be quoted
+	// from the persona's red_lines list as written there, even
+	// if those entries are in Chinese, because the dedup +
+	// scanner pipeline downstream relies on exact-string match.
+	b.WriteString("10) RESPOND IN ENGLISH. Even though the persona JSON may contain Chinese descriptions, " +
+		"every free-form text field in your output (thesis, key_reasons, key_risks, master_specific value descriptions) " +
+		"MUST be written in clear, professional English. " +
+		"The only exception: red_lines_hit entries MUST be quoted verbatim from the persona's red_lines list — " +
+		"if a red-line entry is in Chinese in the persona JSON, keep it in Chinese (the downstream scanner relies on exact-string match).\n")
 	b.WriteString("\n=== PERSONA JSON ===\n")
 	if raw, err := json.MarshalIndent(a.persona.Raw, "", "  "); err == nil {
 		b.Write(raw)
@@ -478,11 +541,11 @@ func (a *MasterAgent) buildSystemPrompt() string {
 	b.WriteString("{\n")
 	b.WriteString("  \"verdict\": \"STRONG_BUY|BUY|HOLD|AVOID|SHORT|PASS|SKIP\",\n")
 	b.WriteString("  \"confidence\": 0-100,\n")
-	b.WriteString("  \"thesis\": \"一段不超过 200 字的中文论述\",\n")
-	b.WriteString("  \"key_reasons\": [\"3 条最关键的判断依据\"],\n")
-	b.WriteString("  \"key_risks\": [\"2 条最关键的风险\"],\n")
-	b.WriteString("  \"red_lines_hit\": [\"命中的红线条目，若无则空数组\"],\n")
-	b.WriteString("  \"master_specific\": { \"...\": \"该 persona 特有字段，如 intrinsic_value / PEG / graham_number / CANSLIM_score 等\" }\n")
+	b.WriteString("  \"thesis\": \"a single English paragraph, no more than 200 words\",\n")
+	b.WriteString("  \"key_reasons\": [\"the 3 most decisive judgement factors, each in English\"],\n")
+	b.WriteString("  \"key_risks\": [\"the 2 most material risks, each in English\"],\n")
+	b.WriteString("  \"red_lines_hit\": [\"red-line entries triggered, quoted verbatim from persona; [] if none\"],\n")
+	b.WriteString("  \"master_specific\": { \"...\": \"persona-specific fields such as intrinsic_value / PEG / graham_number / CANSLIM_score, etc.\" }\n")
 	b.WriteString("}\n")
 	return b.String()
 }
@@ -491,7 +554,7 @@ func (a *MasterAgent) buildSystemPrompt() string {
 // missing field explicitly so the LLM has no excuse to fabricate.
 func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 	var b strings.Builder
-	b.WriteString("请按上述 persona 分析下面这只股票，并仅返回一个 JSON 对象。\n\n")
+	b.WriteString("Apply the persona above to the stock below and return exactly ONE JSON object. Respond in English (see rule 10 in the system prompt).\n\n")
 	fmt.Fprintf(&b, "symbol: %s\n", strings.ToUpper(in.Symbol))
 	if name := strings.TrimSpace(in.Name); name != "" {
 		// Surface the issuer's short name so masters reason about
@@ -518,7 +581,7 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 	}
 	b.WriteString("\n--- fundamentals snapshot ---\n")
 	if in.Fundamentals == nil {
-		b.WriteString("（数据缺失：未提供基本面快照）\n")
+		b.WriteString("(data missing: no fundamentals snapshot was provided)\n")
 	} else {
 		// Period labels FIRST so the persona reads them before the
 		// numbers and understands which fiscal period each metric
@@ -527,10 +590,10 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 		// latest available figure, missing the fact that a fresher
 		// quarterly print may have already turned the trend.
 		if ap := strings.TrimSpace(in.Fundamentals.AnnualPeriod); ap != "" {
-			fmt.Fprintf(&b, "annual_period: %s（fund.*_yoy 字段所对应的年报口径）\n", ap)
+			fmt.Fprintf(&b, "annual_period: %s (fiscal period for the fund.*_yoy fields)\n", ap)
 		}
 		if lp := strings.TrimSpace(in.Fundamentals.LatestPeriod); lp != "" {
-			fmt.Fprintf(&b, "latest_period: %s（fund.*_yoy_latest 字段所对应的最新季报/中报口径）\n", lp)
+			fmt.Fprintf(&b, "latest_period: %s (fiscal period for the fund.*_yoy_latest / *_qoq / *_latest fields, typically the most recent quarterly or interim filing)\n", lp)
 		}
 		// Listing tenure — feeds rule 7 in buildSystemPrompt. When
 		// the company has been public for less than the persona's
@@ -552,7 +615,7 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 		// resolved in one search if the prompt cites "公告日
 		// 2026-04-28" alongside the number.
 		if ad := strings.TrimSpace(in.Fundamentals.LatestAnnounceDate); ad != "" {
-			fmt.Fprintf(&b, "latest_announce_date: %s（最近一次披露原始公告的日期）\n", ad)
+			fmt.Fprintf(&b, "latest_announce_date: %s (date of the most recent original filing)\n", ad)
 		}
 		if src := strings.TrimSpace(in.Fundamentals.LatestSource); src != "" {
 			fmt.Fprintf(&b, "latest_source: %s\n", src)
@@ -566,7 +629,7 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 				fmt.Fprintf(&b, "quality.quartile=%d/4\n", q.Quartile)
 			}
 		} else {
-			b.WriteString("quality.* = （未计算）\n")
+			b.WriteString("quality.* = (not computed)\n")
 		}
 		if len(in.Fundamentals.Metrics) > 0 {
 			// Sort for stable prompt rendering — makes prompt
@@ -596,7 +659,7 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 				}
 			}
 		} else {
-			b.WriteString("fund.* = （未提供财务指标）\n")
+			b.WriteString("fund.* = (no financial metrics provided)\n")
 		}
 		if len(in.Fundamentals.IndustryPeers) > 0 {
 			fmt.Fprintf(&b, "industry_peers=%s\n", strings.Join(in.Fundamentals.IndustryPeers, ", "))
@@ -623,10 +686,10 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 				)
 			}
 		} else {
-			b.WriteString("history.10yr = （历史数据不可用，对需要多年历史的条件，请在 key_reasons 写 data_unavailable:<字段>）\n")
+			b.WriteString("history.10yr = (historical series unavailable; for any criterion that requires multi-year history, write 'data_unavailable:<field>' in key_reasons)\n")
 		}
 		if rp := in.Fundamentals.RulePrior; rp != nil && len(rp.Items) > 0 {
-			b.WriteString("\n--- rule_based_prior (服务器侧确定性预检，必须以此为准，不要自行重算多年平均数) ---\n")
+			b.WriteString("\n--- rule_based_prior (deterministic server-side pre-check; treat these as authoritative, do NOT re-compute multi-year averages) ---\n")
 			for _, it := range rp.Items {
 				fmt.Fprintf(&b, "rule.%s status=%s required=%s observed=%s",
 					it.Key, it.Status, it.Required, it.Observed)
@@ -640,7 +703,7 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 					fmt.Fprintf(&b, "rule.note=%s\n", n)
 				}
 			}
-			b.WriteString("如果上述任意条目 status=FAIL，请在 key_reasons / key_risks 中明确指出，并相应调低 verdict（多条 FAIL 应触发 AVOID）。对 status=UNKNOWN 的条目，请诚实说明数据不足而不是假设。\n")
+			b.WriteString("If any of the entries above has status=FAIL, you MUST surface it explicitly in key_reasons or key_risks and lower the verdict accordingly (multiple FAILs should produce AVOID). For status=UNKNOWN entries, be honest that data is insufficient rather than assuming.\n")
 		}
 	}
 	if in.Technical != nil {

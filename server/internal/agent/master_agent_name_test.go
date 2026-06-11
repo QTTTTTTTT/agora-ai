@@ -199,20 +199,24 @@ func TestMasterPromptOmitsListingTenureWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestMasterSystemPromptCarriesNewRules pins the three new
-// behavioural rules onto the system prompt so a drive-by edit
-// can't silently drop them. The rules are the user-visible fix
-// for three real critique points raised against the 688205
-// verdict:
+// TestMasterSystemPromptCarriesNewRules pins the four behavioural
+// rules onto the system prompt so a drive-by edit can't silently
+// drop them. The rules are the user-visible fix for the three
+// real critique points raised against the 688205 verdict, plus
+// the 2026-06-11 English-output requirement so the daily picks
+// page stops shipping Chinese theses to en-US users:
 //
 //	rule 5 — every cited percentage must carry an explicit
-//	         period label (no more "最新季度增速" ambiguity).
+//	         period label (no more "latest quarter" ambiguity).
 //	rule 6 — opposite-sign revenue vs earnings growth with
-//	         |gap| >= 20pp must surface in key_risks (增收不
-//	         增利 warning was being buried in thesis prose).
+//	         |gap| >= 20pp must surface in key_risks
+//	         (revenue-up-profit-down warning was being buried
+//	         in thesis prose).
 //	rule 7 — sub-10-year listings should be tagged
 //	         "listing_lt_10y" rather than penalised as
 //	         "data_unavailable: history.10yr".
+//	rule 10 — output language MUST be English so the en-US UI
+//	         renders English content in Master Panel Reports.
 //
 // We assert on the *anchor strings* the rules use, not on the
 // full sentence, so cosmetic wording tweaks don't break the test
@@ -224,22 +228,29 @@ func TestMasterSystemPromptCarriesNewRules(t *testing.T) {
 	}
 	sys := a.buildSystemPrompt()
 	for ruleName, anchor := range map[string]string{
-		"rule5_period_label":  "YYYY年Q[1-4]",
-		"rule5_forbid_vague":  "禁止使用 '最新季度'",
-		"rule6_quality_gap":   "增收不增利",
-		"rule6_pp_threshold":  "20 个百分点",
+		"rule5_period_label":  "YYYY-Q[1-4]",
+		"rule5_forbid_vague":  "Do NOT use vague phrases",
+		"rule6_quality_gap":   "revenue-up-profit-down",
+		"rule6_pp_threshold":  "20 percentage points",
 		"rule7_listing_tag":   "listing_lt_10y",
 		"rule7_listing_field": "listing_years",
 		// rule 8 must mandate THREE things per *_latest citation
 		// (period label, announce date, absolute value) AND name
 		// the citation field explicitly so we can grep-audit the
-		// generated reports later. The "动能反转" anchor enforces
-		// the secondary YoY-vs-QoQ divergence clause.
-		"rule8_announce_field": "latest_announce_date",
-		"rule8_period_label":   "2026Q1",
-		"rule8_announce_date":  "2026-04-28",
-		"rule8_absolute_value": "2.54 亿元",
-		"rule8_momentum_clause": "动能反转",
+		// generated reports later. The "momentum-reversal" anchor
+		// enforces the secondary YoY-vs-QoQ divergence clause.
+		"rule8_announce_field":  "latest_announce_date",
+		"rule8_period_label":    "2026-Q1",
+		"rule8_announce_date":   "2026-04-28",
+		"rule8_absolute_value":  "$254M",
+		"rule8_momentum_clause": "momentum-reversal",
+		// Rule 10 — pinned output-language contract. Without
+		// this anchor, a future edit could silently revert the
+		// prompt to Chinese (which is what shipped before
+		// 2026-06-11 and made the en-US Daily Stock Watch
+		// page show Chinese Master Panel Reports).
+		"rule10_english_output": "RESPOND IN ENGLISH",
+		"rule10_redline_quote":  "quoted verbatim from the persona",
 	} {
 		if !strings.Contains(sys, anchor) {
 			t.Errorf("%s missing anchor %q in system prompt:\n--- system prompt ---\n%s\n--- end ---", ruleName, anchor, sys)
