@@ -113,7 +113,7 @@ func buildAdvisorService(svc *Services) *advisor.Service {
 		advisor.WithMasterPanelBuilder(masterBuilder),
 		advisor.WithFundamentalsLoader(loader),
 		advisor.WithComplianceMode(svc.ComplianceMode),
-		advisor.WithPhraseViolationSink(advisorViolationSink(svc.ComplianceRepo)),
+		advisor.WithPhraseViolationSink(advisorViolationSink(svc.ComplianceRepo, svc.Metrics)),
 	}
 
 	// Technical loader — best-effort. Without an OHLC fetcher
@@ -169,13 +169,27 @@ func buildAdvisorService(svc *Services) *advisor.Service {
 // audit insert MUST NOT fail the consultation. The user already
 // got the redacted output; losing the audit row is a soft
 // failure we log and move on from.
-func advisorViolationSink(repo *repository.ComplianceRepo) advisor.PhraseViolationSink {
+func advisorViolationSink(repo *repository.ComplianceRepo, metrics *serverMetrics) advisor.PhraseViolationSink {
 	if repo == nil {
 		return nil
 	}
 	return func(ctx context.Context, userID, surface, sourceEntity, sourceID, redacted string, violations []compliance.Violation) {
 		if len(violations) == 0 {
 			return
+		}
+		// B2 — per-pattern counter. Fired BEFORE the DB write so
+		// even a failing audit-row insert still updates the
+		// metric (the metric is the alerting signal; the audit
+		// row is the forensic trail). Layer is the surface key
+		// passed by the scanner — usually "advisor", but the
+		// daily-picks loop reuses the same sink with surface
+		// "daily_picks" so the metric naturally segments.
+		layer := strings.TrimSpace(surface)
+		if layer == "" {
+			layer = "advisor"
+		}
+		for _, v := range violations {
+			metrics.RecordComplianceFilterBlock(v.Rule, layer)
 		}
 		rows := make([]repository.PhraseViolationRow, 0, len(violations))
 		for _, v := range violations {

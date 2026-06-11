@@ -12,7 +12,7 @@ func TestComplianceGeoMiddleware_OFACBlocks(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	})
-	mw := complianceGeoMiddleware()(next)
+	mw := complianceGeoMiddleware(nil)(next)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
 	req.Header.Set("CF-IPCountry", "IR")
@@ -33,7 +33,7 @@ func TestComplianceGeoMiddleware_EUWarnsButServes(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := complianceGeoMiddleware()(next)
+	mw := complianceGeoMiddleware(nil)(next)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
 	req.Header.Set("CF-IPCountry", "DE")
@@ -65,7 +65,7 @@ func TestComplianceGeoMiddleware_NoHeaderFailsOpenInDev(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := complianceGeoMiddleware()(next)
+	mw := complianceGeoMiddleware(nil)(next)
 	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
 	rec := httptest.NewRecorder()
 	mw.ServeHTTP(rec, req)
@@ -90,7 +90,7 @@ func TestComplianceGeoMiddleware_NoHeaderFailsCloseInProduction(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	})
-	mw := complianceGeoMiddleware()(next)
+	mw := complianceGeoMiddleware(nil)(next)
 	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
 	rec := httptest.NewRecorder()
 	mw.ServeHTTP(rec, req)
@@ -123,7 +123,7 @@ func TestComplianceGeoMiddleware_HealthAllowedInProductionWithoutHeader(t *testi
 				called = true
 				w.WriteHeader(http.StatusOK)
 			})
-			mw := complianceGeoMiddleware()(next)
+			mw := complianceGeoMiddleware(nil)(next)
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			rec := httptest.NewRecorder()
 			mw.ServeHTTP(rec, req)
@@ -144,7 +144,7 @@ func TestComplianceGeoMiddleware_HealthAlwaysAllowed(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := complianceGeoMiddleware()(next)
+	mw := complianceGeoMiddleware(nil)(next)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	req.Header.Set("CF-IPCountry", "IR") // OFAC, would normally block
@@ -165,7 +165,7 @@ func TestComplianceGeoMiddleware_USStateRequiresAck(t *testing.T) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := complianceGeoMiddleware()(next)
+	mw := complianceGeoMiddleware(nil)(next)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
 	req.Header.Set("CF-IPCountry", "US")

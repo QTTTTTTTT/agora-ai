@@ -398,7 +398,7 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	// header. When no header is present we fail OPEN — the
 	// alternative (block everything) would 451 every developer
 	// in local dev.
-	handler = complianceGeoMiddleware()(handler)
+	handler = complianceGeoMiddleware(svc.Metrics)(handler)
 	handler = rateLimitMiddleware(rateLimitStore)(handler)
 	handler = corsMiddleware(cfg.CORSOrigins)(handler)
 	handler = compressionMiddleware(handler)

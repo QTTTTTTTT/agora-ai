@@ -1286,6 +1286,7 @@ func initServices(db *sql.DB, cfg *Config) (*Services, error) {
 			services.DailyPicksRepo,
 			db,                    // for the wave-cost summary query over usage_entries
 			services.UsageTracker, // force-flush so the summary sees rows the wave just wrote
+			services.Metrics,      // B2 dailypicks_publish_duration_seconds histogram
 			dailyPicksLoopOptions{},
 		)
 	}
@@ -3814,7 +3815,47 @@ type serverMetrics struct {
 	// SRE alert template uses to fire when fallback rate exceeds
 	// 5% of all PM decisions over the trailing hour.
 	decisionSourceTotal map[string]int64
+
+	// B2 — three business metrics for the optimisation push.
+	// Each is intentionally kept on `serverMetrics` (not
+	// internal/metrics) so the existing /api/metrics endpoint and
+	// hand-rolled exporter pick them up automatically.
+	//
+	//   dailyPicksPublishBuckets — histogram, labelled by preset.
+	//   Bucketed in seconds via dailyPicksPublishBucketsSeconds
+	//   below. The interesting tail is "did today's publish
+	//   take 4 minutes again?" so the bucket schedule is
+	//   weighted toward minute-scale rather than the second-scale
+	//   HTTP histogram.
+	//
+	//   complianceFilterBlocked — counter, labelled by
+	//   (pattern, layer). pattern is `compliance.Violation.Pattern`
+	//   (e.g. "guaranteed_return", "breakout_imminent"); layer is
+	//   "advisor" for the scanner-driven path, "geo" for the
+	//   middleware fail-close path, and one bucket per future
+	//   surface. Lets us alert on a sudden spike of a single
+	//   regex hit ("a master prompt regressed and is now
+	//   emitting forbidden phrases on every call") without
+	//   trawling audit-log rows.
+	//
+	//   subscriptionMRR — gauge in USD. Refreshed on a slow
+	//   ticker (default 1h) from a SUM(price_usd) query over
+	//   active subscriptions. One series only (no labels for v1
+	//   because we deliberately don't want to expose per-plan
+	//   counts on the public /metrics surface).
+	dailyPicksPublishBuckets  map[string]int64
+	dailyPicksPublishSumSecs  map[string]float64
+	dailyPicksPublishCount    map[string]int64
+	complianceFilterBlocked   map[string]int64
+	subscriptionMRRUSD        float64
 }
+
+// dailyPicksPublishBucketsSeconds is the histogram bucket schedule
+// for the per-preset daily-picks publish duration. Anchored at
+// 30s (a healthy publish over the cheapest preset), 1m, 2m, 5m
+// (the SRE alert threshold), 10m (the "something is on fire"
+// threshold), 30m (the "queued behind a stuck preset" tail).
+var dailyPicksPublishBucketsSeconds = []float64{30, 60, 120, 300, 600, 1800}
 
 var httpRequestDurationSecondsBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
@@ -3931,6 +3972,10 @@ func newServerMetrics() *serverMetrics {
 		corpActionIngestApply:           make(map[string]int64),
 		abShadowLLMCalls:                make(map[string]int64),
 		decisionSourceTotal:             make(map[string]int64),
+		dailyPicksPublishBuckets:        make(map[string]int64),
+		dailyPicksPublishSumSecs:        make(map[string]float64),
+		dailyPicksPublishCount:          make(map[string]int64),
+		complianceFilterBlocked:         make(map[string]int64),
 	}
 }
 
@@ -4555,6 +4600,70 @@ func (m *serverMetrics) RecordWSFeedEvent(event string) {
 	m.wsFeedEvents[event]++
 }
 
+// ObserveDailyPicksPublish records one preset-publish run.
+// preset is the daily-picks preset key (e.g. "growth", "value");
+// d is the wall-clock duration of the publish call. Safe to call
+// with m == nil or preset == "".
+func (m *serverMetrics) ObserveDailyPicksPublish(preset string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	preset = strings.TrimSpace(preset)
+	if preset == "" {
+		preset = "unknown"
+	}
+	secs := d.Seconds()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dailyPicksPublishSumSecs[preset] += secs
+	m.dailyPicksPublishCount[preset]++
+	for _, bucket := range dailyPicksPublishBucketsSeconds {
+		if secs <= bucket {
+			m.dailyPicksPublishBuckets[fmt.Sprintf("preset=%s,le=%s", preset, prometheusFloat(bucket))]++
+		}
+	}
+	m.dailyPicksPublishBuckets[fmt.Sprintf("preset=%s,le=+Inf", preset)]++
+}
+
+// RecordComplianceFilterBlock bumps the counter for one redacted
+// phrase. pattern matches compliance.Violation.Pattern (e.g.
+// "guaranteed_return"); layer identifies the source surface
+// ("advisor", "geo", "daily_picks"). Both labels are required —
+// empty strings collapse to "unknown" so we never silently drop
+// metrics rows on a logging-only path.
+func (m *serverMetrics) RecordComplianceFilterBlock(pattern, layer string) {
+	if m == nil {
+		return
+	}
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		pattern = "unknown"
+	}
+	layer = strings.TrimSpace(layer)
+	if layer == "" {
+		layer = "unknown"
+	}
+	key := fmt.Sprintf("pattern=%s,layer=%s", pattern, layer)
+	m.mu.Lock()
+	m.complianceFilterBlocked[key]++
+	m.mu.Unlock()
+}
+
+// SetSubscriptionMRR stores the most recently computed monthly
+// recurring revenue in USD. Updated by an external refresher loop
+// (see subscriptionMRRLoop) so the metric reflects the latest
+// committed snapshot rather than the wall-clock of the scrape.
+// Negative values are silently dropped — an MRR < 0 is always
+// a computation bug, not a legitimate signal.
+func (m *serverMetrics) SetSubscriptionMRR(usd float64) {
+	if m == nil || usd < 0 {
+		return
+	}
+	m.mu.Lock()
+	m.subscriptionMRRUSD = usd
+	m.mu.Unlock()
+}
+
 func (m *serverMetrics) ExportPrometheus() string {
 	if m == nil {
 		return ""
@@ -4897,6 +5006,47 @@ func (m *serverMetrics) ExportPrometheus() string {
 	for _, key := range sortedMetricKeys(m.decisionSourceTotal) {
 		lines = append(lines, fmt.Sprintf("fundai_pm_decision_total{%s} %d", prometheusLabels(key), m.decisionSourceTotal[key]))
 	}
+
+	// B2 — daily-picks publish duration histogram. Bucket counts +
+	// _sum + _count match the standard Prometheus histogram shape so
+	// histogram_quantile() works out of the box.
+	lines = append(lines,
+		"# HELP dailypicks_publish_duration_seconds Per-preset daily-picks publish duration in seconds.",
+		"# TYPE dailypicks_publish_duration_seconds histogram",
+	)
+	for _, key := range sortedMetricKeys(m.dailyPicksPublishBuckets) {
+		lines = append(lines, fmt.Sprintf("dailypicks_publish_duration_seconds_bucket{%s} %d", prometheusLabels(key), m.dailyPicksPublishBuckets[key]))
+	}
+	for _, key := range sortedMetricKeys(m.dailyPicksPublishSumSecs) {
+		lines = append(lines, fmt.Sprintf("dailypicks_publish_duration_seconds_sum{preset=%q} %.6f", key, m.dailyPicksPublishSumSecs[key]))
+	}
+	for _, key := range sortedMetricKeys(m.dailyPicksPublishCount) {
+		lines = append(lines, fmt.Sprintf("dailypicks_publish_duration_seconds_count{preset=%q} %d", key, m.dailyPicksPublishCount[key]))
+	}
+
+	// B2 — compliance filter block counter, partitioned by (pattern,
+	// layer). Powers "which forbidden phrase is the platform
+	// catching the most this week?" dashboards plus a fast SRE
+	// alert ("a single pattern just spiked 10× — a master prompt
+	// is now leaking forbidden phrases on every call").
+	lines = append(lines,
+		"# HELP compliance_filter_blocked_total Compliance phrases redacted, by regex pattern and surface layer.",
+		"# TYPE compliance_filter_blocked_total counter",
+	)
+	for _, key := range sortedMetricKeys(m.complianceFilterBlocked) {
+		lines = append(lines, fmt.Sprintf("compliance_filter_blocked_total{%s} %d", prometheusLabels(key), m.complianceFilterBlocked[key]))
+	}
+
+	// B2 — subscription MRR (USD). Single series, refreshed by the
+	// subscriptionMRRLoop goroutine. Exposed as a snapshot gauge so
+	// downstream dashboards can graph MRR-over-time without joining
+	// against the subscriptions table directly.
+	lines = append(lines,
+		"# HELP subscription_mrr_usd Monthly recurring revenue in USD (snapshot, refreshed on a slow ticker).",
+		"# TYPE subscription_mrr_usd gauge",
+		fmt.Sprintf("subscription_mrr_usd %.2f", m.subscriptionMRRUSD),
+	)
+
 	return strings.Join(append(lines, ""), "\n")
 }
 
@@ -5543,6 +5693,14 @@ func main() {
 		go func() {
 			svc.ModelABPromotionScanLoop.Run(context.Background())
 		}()
+	}
+
+	// B2 — subscription MRR refresher. Hourly COUNT(*) GROUP BY
+	// plan_tier so the subscription_mrr_usd gauge tracks the
+	// live revenue snapshot for the SRE / ops dashboards. nil-safe
+	// when DB or metrics aren't wired (test binaries).
+	if mrrLoop := newSubscriptionMRRLoop(db, svc.Metrics, subscriptionMRRLoopOptions{}); mrrLoop != nil {
+		go mrrLoop.Run(context.Background())
 	}
 
 	// P1-7 — trade surveillance scheduler. Hourly intraday scan

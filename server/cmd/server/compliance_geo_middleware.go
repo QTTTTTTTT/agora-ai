@@ -68,7 +68,12 @@ var pathsExemptFromGeoBlock = map[string]bool{
 	"/api/compliance/disclosure": true, // need to load the disclosure to render the 451 page
 }
 
-func complianceGeoMiddleware() func(http.Handler) http.Handler {
+// complianceGeoMiddleware constructs the geo middleware. The
+// optional metrics parameter lets every block / fail-close
+// decision bump compliance_filter_blocked_total{pattern,layer="geo"}
+// so the same SRE alert (per-pattern spike) catches a sudden
+// uptick of OFAC-country traffic alongside scanner-driven hits.
+func complianceGeoMiddleware(metrics *serverMetrics) func(http.Handler) http.Handler {
 	// Captured once at construction. APP_ENV does not change at
 	// runtime; reading it on every request would be needless work.
 	isProduction := strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production")
@@ -99,6 +104,7 @@ func complianceGeoMiddleware() func(http.Handler) http.Handler {
 						"remote_addr", r.RemoteAddr,
 						"hint", "production traffic must transit a CDN that sets CF-IPCountry, X-Vercel-IP-Country, or X-Country")
 				}
+				metrics.RecordComplianceFilterBlock("missing_cdn_header", "geo")
 				writeGeoHeaderMissing(w)
 				return
 			}
@@ -117,6 +123,7 @@ func complianceGeoMiddleware() func(http.Handler) http.Handler {
 					"rule", decision.RuleID,
 					"path", r.URL.Path,
 					"method", r.Method)
+				metrics.RecordComplianceFilterBlock(decision.RuleID, "geo")
 				writeGeoBlock(w, decision)
 				return
 			case compliance.ActionWarn:
