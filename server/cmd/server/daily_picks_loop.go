@@ -32,11 +32,21 @@
 //
 //	One goroutine per binary. The existing leader-election gate
 //	in main.go prevents two replicas from running waves in
-//	parallel. Within a wave, symbols are scored SEQUENTIALLY
-//	(no fan-out) because (a) the underlying LLM is the
-//	bottleneck and we already saturate it with one in-flight
-//	call, and (b) sequential failure isolation makes the
-//	error-row UI much cleaner than chasing dropped goroutines.
+//	parallel. Across watchlists (presets) the loop stays SERIAL
+//	— a 4-preset run executes conservative, then disruptive,
+//	then garp, then macro, never overlapping. Reasons:
+//	  * Multiple LLM providers in the failover chain each have
+//	    independent rate limits; bursting 4 presets in parallel
+//	    has produced 429s on Gemini in the past.
+//	  * The cost-summary log line is per-preset; serial runs
+//	    keep that log narrative readable for ops.
+//
+//	WITHIN a preset we DO fan out — bounded by
+//	`presetSymbolWorkers` (default 5) — because per-symbol
+//	scoreOne is dominated by ~10-30 s of LLM latency, not CPU
+//	or the LLM rate cap. With workers=5 a 50-symbol wave drops
+//	from ~25 min serial to ~5-7 min. The OHLC + cache layers
+//	are already concurrency-safe (singleflight + RWMutex).
 //
 // Cost guard-rails:
 //
@@ -56,12 +66,41 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fundai/server/internal/advisor"
 	"github.com/fundai/server/internal/dailypicks"
 	"github.com/fundai/server/internal/subscription"
 )
+
+// presetSymbolWorkers is the bounded fan-out used inside a single
+// watchlist's wave. Tuned at 5:
+//
+//   - Per-symbol latency is dominated by 1-3 sequential LLM calls
+//     at ~5-15 s each, so 5 in-flight workers give us a ~5x wall-
+//     clock speed-up over pure serial without saturating the LLM
+//     provider's rate limit (typical Gemini / DeepSeek / OpenAI
+//     accounts cap at 150-300 RPM; 5 workers × 4 calls/min =
+//     20 RPM, comfortably under).
+//
+//   - The OHLC fetcher (server/internal/ohlc/registry.go) and the
+//     LLM ChatCache (server/internal/llm/cache.go) are both
+//     concurrency-safe and use singleflight to coalesce duplicate
+//     keys, so two parallel symbols hitting the same cached
+//     advisor_master prompt share one upstream call.
+//
+//   - 5 also keeps the per-DB-connection pressure modest — every
+//     scoreOne does ~1 read + 1 upsert on daily_picks; at 5 in
+//     flight the pool's max_open=25 default is never near-bound.
+//
+// Bumping to 10 produced the trending-handler-like 7x speed-up in
+// the trending-cache fix on 6/10/2026 — the daily-picks pipeline
+// has more DB pressure per call (advisor.runPanels reads
+// fundamentals + writes consultations), so we hold here at 5
+// pending production observation.
+const presetSymbolWorkers = 5
 
 // dailyPicksLoopOptions configures the scheduler. Defaults are
 // sized for the seed 50-ticker us_largecap_disruptive_v1 watchlist
@@ -123,6 +162,10 @@ type dailyPicksLoop struct {
 	// runs against a buffer that hasn't hit the DB yet (default
 	// flush interval is 10s). nil is permitted.
 	usageTracker *subscription.UsageTracker
+	// metrics — optional pointer for B2 dailypicks_publish histogram.
+	// Nil-safe; methods on serverMetrics tolerate a nil receiver
+	// so unit tests that don't wire metrics don't have to plumb it.
+	metrics      *serverMetrics
 	clock        func() time.Time
 	opts         dailyPicksLoopOptions
 	rand         *rand.Rand
@@ -140,6 +183,7 @@ func newDailyPicksLoop(
 	picks *dailypicks.Repo,
 	db *sql.DB,
 	usageTracker *subscription.UsageTracker,
+	metrics *serverMetrics,
 	opts dailyPicksLoopOptions,
 ) *dailyPicksLoop {
 	if adv == nil || picks == nil {
@@ -174,6 +218,7 @@ func newDailyPicksLoop(
 		picks:              picks,
 		db:                 db,
 		usageTracker:       usageTracker,
+		metrics:            metrics,
 		clock:              time.Now,
 		opts:               d,
 		rand:               rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), uint64(time.Now().UnixNano()>>32))),
@@ -227,8 +272,10 @@ func (l *dailyPicksLoop) RunOnce(ctx context.Context) (int, error) {
 		// RunOnce ignores the time-of-day gate but DOES respect
 		// SkipIfAlreadyComplete — running RunOnce twice in a row
 		// shouldn't double-bill LLM if the first run already
-		// finished cleanly.
-		n, runErr := l.runWatchlistWave(ctx, wl, true)
+		// finished cleanly. We discard the `complete` return:
+		// RunOnce is best-effort and admin-driven; the operator
+		// can re-invoke for partial completions.
+		n, _, runErr := l.runWatchlistWave(ctx, wl, true)
 		total += n
 		if runErr != nil {
 			slog.Warn("daily_picks_loop.run_once.watchlist_failed",
@@ -311,24 +358,37 @@ func (l *dailyPicksLoop) tick(ctx context.Context) {
 			// silently; an ops user can RunOnce manually.
 			continue
 		}
-		if now.Before(scheduledAt) {
+		last, seen := l.lastRunByWatchlist[wl.ID]
+		if !shouldFireWave(now, scheduledAt, last, seen) {
 			continue
 		}
-		// Run-already-today gate: if the last successful run's
-		// calendar day (UTC) == today (UTC), skip. Using the
-		// in-process map is fine because (a) the per-day cache
-		// in daily_picks is idempotent anyway, and (b) a
-		// restart simply gets one extra "is the cell complete?"
-		// query at boot, which is cheap.
-		if last, seen := l.lastRunByWatchlist[wl.ID]; seen {
-			if sameUTCDate(last, now) {
-				continue
-			}
-		}
-		n, runErr := l.runWatchlistWave(ctx, wl, false)
+		n, complete, runErr := l.runWatchlistWave(ctx, wl, false)
 		if runErr != nil {
 			slog.Warn("daily_picks_loop.tick.watchlist_failed",
 				"watchlist", wl.Name, "err", runErr)
+			continue
+		}
+		// Partial completion: do NOT lock the day's slot. The
+		// watchlist still has missing symbols (transient LLM
+		// failure, Yahoo timeout, DB upsert deadline). Leaving
+		// lastRunByWatchlist unchanged lets the next 5-min tick
+		// re-enter runWatchlistWave; the per-symbol picks.Get
+		// short-circuit makes it idempotent — only the missing
+		// symbols pay the LLM cost on the retry.
+		//
+		// SkipIfAlreadyComplete's pre-flight count check stops
+		// the retries cleanly once every symbol is in. If a
+		// permanently-broken symbol prevents the watchlist from
+		// ever reaching capN (e.g. Yahoo returns 404 for
+		// $DELISTED forever), the per-tick retry cost is still
+		// bounded — picks.Get fires at ~1ms × N symbols, then
+		// scoreOne fires only for the genuinely-missing ones,
+		// each capped by PerSymbolTimeout (90s).
+		if !complete {
+			slog.Info("daily_picks_loop.tick.watchlist_partial",
+				"watchlist", wl.Name,
+				"picks_written", n,
+				"reason", "missing_symbols_will_retry_next_tick")
 			continue
 		}
 		l.lastRunByWatchlist[wl.ID] = now
@@ -343,14 +403,39 @@ func (l *dailyPicksLoop) tick(ctx context.Context) {
 // SkipIfAlreadyComplete gate (which consults the DB) still
 // applies if enabled, so manual re-runs don't burn money when
 // the row set is already there.
-func (l *dailyPicksLoop) runWatchlistWave(ctx context.Context, wl dailypicks.Watchlist, forceRun bool) (int, error) {
+//
+// Returns:
+//
+//	written  — count of symbols that completed scoring in THIS
+//	           call. Excludes per-symbol-skip hits (those are
+//	           "already complete from an earlier run", not new
+//	           work). Used by callers as a cost-attribution hint.
+//	complete — true when every symbol in the watchlist (modulo
+//	           MaxPicksPerWave cap) has a row in daily_picks for
+//	           today. The tick caller uses this to decide whether
+//	           to LOCK the day's slot via lastRunByWatchlist or
+//	           leave it unlocked so the next 5-min tick can pick
+//	           up missing symbols. Set independently of `written`
+//	           because a wave that scored 0 new symbols can still
+//	           be complete (every row was already in DB).
+//	err      — only non-nil on hard failures (waveCtx timeout,
+//	           DB connection lost). Per-symbol failures are
+//	           swallowed and surface via wave.symbol_failed log.
+func (l *dailyPicksLoop) runWatchlistWave(ctx context.Context, wl dailypicks.Watchlist, forceRun bool) (written int, complete bool, err error) {
 	if len(wl.Symbols) == 0 {
-		return 0, nil
+		return 0, true, nil
 	}
 	// Capture wave start for the cost-summary query at the end:
 	// every usage_entries row written between waveStart and "now"
 	// for the publisher user is attributable to this wave.
 	waveStart := l.clock()
+	// B2 — observe the publish duration on EVERY return path
+	// (success, error, skipped). The deferred lambda reads
+	// l.clock() inside the call so it captures real wall-clock
+	// elapsed without leaking the closure variable.
+	defer func() {
+		l.metrics.ObserveDailyPicksPublish(wl.PresetKey, l.clock().Sub(waveStart))
+	}()
 	waveCtx, cancel := context.WithTimeout(ctx, l.opts.WaveTimeout)
 	defer cancel()
 
@@ -365,63 +450,87 @@ func (l *dailyPicksLoop) runWatchlistWave(ctx context.Context, wl dailypicks.Wat
 		if cerr == nil && existing >= len(wl.Symbols) {
 			slog.Info("daily_picks_loop.wave.skip_complete",
 				"watchlist", wl.Name, "existing", existing, "want", len(wl.Symbols))
-			return 0, nil
+			return 0, true, nil
 		}
 	}
 
-	cap := len(wl.Symbols)
-	if cap > l.opts.MaxPicksPerWave {
+	capN := len(wl.Symbols)
+	if capN > l.opts.MaxPicksPerWave {
 		slog.Warn("daily_picks_loop.wave.capped",
-			"watchlist", wl.Name, "symbols", cap, "cap", l.opts.MaxPicksPerWave)
-		cap = l.opts.MaxPicksPerWave
+			"watchlist", wl.Name, "symbols", capN, "cap", l.opts.MaxPicksPerWave)
+		capN = l.opts.MaxPicksPerWave
 	}
 
-	written := 0
-	for _, raw := range wl.Symbols[:cap] {
-		sym := strings.ToUpper(strings.TrimSpace(raw))
-		if sym == "" {
-			continue
+	// alreadyDone is the per-symbol short-circuit. If a row already
+	// exists for today, skip without an LLM call. This handles
+	// "wave failed halfway, restarted" — the second wave only pays
+	// for the remaining cells.
+	//
+	// We deliberately do NOT gate this on !forceRun: forceRun's
+	// purpose is to bypass the per-watchlist "already ran today"
+	// in-process cache so RunOnce can pick up where a previous
+	// wave left off, but it is NEVER correct to re-pay the LLM
+	// for a symbol that already has a row — the publisher-mode
+	// row is keyed by (symbol, market, preset, date) and a second
+	// scoreOne would overwrite it with an indistinguishable copy.
+	alreadyDone := func(ctx context.Context, sym string) bool {
+		if !l.opts.SkipIfAlreadyComplete {
+			return false
 		}
-		select {
-		case <-waveCtx.Done():
-			slog.Warn("daily_picks_loop.wave.timeout",
-				"watchlist", wl.Name, "completed", written, "remaining", cap-written)
-			return written, waveCtx.Err()
-		default:
-		}
-		if l.opts.SkipIfAlreadyComplete {
-			// Per-symbol short-circuit: if the row already
-			// exists for today, don't re-call the LLM. This
-			// covers the "wave failed halfway, restarted"
-			// case: the second wave only pays for the
-			// remaining cells.
-			//
-			// We deliberately do NOT gate this on !forceRun.
-			// forceRun's purpose is to bypass the per-watchlist
-			// "already ran today" in-process cache so RunOnce
-			// can pick up where a previous wave left off; it
-			// is NEVER correct to re-pay the LLM for a symbol
-			// that already has a row, because the result is
-			// publisher-mode shared content keyed by
-			// (symbol, market, preset, date) — re-running just
-			// overwrites the existing row with an indistinguishable
-			// one. Earlier versions DID gate on !forceRun, which
-			// caused a partial wave (e.g. garp 18/50 after
-			// timeout) to re-bill all 18 existing rows on the
-			// next RunOnce instead of resuming at row #19.
-			if _, gerr := l.picks.Get(waveCtx, sym, wl.Market, wl.PresetKey, today); gerr == nil {
-				continue
-			}
-		}
-		if err := l.scoreOne(waveCtx, wl, sym); err != nil {
-			slog.Warn("daily_picks_loop.wave.symbol_failed",
-				"watchlist", wl.Name, "symbol", sym, "err", err)
-			// Don't bail — keep going so one bad ticker
-			// (delisted, Yahoo 404) doesn't poison the wave.
-			continue
-		}
-		written++
+		_, gerr := l.picks.Get(ctx, sym, wl.Market, wl.PresetKey, today)
+		return gerr == nil
 	}
+	score := func(ctx context.Context, sym string) error {
+		return l.scoreOne(ctx, wl, sym)
+	}
+	onFail := func(sym string, ferr error) {
+		// Per-symbol failure is swallowed: one bad ticker
+		// (delisted, Yahoo 404, transient LLM 5xx) must not
+		// poison the wave. The sibling tick will retry it
+		// because partial waves don't lock today's slot.
+		slog.Warn("daily_picks_loop.wave.symbol_failed",
+			"watchlist", wl.Name, "symbol", sym, "err", ferr)
+	}
+
+	// Wave-start telemetry: shipped so the operator can compute
+	// "how long did each preset take" by diffing wave.start and
+	// wave.cost timestamps. The alternative (computing elapsed
+	// inside wave.cost) hides the START moment, which makes
+	// diagnosing "why did macro start so late" impossible
+	// without correlating against tick.watchlist_done lines from
+	// the previous preset.
+	slog.Info("daily_picks_loop.wave.start",
+		"watchlist", wl.Name,
+		"preset", wl.PresetKey,
+		"symbols_total", capN,
+		"workers", presetSymbolWorkers,
+		"force_run", forceRun)
+
+	written = scoreSymbolsParallel(
+		waveCtx,
+		wl.Symbols[:capN],
+		presetSymbolWorkers,
+		alreadyDone, score, onFail,
+	)
+	if waveCtx.Err() != nil {
+		// Hard timeout — surface to caller so tick() can
+		// decide what to do (currently: log + skip lastRun
+		// update so the next tick retries).
+		slog.Warn("daily_picks_loop.wave.timeout",
+			"watchlist", wl.Name, "written", written)
+		err = waveCtx.Err()
+	}
+
+	// Completeness check — query DB rather than reasoning from
+	// `written` because per-symbol skip (already-in-DB) doesn't
+	// increment written but those symbols ARE complete. Use a
+	// fresh short-timeout context off the parent so a stalled
+	// waveCtx doesn't poison the count query.
+	completeCtx, completeCancel := context.WithTimeout(ctx, 5*time.Second)
+	if total, qerr := l.picks.CountForDay(completeCtx, wl.Market, wl.PresetKey, today); qerr == nil {
+		complete = total >= capN
+	}
+	completeCancel()
 
 	// Emit per-wave cost summary so the operator can see
 	// "conservative preset cost $X for Y stocks tonight"
@@ -450,7 +559,82 @@ func (l *dailyPicksLoop) runWatchlistWave(ctx context.Context, wl dailypicks.Wat
 		}
 	}
 
-	return written, nil
+	return written, complete, err
+}
+
+// scoreSymbolsParallel processes `symbols` with `workers` concurrent
+// scorers. Per-symbol pre-skip via `alreadyDone` (returns true if a
+// row already exists in the DB → free, no LLM call). Per-symbol
+// scoring via `score` (the LLM call + DB upsert). Per-symbol
+// failure surfaces via `onFail` and is then SWALLOWED — one bad
+// ticker must not poison the wave.
+//
+// Returns the number of symbols newly scored this call (excludes
+// pre-skipped). Stops accepting NEW work once ctx is cancelled
+// but lets in-flight workers finish their current scoreOne so
+// their DB writes aren't half-committed.
+//
+// Pure helper, no logger / loop receiver dependency, so it's
+// trivially unit-testable with closures (see daily_picks_loop_test.go).
+func scoreSymbolsParallel(
+	ctx context.Context,
+	symbols []string,
+	workers int,
+	alreadyDone func(ctx context.Context, symbol string) bool,
+	score func(ctx context.Context, symbol string) error,
+	onFail func(symbol string, err error),
+) int {
+	if workers <= 0 {
+		workers = 1
+	}
+	var written int32
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+
+	for _, raw := range symbols {
+		sym := strings.ToUpper(strings.TrimSpace(raw))
+		if sym == "" {
+			continue
+		}
+		// Stop dispatching new work on ctx cancel. Already-spawned
+		// goroutines drain via wg.Wait() below; their own ctx.Done
+		// branch handles the cancellation cleanly.
+		if ctx.Err() != nil {
+			break
+		}
+		// Pre-skip in the dispatcher (not the worker) so symbols
+		// that are already done don't even consume a goroutine —
+		// for catchup waves where 47/50 are already in DB, this
+		// keeps goroutine churn O(missing) not O(total).
+		if alreadyDone != nil && alreadyDone(ctx, sym) {
+			continue
+		}
+
+		wg.Add(1)
+		go func(sym string) {
+			defer wg.Done()
+			// Bounded fan-out: block until a worker slot frees,
+			// or bail if ctx died while we were queued. The
+			// extra goroutine that fails to acquire a slot is
+			// cheap (Go's scheduler isn't stressed by a few
+			// dozen waiting Gs).
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			if err := score(ctx, sym); err != nil {
+				if onFail != nil {
+					onFail(sym, err)
+				}
+				return
+			}
+			atomic.AddInt32(&written, 1)
+		}(sym)
+	}
+	wg.Wait()
+	return int(written)
 }
 
 // waveCostSummary is what summarizeWaveCost returns. Plain struct
@@ -578,39 +762,92 @@ func nextScheduledInstant(tag string, now time.Time) (time.Time, bool) {
 			loc = time.UTC
 		}
 		nowLocal := now.In(loc)
-		today := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 16, 30, 0, 0, loc)
-		// Day-roll: if "now" is already past today's close, the
-		// "next" instant is TOMORROW's close, not today's. Without
-		// this guard the function returns a past timestamp and the
-		// scheduler relies on lastRunByWatchlist as the only gate
-		// against double-firing — a fragile two-level dependency.
-		if !today.After(now) {
-			today = today.AddDate(0, 0, 1)
-		}
-		return today.UTC(), true
+		// Return TODAY's instant unconditionally. The caller does
+		// `if now.Before(scheduledAt) { continue }`, so a past
+		// timestamp is the correct signal "fire now". Day-roll
+		// duty belongs to lastRunByWatchlist + sameUTCDate — see
+		// the doc comment above. Rolling forward here regresses
+		// to a 0-second firing window (the bug that silenced auto
+		// waves on 6/9/2026 and motivates this rewrite).
+		return time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 16, 30, 0, 0, loc).UTC(), true
 	case "@daily_after_cn_close":
 		loc, err := time.LoadLocation("Asia/Shanghai")
 		if err != nil {
 			loc = time.UTC
 		}
 		nowLocal := now.In(loc)
-		today := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 15, 30, 0, 0, loc)
-		// Same day-roll as @daily_after_us_close above.
-		if !today.After(now) {
-			today = today.AddDate(0, 0, 1)
-		}
-		return today.UTC(), true
+		// Same rationale as @daily_after_us_close: no day-roll.
+		return time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 15, 30, 0, 0, loc).UTC(), true
 	default:
 		return time.Time{}, false
 	}
 }
 
 // sameUTCDate reports whether a and b fall on the same UTC calendar
-// day. Used by the "already ran today" gate.
+// day. Kept as a pure helper for callers that genuinely need a
+// UTC-date comparison; the loop's "already ran today" gate is now
+// shouldFireWave below — sameUTCDate is no longer the right answer
+// there, see the doc on shouldFireWave for why.
 func sameUTCDate(a, b time.Time) bool {
 	au := a.UTC()
 	bu := b.UTC()
 	return au.Year() == bu.Year() && au.Month() == bu.Month() && au.Day() == bu.Day()
+}
+
+// shouldFireWave is the pure gate function deciding whether a tick
+// at instant `now` should run a watchlist whose scheduled-fire
+// instant for the current cycle is `scheduledAt` and whose most
+// recent successful run (if any) is `lastRun` / `hasLastRun`.
+//
+// Contract:
+//
+//	now < scheduledAt              → false (too early)
+//	hasLastRun && lastRun >=       → false (already fired this cycle)
+//	   scheduledAt
+//	otherwise                       → true  (fire)
+//
+// Why the lastRun gate compares against scheduledAt and NOT against
+// `now`'s UTC calendar date:
+//
+//   - The schedule lives in a LOCAL clock (16:30 ET for US,
+//     15:30 CST for CN). Each scheduled instant is naturally
+//     identified by its local-date 16:30 timestamp converted to
+//     UTC. Two distinct scheduled instants are always at least
+//     ~24 h apart (modulo DST, which adds at most ±1 h).
+//
+//   - "lastRun.Before(scheduledAt)" therefore answers exactly the
+//     question we want: "have we already executed for THIS
+//     scheduled instant or a later one?". Stale lastRun values
+//     from earlier scheduled cycles are correctly treated as
+//     "yes, fire", because they fall before today's scheduledAt.
+//
+//   - Comparing UTC calendar dates instead (the previous
+//     implementation, sameUTCDate(lastRun, now)) wrongly skipped
+//     today's fire whenever lastRun and the firing instant fell
+//     on the same UTC date. For a 16:30 ET schedule, that
+//     happens routinely:
+//
+//       boot tick at 11:15 BJT (= 03:15 UTC) on day D fires the
+//       wave for the previous schedule and sets lastRun = D 03:15
+//       UTC. Today's intended fire at 04:30 BJT day D+1 (= D 20:30
+//       UTC) is on the SAME UTC date as lastRun → silently
+//       skipped. Earliest unblock is D+1 00:00 UTC (= 08:00 BJT
+//       day D+1), 3 h 30 min after the schedule's actual time.
+//
+//     Observable symptom: "schedule says 04:30 BJT but the
+//     conservative wave only completes mid-morning". 6/11/2026
+//     production incident.
+//
+//   - Pure function (no l.clock(), no slog) so the test below
+//     can pin every input and prove the regression cannot return.
+func shouldFireWave(now, scheduledAt, lastRun time.Time, hasLastRun bool) bool {
+	if now.Before(scheduledAt) {
+		return false
+	}
+	if hasLastRun && !lastRun.Before(scheduledAt) {
+		return false
+	}
+	return true
 }
 
 // ensure errors import doesn't go unused if scoreOne ever returns

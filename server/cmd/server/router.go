@@ -26,6 +26,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -302,6 +303,20 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		trendingOHLC := buildOHLCFetcherFromEnv()
 		trendingH := newTrendingHandler(trendingOHLC, svc.DailyPicksRepo)
 		mux.HandleFunc("GET /api/trending/most-active", trendingH.handleMostActive)
+		// Background pre-warmer — eliminates the 15-30 s cold-path
+		// the user previously saw when navigating to /trending/
+		// most-active for the first time after boot or after the
+		// in-process cache TTL (15 min) expired. Warms once
+		// immediately, then every trendingWarmInterval (14 min).
+		// nil-safe: the RunWarmer body short-circuits when no
+		// OHLC fetcher is wired (degraded deploy).
+		//
+		// We hand context.Background() because the HTTP server's
+		// graceful-shutdown path tears the whole process down; we
+		// don't have a per-router cancel scope and a stuck warmer
+		// goroutine on shutdown is harmless (it's reading from an
+		// already-closed connection pool at that point).
+		go trendingH.RunWarmer(context.Background())
 	}
 
 	// /api/papertrading/public/* — SEC Publisher's-Exclusion

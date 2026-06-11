@@ -38,11 +38,14 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/fundai/server/internal/dailypicks"
 	"github.com/fundai/server/internal/indicator"
@@ -55,11 +58,46 @@ import (
 // has already refreshed.
 const trendingMostActiveTTL = 15 * time.Minute
 
+// trendingWarmInterval is the background-refresh cadence. We pick
+// it just under trendingMostActiveTTL so the cache never expires
+// between two scheduled warms — every user request that arrives
+// after the first warm hits a warm cache and returns in <5 ms,
+// instead of paying the 15-30 s cold-path fan-out cost.
+const trendingWarmInterval = 14 * time.Minute
+
 // trendingMostActiveCap is the upper bound on the universe size
 // the handler will fan out OHLC requests for. Protects the
 // Yahoo upstream from a runaway watchlist that the ops team
 // accidentally seeds with 5000 symbols.
 const trendingMostActiveCap = 200
+
+// trendingFetchConcurrency is the worker-pool size for the per-symbol
+// OHLC fan-out. The previous handler walked the universe sequentially
+// (loop body: fetchBars → 6 s timeout each), which made a cold cache
+// take 15-30 s for a 50-symbol universe — long enough that the user's
+// browser tab visibly hung on "Loading…". A worker pool of 10
+// drops the wall-clock cost to roughly
+//   ceil(universe / 10) × avg-symbol-latency
+// without overwhelming the Yahoo upstream (Yahoo's v8 chart endpoint
+// is documented to be soft-rate-limited at low double-digit RPS per
+// origin, so 10 concurrent is conservative). The Cache layer
+// (server/internal/ohlc/registry.go) is already concurrency-safe.
+const trendingFetchConcurrency = 10
+
+// trendingWarmTimeout caps a single warm-cycle compute. Big enough
+// to absorb a slow upstream tail (Yahoo occasionally takes 4-6 s on
+// a cold connection) without letting a wedged provider hold the
+// warmer goroutine forever and starve later cycles.
+const trendingWarmTimeout = 45 * time.Second
+
+// trendingWatchlistLister is the subset of *dailypicks.Repo this
+// handler needs. Extracted as an interface so tests can inject an
+// in-memory stub without standing up a real PostgreSQL instance.
+// *dailypicks.Repo satisfies it implicitly; production wiring in
+// router.go is unchanged.
+type trendingWatchlistLister interface {
+	ListActiveWatchlists(ctx context.Context) ([]dailypicks.Watchlist, error)
+}
 
 // trendingHandler bundles the /api/trending endpoints.
 //
@@ -72,11 +110,20 @@ const trendingMostActiveCap = 200
 //     graceful degradation.
 type trendingHandler struct {
 	ohlc  ohlc.Fetcher
-	picks *dailypicks.Repo
+	picks trendingWatchlistLister
 	clock func() time.Time
 
 	mu    sync.Mutex
 	cache map[string]trendingCacheEntry // key: market
+
+	// sf coalesces concurrent cold-path compute requests for the
+	// same market into a single fan-out. Without it, N parallel
+	// users arriving at the same cache-miss instant would each
+	// fire 50 OHLC requests — multiplying our upstream pressure
+	// and our wall-clock latency by N. With singleflight the
+	// extra arrivals just await the in-flight compute and share
+	// its result.
+	sf singleflight.Group
 }
 
 type trendingCacheEntry struct {
@@ -84,7 +131,7 @@ type trendingCacheEntry struct {
 	value trendingMostActiveResponse
 }
 
-func newTrendingHandler(of ohlc.Fetcher, picks *dailypicks.Repo) *trendingHandler {
+func newTrendingHandler(of ohlc.Fetcher, picks trendingWatchlistLister) *trendingHandler {
 	return &trendingHandler{
 		ohlc:  of,
 		picks: picks,
@@ -139,38 +186,99 @@ func criteriaDisclosedMostActive() []string {
 const trendingMostActiveDisclaimer = "This list is algorithmic market data. It is NOT an investment recommendation. The ranking is identical for all readers and based on publicly disclosed objective criteria. Past performance is not indicative of future results. Consult a licensed financial advisor before making any investment decision."
 
 // handleMostActive serves GET /api/trending/most-active.
+//
+// All heavy lifting (cache check, compute fan-out, store) lives in
+// getOrCompute so the warmer goroutine and the request handler
+// share the exact same caching + dedup semantics. This handler
+// is now reduced to "parse, delegate, project, write" — no cache
+// state machine to keep in sync between two code paths.
 func (h *trendingHandler) handleMostActive(w http.ResponseWriter, r *http.Request) {
 	market := strings.TrimSpace(r.URL.Query().Get("market"))
 	if market == "" {
 		market = "us_equity"
 	}
-	// Cache lookup — bucket key is just the market. We
-	// deliberately don't include the limit in the cache key so
-	// a `?limit=10` request hits the same compute as `?limit=50`;
-	// the projection happens AFTER the cache fetch.
-	now := h.clock()
-	h.mu.Lock()
-	if entry, ok := h.cache[market]; ok && now.Sub(entry.at) < trendingMostActiveTTL {
-		cached := entry.value
-		h.mu.Unlock()
-		writeJSON(w, http.StatusOK, projectTrending(cached, r.URL.Query().Get("limit")))
-		return
-	}
-	h.mu.Unlock()
-
-	resp := h.computeMostActive(r.Context(), market)
-
-	h.mu.Lock()
-	h.cache[market] = trendingCacheEntry{at: now, value: resp}
-	h.mu.Unlock()
-
+	resp := h.getOrCompute(r.Context(), market)
 	writeJSON(w, http.StatusOK, projectTrending(resp, r.URL.Query().Get("limit")))
 }
 
+// getOrCompute is the single source of truth for the cache-aside
+// + singleflight read path. Both the user-facing HTTP handler and
+// the background warmer call this; that way:
+//
+//  1. The warmer pre-fills the same cache the handler reads from,
+//     so a user navigating to /trending/most-active after boot
+//     never pays the cold-path latency (15-30 s with 50 symbols).
+//  2. If N requests miss the cache at the same instant (e.g.
+//     immediately post-warm-expiry), singleflight collapses them
+//     into ONE compute and ONE upstream OHLC fan-out, instead of
+//     N × 50 = 500+ upstream calls.
+//  3. We don't include the ?limit param in the cache key. We
+//     always cache the FULL list and trim per-request in
+//     projectTrending. That keeps the cache key cardinality at
+//     O(markets) instead of O(markets × distinct-limits).
+func (h *trendingHandler) getOrCompute(ctx context.Context, market string) trendingMostActiveResponse {
+	if cached, ok := h.cacheLookup(market); ok {
+		return cached
+	}
+
+	// singleflight key is just the market — concurrent misses
+	// for the same market share one fan-out; misses for
+	// different markets proceed independently.
+	v, _, _ := h.sf.Do(market, func() (any, error) {
+		// Double-check the cache inside the singleflight callback:
+		// while we were waiting for sf to grant us the slot,
+		// another goroutine may have already populated it.
+		if cached, ok := h.cacheLookup(market); ok {
+			return cached, nil
+		}
+		resp := h.computeMostActive(ctx, market)
+		h.cacheStore(market, resp)
+		return resp, nil
+	})
+	if v == nil {
+		// Defensive fallback — singleflight callback returned
+		// nil interface (shouldn't happen with the explicit
+		// return above, but keep the type assertion total).
+		return trendingMostActiveResponse{
+			ListName:          "Most Active by Volume",
+			CriteriaDisclosed: criteriaDisclosedMostActive(),
+			Market:            market,
+			GeneratedAt:       h.clock().UTC().Format(time.RFC3339),
+			Disclaimer:        trendingMostActiveDisclaimer,
+		}
+	}
+	return v.(trendingMostActiveResponse)
+}
+
+func (h *trendingHandler) cacheLookup(market string) (trendingMostActiveResponse, bool) {
+	now := h.clock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if entry, ok := h.cache[market]; ok && now.Sub(entry.at) < trendingMostActiveTTL {
+		return entry.value, true
+	}
+	return trendingMostActiveResponse{}, false
+}
+
+func (h *trendingHandler) cacheStore(market string, value trendingMostActiveResponse) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cache[market] = trendingCacheEntry{at: h.clock(), value: value}
+}
+
 // computeMostActive is the cold-path producer. Walks the watchlist
-// universe, fetches OHLC for each, computes the relative-volume
-// metric, sorts descending. The OHLC fetcher's own cache absorbs
-// the second call within the TTL bucket.
+// universe, fans out OHLC fetches in PARALLEL (bounded by
+// trendingFetchConcurrency), computes the relative-volume metric,
+// sorts descending.
+//
+// Parallel fan-out is the bug fix for the "first hit shows Loading
+// forever; refresh shows data" UX issue. Sequential fetch with a
+// 6 s per-symbol timeout took 15-30 s on a cold cache for a
+// 50-symbol universe. Parallel fetch with 10 workers compresses
+// the same work into roughly ceil(50/10) × avg-symbol-latency =
+// 5 × ~1 s ≈ 5 s, which keeps the user inside a tolerable
+// "loading" budget even when they manage to slip in before the
+// warmer's first run.
 //
 // Errors per symbol are SWALLOWED (logged at debug) — one
 // delisted ticker or Yahoo 404 must not poison the entire list.
@@ -188,17 +296,46 @@ func (h *trendingHandler) computeMostActive(ctx context.Context, market string) 
 		return resp
 	}
 
+	// Parallel fan-out — preserves universe order in `fetched`
+	// so the eventual ranking is deterministic for symbols that
+	// tie on Vol20DRatio (Yahoo / Stock Rover order-stability
+	// matters for the screenshot-diff regression tests).
+	type fetched struct {
+		ok   bool
+		bars []ohlc.Bar
+	}
+	results := make([]fetched, len(universe))
+	sem := make(chan struct{}, trendingFetchConcurrency)
+	var wg sync.WaitGroup
+	for i, sym := range universe {
+		wg.Add(1)
+		go func(i int, sym string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			bars, err := h.fetchBars(ctx, sym, market)
+			if err != nil || len(bars) < 21 { // need >= 20 prior bars + current
+				return
+			}
+			results[i] = fetched{ok: true, bars: bars}
+		}(i, sym)
+	}
+	wg.Wait()
+
 	type scored struct {
 		row trendingMostActiveRow
 	}
 	rows := make([]scored, 0, len(universe))
-	// Per-symbol context bounded by a tight ceiling so a single
-	// stuck upstream call can't gum up the whole compute.
-	for _, sym := range universe {
-		bars, err := h.fetchBars(ctx, sym, market)
-		if err != nil || len(bars) < 21 { // need >= 20 prior bars + current
+	for i, sym := range universe {
+		r := results[i]
+		if !r.ok {
 			continue
 		}
+		bars := r.bars
 		latest := bars[len(bars)-1]
 		if latest.Volume <= 0 {
 			continue
@@ -212,8 +349,8 @@ func (h *trendingHandler) computeMostActive(ctx context.Context, market string) 
 			start = 0
 		}
 		count := 0
-		for i := start; i < len(bars)-1; i++ {
-			sum += bars[i].Volume
+		for j := start; j < len(bars)-1; j++ {
+			sum += bars[j].Volume
 			count++
 		}
 		if count == 0 || sum == 0 {
@@ -260,6 +397,74 @@ func (h *trendingHandler) computeMostActive(ctx context.Context, market string) 
 	// dead.
 	_ = indicator.MinBarsForFullSnapshot
 	return resp
+}
+
+// trendingWarmMarkets is the static list of markets the warmer
+// pre-populates. The frontend's MARKETS selector currently only
+// exposes "us_equity"; adding a new market here costs nothing
+// for the warmer (one extra ~5 s compute per cycle) and instantly
+// makes the new tab feel instant for users instead of
+// "page-loads-for-20-seconds-then-works".
+func trendingWarmMarkets() []string {
+	return []string{"us_equity"}
+}
+
+// RunWarmer is the long-running background goroutine that keeps
+// the most-active cache warm. It does an immediate first warm
+// (so the cache is hot within seconds of boot, not 14 min later)
+// then refreshes on every tick.
+//
+// The function returns when ctx is cancelled. Caller is
+// responsible for `go trendingH.RunWarmer(appCtx)` somewhere in
+// the boot path; we don't self-spawn because we want the caller
+// to own goroutine lifecycle.
+func (h *trendingHandler) RunWarmer(ctx context.Context) {
+	if h == nil || h.ohlc == nil {
+		// Degraded deploy — no OHLC fetcher means there's
+		// nothing to warm. handleMostActive will still return
+		// an empty results list with the criteria disclosure.
+		slog.Info("trending warmer skipped (no OHLC fetcher wired)")
+		return
+	}
+	markets := trendingWarmMarkets()
+	h.warmAll(ctx, markets)
+
+	ticker := time.NewTicker(trendingWarmInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.warmAll(ctx, markets)
+		}
+	}
+}
+
+// warmAll fires getOrCompute for every market in `markets`,
+// bounded by trendingWarmTimeout per market. Serial across
+// markets so a slow upstream for market A doesn't multiply our
+// upstream pressure when market B's worker pool also kicks in
+// — daily-picks loops also share the same OHLC fetcher and we
+// want to leave them headroom.
+func (h *trendingHandler) warmAll(ctx context.Context, markets []string) {
+	for _, m := range markets {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		wctx, cancel := context.WithTimeout(ctx, trendingWarmTimeout)
+		start := h.clock()
+		resp := h.getOrCompute(wctx, m)
+		cancel()
+		slog.Info("trending warmer cycle",
+			"market", m,
+			"universe", resp.UniverseSize,
+			"rows", len(resp.Results),
+			"elapsed_ms", h.clock().Sub(start).Milliseconds(),
+		)
+	}
 }
 
 // fetchBars is a thin wrapper over h.ohlc.Fetch with the
