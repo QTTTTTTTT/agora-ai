@@ -721,11 +721,11 @@ func loadUserByEmailIncludingInactive(ctx context.Context, db *sql.DB, email str
 	}
 	var user authenticatedUser
 	err := db.QueryRowContext(ctx, `
-		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic')
+		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic'), COALESCE(preferred_language, 'zh-CN')
 		FROM users
 		WHERE LOWER(email) = LOWER($1)
 		LIMIT 1
-	`, email).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel)
+	`, email).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel, &user.PreferredLanguage)
 	if err != nil {
 		return nil, err
 	}

@@ -8,11 +8,12 @@ import {
   useRouteError,
   isRouteErrorResponse,
 } from "react-router-dom";
-import AuthGate, { AdminGate } from "./components/AuthGate";
+import AuthGate, { AdminGate, RequireRole } from "./components/AuthGate";
 import AgentTeamGate from "./components/AgentTeamGate";
 import FundLayout from "./components/FundLayout";
 import PreferenceDock from "./components/PreferenceDock";
 import SessionExpiryWatcher from "./components/SessionExpiryWatcher";
+import SupportContactButton from "./components/SupportContactButton";
 import RouteFallback from "./components/RouteFallback";
 import CommandPalette from "./components/CommandPalette";
 import AnnouncementCenter from "./components/AnnouncementCenter";
@@ -85,6 +86,10 @@ const DailyPicks = lazyWithRetry(() => import("./pages/DailyPicks"));
 const MastersHub = lazyWithRetry(() => import("./pages/MastersHub"));
 const TrendingMostActive = lazyWithRetry(() => import("./pages/TrendingMostActive"));
 const SettingsByok = lazyWithRetry(() => import("./pages/SettingsByok"));
+// /admin/users — read-only admin user management console.
+// Server-gated by adminHandler.requireAdmin (role IN admin/super_admin)
+// + client-gated by <AdminGate> for the redirect-on-mismatch UX.
+const AdminUsers = lazyWithRetry(() => import("./pages/AdminUsers"));
 
 interface ErrorBoundaryCopy {
   unexpectedError: string;
@@ -370,6 +375,7 @@ const AppRoutes: React.FC = () => {
           it renders nothing. */}
       <AnnouncementCenter />
       <PreferenceDock />
+      <SupportContactButton />
       {/* Single global listener for `fundai:session-expired` events
           dispatched from api.ts whenever a request hits a 401. Lives
           inside <BrowserRouter> so it can call useNavigate. See
@@ -422,6 +428,16 @@ const AppRoutes: React.FC = () => {
             <Route path="/marketplace" element={<AuthGate><Marketplace /></AuthGate>} />
             <Route path="/auctions" element={<AuthGate><Auctions /></AuthGate>} />
             <Route path="/admin" element={<AuthGate><AdminGate><Admin /></AdminGate></AuthGate>} />
+            <Route
+              path="/admin/users"
+              element={
+                <AuthGate>
+                  <RequireRole roles={["admin", "super_admin"]}>
+                    <AdminUsers />
+                  </RequireRole>
+                </AuthGate>
+              }
+            />
             <Route path="/admin/skills/inbox" element={<AuthGate><AdminGate><SkillInbox /></AdminGate></AuthGate>} />
             <Route
               path="/funds/:fundId"

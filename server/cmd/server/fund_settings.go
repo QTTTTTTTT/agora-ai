@@ -7,6 +7,7 @@
 // Routes
 //
 //   POST /api/funds/{fundId}/settings/base-currency
+//   POST /api/funds/{fundId}/settings/preferred-language
 //
 // AuthZ
 //
@@ -34,6 +35,7 @@ import (
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/audit"
 	"github.com/fundai/server/internal/fx"
+	"github.com/fundai/server/internal/i18nmsg"
 	"github.com/fundai/server/internal/repository"
 )
 
@@ -59,6 +61,7 @@ func (h *fundSettingsHandler) RegisterRoutes(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("POST /api/funds/{fundId}/settings/base-currency", h.handleSetBaseCurrency)
+	mux.HandleFunc("POST /api/funds/{fundId}/settings/preferred-language", h.handleSetPreferredLanguage)
 }
 
 type setBaseCurrencyRequest struct {
@@ -123,4 +126,83 @@ func (h *fundSettingsHandler) handleSetBaseCurrency(w http.ResponseWriter, r *ht
 		})
 	}
 	writeOrderActionJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// setPreferredLanguageRequest accepts an empty string (or null) to clear
+// the per-fund override and inherit the owner's preference.
+type setPreferredLanguageRequest struct {
+	PreferredLanguage *string `json:"preferred_language"`
+}
+
+// handleSetPreferredLanguage persists a per-fund language override. The
+// loop locale resolver (loop_locale.go) reads this value via
+// FundRepo.GetPreferredLanguage so background jobs (A/B shadow learning,
+// agent self-learning, daily picks, ...) generate lessons / verdicts /
+// reasoning in the language the fund's audience reads.
+func (h *fundSettingsHandler) handleSetPreferredLanguage(w http.ResponseWriter, r *http.Request) {
+	userID, ok := api.AuthenticatedUserID(r)
+	if !ok || strings.TrimSpace(userID) == "" {
+		writeOrderActionJSON(w, http.StatusUnauthorized, errorPayload("unauthorized", "missing token"))
+		return
+	}
+	fundID := strings.TrimSpace(r.PathValue("fundId"))
+	if fundID == "" {
+		writeOrderActionJSON(w, http.StatusBadRequest, errorPayload("invalid_path", "fundId required"))
+		return
+	}
+	ctx := r.Context()
+	if _, err := authorizeFundAccess(ctx, h.fundRepo, h.companyRepo, userID, fundID); err != nil {
+		writeOrderActionFromAuthError(w, err)
+		return
+	}
+	var req setPreferredLanguageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeOrderActionJSON(w, http.StatusBadRequest, errorPayload("invalid_body", err.Error()))
+		return
+	}
+	// nil pointer or trimmed empty string => clear override.
+	var lang string
+	if req.PreferredLanguage != nil {
+		lang = strings.TrimSpace(*req.PreferredLanguage)
+	}
+	if lang != "" {
+		// Reject anything outside the canonical set so a typo can't
+		// surface as "!!MISSING:" in production.
+		normalised := i18nmsg.Normalize(lang)
+		if !(normalised == i18nmsg.LocaleZH || normalised == i18nmsg.LocaleEN) ||
+			(lang != string(i18nmsg.LocaleZH) && lang != string(i18nmsg.LocaleEN)) {
+			writeOrderActionJSON(w, http.StatusBadRequest,
+				errorPayload("invalid_language", "preferred_language must be zh-CN, en-US, or empty"))
+			return
+		}
+		lang = string(normalised)
+	}
+	prev, err := h.fundRepo.GetPreferredLanguage(ctx, fundID)
+	if err != nil {
+		// Soft-fail for the audit "before" snapshot; the UPDATE below
+		// is the source of truth.
+		prev = ""
+	}
+	if err := h.fundRepo.SetPreferredLanguage(ctx, fundID, lang); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			writeOrderActionJSON(w, http.StatusNotFound, errorPayload("fund_not_found", err.Error()))
+			return
+		}
+		writeOrderActionJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+	if h.auditLogger != nil {
+		_ = h.auditLogger.LogMutation(ctx, audit.MutationEvent{
+			ActorUserID: userID,
+			Action:      "fund.preferred_language.update",
+			TargetType:  "fund",
+			TargetID:    fundID,
+			Before:      map[string]any{"preferred_language": prev},
+			After:       map[string]any{"preferred_language": lang},
+		})
+	}
+	writeOrderActionJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"preferred_language": lang,
+	})
 }

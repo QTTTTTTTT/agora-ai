@@ -25,6 +25,7 @@ import (
 
 	"github.com/fundai/server/internal/agent"
 	"github.com/fundai/server/internal/compliance"
+	"github.com/fundai/server/internal/i18nmsg"
 )
 
 // jsonMarshal exists as a one-line wrapper so we can swap encoding
@@ -37,6 +38,16 @@ func jsonMarshal(v interface{}) ([]byte, error) { return json.Marshal(v) }
 // panel builder (master / tactic) hasn't been injected yet. Maps
 // to HTTP 503 in the handler.
 var ErrNotReady = errors.New("advisor: consult service not ready")
+
+// ErrPresetLocaleBlocked is returned when an en-US user explicitly
+// requests a preset whose TacticKeys reference the cn_tactics
+// persona library (which is hand-authored in Chinese). Maps to HTTP
+// 400 with i18nmsg.KeyAdvisorPresetLocaleBlocked as the user-facing
+// detail. We don't silently filter such presets when the user asked
+// for them by name — that would be a confusing "your selection
+// disappeared" UX. The handler can then fall back to the master-
+// only Daily Stock Watch flow.
+var ErrPresetLocaleBlocked = errors.New("advisor: preset unavailable for current locale")
 
 // ErrUnsupportedPreset is returned when the preset's agent
 // population requires a panel kind that hasn't been wired (e.g.
@@ -473,6 +484,17 @@ func (s *Service) runPanels(ctx context.Context, userID string, req ConsultReque
 	}
 
 	masterKeys, tacticKeys := s.resolveKeys(preset, req)
+
+	// Locale guard: cn_tactics persona JSON is hand-authored in
+	// Chinese (philosophy / red_lines / qualitative_filters fields).
+	// Even with the tactic_agent prompt switched to English, those
+	// fields ride into the LLM context as raw zh, and the model
+	// reliably echoes them. For en-US users we therefore block the
+	// preset entirely. The user gets a clean 400 with a localised
+	// message rather than a half-translated panel.
+	if len(tacticKeys) > 0 && i18nmsg.FromCtx(ctx) == i18nmsg.LocaleEN {
+		return nil, ErrPresetLocaleBlocked
+	}
 
 	asOf := s.clock()
 	mIn := agent.MasterInput{

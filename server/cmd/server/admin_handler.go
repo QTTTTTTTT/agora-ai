@@ -467,6 +467,10 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/admin/overview", h.handleOverview)
 	mux.HandleFunc("GET /api/admin/platform-settings", h.handleGetPlatformSettings)
 	mux.HandleFunc("PUT /api/admin/platform-settings", h.handleUpdatePlatformSettings)
+	// Floating support-contact button (Discord URL + QR image
+	// + enable/disable). Public GET lives in router.go below;
+	// this admin PUT is super_admin gated by the handler itself.
+	mux.HandleFunc("PUT /api/admin/support-contact", h.handleUpdateSupportContact)
 	mux.HandleFunc("POST /api/admin/wallets/recharge", h.handleRechargeWallet)
 	mux.HandleFunc("GET /api/admin/kyc-applications", h.handleListKYCApplications)
 	mux.HandleFunc("POST /api/admin/kyc-applications/{id}/decision", h.handleDecideKYCApplication)
@@ -535,6 +539,10 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerFeatureFlagAdminRoutes(mux)
 	h.registerAnnouncementAdminRoutes(mux)
 	h.registerUserRoleAdminRoutes(mux)
+	// Read-only user management console — list, stats, detail.
+	// Mutations (role / tier / status) continue to live on the
+	// existing endpoints, so this surface stays auditably narrow.
+	h.registerUsersAdminRoutes(mux)
 	// Phase 3 — CN-A market structure provider probe + health.
 	h.registerCNMarketStructureAdminRoutes(mux)
 }

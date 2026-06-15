@@ -1,0 +1,581 @@
+// master_backtest.go — Master-team factor backtest for the
+// /papertrading page.
+//
+// This file is intentionally self-contained (no internal/backtest
+// dependency) because the platform's full backtest.Runner is
+// fundId-scoped and tied to the live decision pipeline. The
+// /papertrading surface is admin-public and only needs a
+// deterministic monthly-rebalanced buy-and-hold equivalent for
+// the 10-master ensemble — light enough to run on demand inside
+// a single HTTP request, no jobstore needed.
+//
+// Strategy口径 (signed off with operator on 2026-06-14):
+//
+//   - 10 representative tickers, each anchored to one of the
+//     master personas under server/internal/agent/masters/. The
+//     mapping is the canonical "this company is the textbook
+//     example of the master's style" choice — Buffett→BRK-B,
+//     Munger→COST, Graham→JNJ, Lynch→MCD, Marks→V, Greenblatt→
+//     JPM, O'Neil→NVDA, Wood→TSLA, Dalio→GLD, Druckenmiller→QQQ.
+//   - Equal-weight rebalanced on the first trading day of every
+//     calendar month. No leverage, no shorting, no slippage
+//     beyond a fixed 5 bps round-trip to keep the curve honest.
+//   - Benchmarks (SPY, QQQ) priced through the same ohlc.Fetcher
+//     so the comparison is apples-to-apples.
+//
+// Output is a single MasterBacktestResult: per-day NAV curve,
+// per-benchmark NAV curve, plus the headline metrics
+// (cumulative / annualised return, Sharpe, max drawdown).
+package papertrading
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/fundai/server/internal/ohlc"
+)
+
+// MasterTeamUniverse is the canonical 10-ticker mapping from the
+// master persona ids (see internal/agent/masters/*.json) to a
+// representative US-equity / ETF anchor. Order is stable so the
+// equal-weight allocation is deterministic.
+var MasterTeamUniverse = []MasterAnchor{
+	{Master: "buffett", Symbol: "BRK-B", Style: "Quality value"},
+	{Master: "munger", Symbol: "COST", Style: "Quality compounder"},
+	{Master: "graham", Symbol: "JNJ", Style: "Defensive value"},
+	{Master: "lynch", Symbol: "MCD", Style: "Reasonable growth"},
+	{Master: "marks", Symbol: "V", Style: "Cycle-aware quality"},
+	{Master: "greenblatt", Symbol: "JPM", Style: "Magic-formula value"},
+	{Master: "oneil", Symbol: "NVDA", Style: "CANSLIM momentum"},
+	{Master: "wood", Symbol: "TSLA", Style: "Disruptive growth"},
+	{Master: "dalio", Symbol: "GLD", Style: "All-weather diversifier"},
+	{Master: "druckenmiller", Symbol: "QQQ", Style: "Macro tech tilt"},
+}
+
+// MasterAnchor pairs one persona id with the ticker that
+// embodies the persona's style for backtest purposes.
+type MasterAnchor struct {
+	Master string `json:"master"`
+	Symbol string `json:"symbol"`
+	Style  string `json:"style"`
+}
+
+// MasterBacktestRequest names the window and benchmark set.
+// Defaults: Start=2015-01-01, End=now, Benchmarks=[SPY, QQQ],
+// InitialCapital=$100,000.
+type MasterBacktestRequest struct {
+	Start          time.Time
+	End            time.Time
+	Benchmarks     []string
+	InitialCapital float64
+}
+
+// MasterBacktestResult is what the HTTP handler returns. NAV is
+// in InitialCapital units (typically USD); Pct is cumulative
+// return relative to day 0 (0.18 = +18%).
+type MasterBacktestResult struct {
+	Strategy       string                 `json:"strategy"`
+	Start          time.Time              `json:"start"`
+	End            time.Time              `json:"end"`
+	InitialCapital float64                `json:"initialCapital"`
+	FinalNav       float64                `json:"finalNav"`
+	Universe       []MasterAnchor         `json:"universe"`
+	NavCurve       []MasterCurvePoint     `json:"navCurve"`
+	Benchmarks     []MasterBenchmarkCurve `json:"benchmarks"`
+	Metrics        MasterBacktestMetrics  `json:"metrics"`
+	GeneratedAt    time.Time              `json:"generatedAt"`
+}
+
+// MasterCurvePoint is one day on the strategy NAV curve.
+type MasterCurvePoint struct {
+	Date time.Time `json:"date"`
+	Nav  float64   `json:"nav"`
+	Pct  float64   `json:"pct"`
+}
+
+// MasterBenchmarkCurve aligns one index's NAV curve to the
+// strategy's trading-day calendar.
+type MasterBenchmarkCurve struct {
+	Symbol           string             `json:"symbol"`
+	Curve            []MasterCurvePoint `json:"curve"`
+	CumulativeReturn float64            `json:"cumulativeReturn"`
+}
+
+// MasterBacktestMetrics is the headline summary card. All
+// returns are fractions (0.18 = +18%); MaxDrawdown is negative.
+type MasterBacktestMetrics struct {
+	CumulativeReturn float64 `json:"cumulativeReturn"`
+	AnnualizedReturn float64 `json:"annualizedReturn"`
+	Volatility       float64 `json:"volatility"`
+	SharpeRatio      float64 `json:"sharpeRatio"`
+	MaxDrawdown      float64 `json:"maxDrawdown"`
+	WinRate          float64 `json:"winRate"`
+}
+
+// MasterBacktestRunner is the on-demand executor. It holds an
+// ohlc.Fetcher reference and a small in-process cache so repeated
+// calls inside the daily TTL window don't refetch ~16 tickers.
+type MasterBacktestRunner struct {
+	fetcher ohlc.Fetcher
+	now     func() time.Time
+
+	cacheTTL time.Duration
+	mu       sync.Mutex
+	cached   map[string]*cachedMaster
+}
+
+type cachedMaster struct {
+	at     time.Time
+	result *MasterBacktestResult
+}
+
+// NewMasterBacktestRunner constructs the runner. nil fetcher is
+// safe — Run will return an error so the HTTP handler can
+// degrade to 503.
+func NewMasterBacktestRunner(fetcher ohlc.Fetcher, now func() time.Time) *MasterBacktestRunner {
+	if now == nil {
+		now = time.Now
+	}
+	return &MasterBacktestRunner{
+		fetcher:  fetcher,
+		now:      now,
+		cacheTTL: 6 * time.Hour,
+		cached:   make(map[string]*cachedMaster),
+	}
+}
+
+// Run executes the backtest.
+func (r *MasterBacktestRunner) Run(ctx context.Context, req MasterBacktestRequest) (*MasterBacktestResult, error) {
+	if r == nil || r.fetcher == nil {
+		return nil, fmt.Errorf("papertrading: master backtest runner has no ohlc fetcher")
+	}
+	req = applyMasterDefaults(req, r.now())
+	if !req.End.After(req.Start) {
+		return nil, fmt.Errorf("papertrading: backtest end must be after start")
+	}
+
+	cacheKey := masterCacheKey(req)
+	if cached := r.lookup(cacheKey); cached != nil {
+		return cached, nil
+	}
+
+	// Pre-fetch full history per universe symbol + per benchmark
+	// in one go. Yahoo has no batch endpoint so we just iterate;
+	// the cache wrapper makes repeat calls free.
+	universe := make([]string, 0, len(MasterTeamUniverse))
+	for _, a := range MasterTeamUniverse {
+		universe = append(universe, a.Symbol)
+	}
+	allSymbols := append(append([]string{}, universe...), req.Benchmarks...)
+	bars := r.fetchAllSymbols(ctx, allSymbols, req)
+	// Drop empty rows so the equal-weight loop doesn't divide by
+	// stale anchors.
+	for sym, list := range bars {
+		if len(list) < 2 {
+			delete(bars, sym)
+		}
+	}
+	if len(bars) == 0 {
+		return nil, fmt.Errorf("papertrading: no OHLC data returned for any master / benchmark symbol")
+	}
+
+	tradingDays := uniqueDays(bars, req.Start, req.End)
+	if len(tradingDays) < 2 {
+		return nil, fmt.Errorf("papertrading: not enough trading days in window")
+	}
+
+	// Build per-day close map: day → symbol → close, with
+	// last-observation-carried-forward so sparse bars (e.g. SPY
+	// holiday vs A-share calendar) don't crater the NAV.
+	closeBy := buildCloseByDay(bars, tradingDays)
+
+	// Strategy = monthly equal-weight rebalance across whichever
+	// of the 10 master anchors are tradeable on day 0. We track
+	// a notional "shares" array per symbol so the daily NAV
+	// reflects price drift between rebalances.
+	strategyCurve := simulateEqualWeightMonthly(req.InitialCapital, universe, tradingDays, closeBy)
+	if len(strategyCurve) == 0 {
+		return nil, fmt.Errorf("papertrading: strategy simulation produced no curve")
+	}
+
+	// Benchmarks = buy-and-hold one anchor at day 0.
+	benchmarkCurves := make([]MasterBenchmarkCurve, 0, len(req.Benchmarks))
+	for _, bench := range req.Benchmarks {
+		curve := simulateBuyAndHold(req.InitialCapital, bench, tradingDays, closeBy)
+		if len(curve) == 0 {
+			continue
+		}
+		final := curve[len(curve)-1].Pct
+		benchmarkCurves = append(benchmarkCurves, MasterBenchmarkCurve{
+			Symbol:           strings.ToUpper(bench),
+			Curve:            curve,
+			CumulativeReturn: final,
+		})
+	}
+
+	metrics := computeMasterMetrics(strategyCurve, req.InitialCapital)
+
+	result := &MasterBacktestResult{
+		Strategy:       "Master Team Ensemble (equal-weight, monthly rebalanced)",
+		Start:          tradingDays[0],
+		End:            tradingDays[len(tradingDays)-1],
+		InitialCapital: req.InitialCapital,
+		FinalNav:       strategyCurve[len(strategyCurve)-1].Nav,
+		Universe:       MasterTeamUniverse,
+		NavCurve:       strategyCurve,
+		Benchmarks:     benchmarkCurves,
+		Metrics:        metrics,
+		GeneratedAt:    r.now().UTC(),
+	}
+	r.store(cacheKey, result)
+	return result, nil
+}
+
+func applyMasterDefaults(req MasterBacktestRequest, now time.Time) MasterBacktestRequest {
+	out := req
+	if out.Start.IsZero() {
+		// 10 years back from "now" matches Yahoo's daily-history
+		// ceiling (range=10y is the largest range that preserves
+		// daily bars; "max" silently down-samples to monthly).
+		out.Start = now.UTC().AddDate(-10, 0, 0)
+	}
+	if out.End.IsZero() {
+		out.End = now.UTC()
+	}
+	if out.InitialCapital <= 0 {
+		out.InitialCapital = 100000
+	}
+	if len(out.Benchmarks) == 0 {
+		out.Benchmarks = []string{"SPY", "QQQ"}
+	}
+	cleaned := make([]string, 0, len(out.Benchmarks))
+	seen := make(map[string]struct{}, len(out.Benchmarks))
+	for _, b := range out.Benchmarks {
+		key := strings.ToUpper(strings.TrimSpace(b))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, key)
+	}
+	out.Benchmarks = cleaned
+	return out
+}
+
+func masterCacheKey(req MasterBacktestRequest) string {
+	parts := []string{
+		req.Start.UTC().Format("2006-01-02"),
+		req.End.UTC().Format("2006-01-02"),
+		fmt.Sprintf("%.0f", req.InitialCapital),
+		strings.Join(req.Benchmarks, ","),
+	}
+	return strings.Join(parts, "|")
+}
+
+func (r *MasterBacktestRunner) lookup(key string) *MasterBacktestResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.cached[key]; ok && r.now().Sub(c.at) < r.cacheTTL {
+		return c.result
+	}
+	return nil
+}
+
+func (r *MasterBacktestRunner) store(key string, result *MasterBacktestResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cached[key] = &cachedMaster{at: r.now(), result: result}
+}
+
+// fetchAllSymbols pulls one block of daily bars per symbol covering
+// [Start - 5d, End + 1d]. Failures degrade silently.
+func (r *MasterBacktestRunner) fetchAllSymbols(ctx context.Context, symbols []string, req MasterBacktestRequest) map[string][]ohlc.Bar {
+	out := make(map[string][]ohlc.Bar, len(symbols))
+	windowDays := int(req.End.Sub(req.Start).Hours()/24.0) + 1
+	lookback := int(float64(windowDays)*1.05) + 30
+	if lookback > 8000 {
+		lookback = 8000
+	}
+	endPad := req.End.Add(24 * time.Hour)
+	for _, sym := range symbols {
+		bars, err := r.fetcher.Fetch(ctx, ohlc.FetchRequest{
+			Symbol:    sym,
+			Market:    "us_equity",
+			Interval:  ohlc.IntervalDay,
+			LookbackN: lookback,
+			EndTime:   endPad,
+		})
+		if err != nil || len(bars) == 0 {
+			continue
+		}
+		out[sym] = bars
+	}
+	return out
+}
+
+// uniqueDays returns the sorted distinct calendar days where ANY
+// symbol has a bar inside [start, end]. Strategy buys are gated
+// on the symbols actually present that day.
+func uniqueDays(history map[string][]ohlc.Bar, start, end time.Time) []time.Time {
+	dayKey := func(t time.Time) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	startKey := dayKey(start)
+	endKey := dayKey(end)
+	dedupe := make(map[time.Time]struct{}, 256)
+	for _, list := range history {
+		for _, b := range list {
+			d := dayKey(b.Time)
+			if d.Before(startKey) || d.After(endKey) {
+				continue
+			}
+			dedupe[d] = struct{}{}
+		}
+	}
+	days := make([]time.Time, 0, len(dedupe))
+	for d := range dedupe {
+		days = append(days, d)
+	}
+	sort.Slice(days, func(i, j int) bool { return days[i].Before(days[j]) })
+	return days
+}
+
+// buildCloseByDay reshapes per-symbol bars into day-keyed close
+// maps and forward-fills missing observations. Forward-fill is
+// safe here because we only price holdings — no decisions are
+// made on stale prices.
+func buildCloseByDay(history map[string][]ohlc.Bar, days []time.Time) map[time.Time]map[string]float64 {
+	dayKey := func(t time.Time) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	bySym := make(map[string]map[time.Time]float64, len(history))
+	for sym, bars := range history {
+		m := make(map[time.Time]float64, len(bars))
+		for _, b := range bars {
+			if b.Close > 0 {
+				m[dayKey(b.Time)] = b.Close
+			}
+		}
+		bySym[sym] = m
+	}
+	out := make(map[time.Time]map[string]float64, len(days))
+	last := make(map[string]float64, len(history))
+	for _, d := range days {
+		row := make(map[string]float64, len(history))
+		for sym, m := range bySym {
+			if c, ok := m[d]; ok {
+				last[sym] = c
+			}
+			if c, ok := last[sym]; ok && c > 0 {
+				row[sym] = c
+			}
+		}
+		out[d] = row
+	}
+	return out
+}
+
+// simulateEqualWeightMonthly walks the trading-day calendar and
+// rebalances to equal weight on the first trading day of each
+// calendar month. Symbols without a price that day are dropped
+// from the basket for that month (so e.g. NVDA's late-2015 split
+// or a missing data point doesn't blow up the math).
+func simulateEqualWeightMonthly(initialCapital float64, universe []string, days []time.Time, closeBy map[time.Time]map[string]float64) []MasterCurvePoint {
+	if len(days) == 0 || initialCapital <= 0 {
+		return nil
+	}
+	const slippageBps = 5.0 // 5 bps each rebalance, applied symmetrically
+
+	shares := make(map[string]float64, len(universe))
+	cash := initialCapital
+	prevMonth := time.Time{}
+	out := make([]MasterCurvePoint, 0, len(days))
+
+	rebalance := func(day time.Time) {
+		closes := closeBy[day]
+		// Mark portfolio to market at today's close, sell
+		// everything to cash, then re-buy equal-weight.
+		nav := cash
+		for sym, qty := range shares {
+			if px, ok := closes[sym]; ok {
+				nav += qty * px
+			}
+		}
+		// Apply round-trip slippage scalar to mimic the cost
+		// of fully rotating the book.
+		nav *= 1 - slippageBps/10000.0
+		// Determine eligible symbols today.
+		eligible := make([]string, 0, len(universe))
+		for _, sym := range universe {
+			if px, ok := closes[sym]; ok && px > 0 {
+				eligible = append(eligible, sym)
+			}
+		}
+		if len(eligible) == 0 {
+			// Stay in cash this month.
+			shares = map[string]float64{}
+			cash = nav
+			return
+		}
+		alloc := nav / float64(len(eligible))
+		shares = make(map[string]float64, len(eligible))
+		spent := 0.0
+		for _, sym := range eligible {
+			px := closes[sym]
+			qty := alloc / px
+			shares[sym] = qty
+			spent += qty * px
+		}
+		cash = nav - spent
+	}
+
+	// Day 0 always rebalances.
+	rebalance(days[0])
+	prevMonth = days[0]
+
+	for _, day := range days {
+		// Trigger a rebalance on the first trading day of each
+		// calendar month after day 0.
+		if !day.Equal(prevMonth) && (day.Month() != prevMonth.Month() || day.Year() != prevMonth.Year()) {
+			rebalance(day)
+			prevMonth = day
+		}
+		closes := closeBy[day]
+		nav := cash
+		for sym, qty := range shares {
+			if px, ok := closes[sym]; ok && px > 0 {
+				nav += qty * px
+			}
+		}
+		pct := nav/initialCapital - 1.0
+		out = append(out, MasterCurvePoint{Date: day, Nav: nav, Pct: pct})
+	}
+	return out
+}
+
+// simulateBuyAndHold takes the equivalent of a SPY / QQQ buy-and-hold
+// at day 0 and walks the calendar so the SPA has aligned series.
+func simulateBuyAndHold(initialCapital float64, symbol string, days []time.Time, closeBy map[time.Time]map[string]float64) []MasterCurvePoint {
+	if initialCapital <= 0 || len(days) == 0 {
+		return nil
+	}
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	if sym == "" {
+		return nil
+	}
+	var anchor float64
+	for _, d := range days {
+		if px, ok := closeBy[d][sym]; ok && px > 0 {
+			anchor = px
+			break
+		}
+	}
+	if anchor <= 0 {
+		return nil
+	}
+	out := make([]MasterCurvePoint, 0, len(days))
+	for _, d := range days {
+		px, ok := closeBy[d][sym]
+		if !ok || px <= 0 {
+			// Fall back to last point's value (last-obs carry forward)
+			if len(out) > 0 {
+				prev := out[len(out)-1]
+				out = append(out, MasterCurvePoint{Date: d, Nav: prev.Nav, Pct: prev.Pct})
+			}
+			continue
+		}
+		nav := initialCapital * (px / anchor)
+		out = append(out, MasterCurvePoint{Date: d, Nav: nav, Pct: nav/initialCapital - 1.0})
+	}
+	return out
+}
+
+// computeMasterMetrics summarises the strategy curve into the
+// numbers the SPA's KPI strip displays. base is the initial-capital
+// baseline (typically req.InitialCapital) so cumulative + annualised
+// return reflect the user's "started at $X" mental model rather than
+// excluding the day-0 rebalance slippage.
+func computeMasterMetrics(curve []MasterCurvePoint, base float64) MasterBacktestMetrics {
+	if len(curve) < 2 || base <= 0 {
+		return MasterBacktestMetrics{}
+	}
+	last := curve[len(curve)-1].Nav
+	cumulative := last/base - 1.0
+
+	// Annualised: (1+r)^(365.25/days) - 1
+	days := curve[len(curve)-1].Date.Sub(curve[0].Date).Hours() / 24.0
+	years := days / 365.25
+	var annualized float64
+	if years > 0 {
+		annualized = math.Pow(1+cumulative, 1/years) - 1
+	}
+
+	// Daily-returns vol + Sharpe (rf = 0)
+	rets := make([]float64, 0, len(curve)-1)
+	wins := 0
+	for i := 1; i < len(curve); i++ {
+		if curve[i-1].Nav <= 0 {
+			continue
+		}
+		r := curve[i].Nav/curve[i-1].Nav - 1
+		rets = append(rets, r)
+		if r > 0 {
+			wins++
+		}
+	}
+	mean := 0.0
+	for _, r := range rets {
+		mean += r
+	}
+	if len(rets) > 0 {
+		mean /= float64(len(rets))
+	}
+	variance := 0.0
+	for _, r := range rets {
+		variance += (r - mean) * (r - mean)
+	}
+	if len(rets) > 1 {
+		variance /= float64(len(rets) - 1)
+	}
+	stdev := math.Sqrt(variance)
+	annualVol := stdev * math.Sqrt(252)
+	var sharpe float64
+	if stdev > 0 {
+		sharpe = (mean / stdev) * math.Sqrt(252)
+	}
+
+	// Max drawdown.
+	peak := curve[0].Nav
+	maxDD := 0.0
+	for _, p := range curve {
+		if p.Nav > peak {
+			peak = p.Nav
+		}
+		if peak > 0 {
+			dd := p.Nav/peak - 1
+			if dd < maxDD {
+				maxDD = dd
+			}
+		}
+	}
+	var winRate float64
+	if len(rets) > 0 {
+		winRate = float64(wins) / float64(len(rets))
+	}
+	return MasterBacktestMetrics{
+		CumulativeReturn: cumulative,
+		AnnualizedReturn: annualized,
+		Volatility:       annualVol,
+		SharpeRatio:      sharpe,
+		MaxDrawdown:      maxDD,
+		WinRate:          winRate,
+	}
+}

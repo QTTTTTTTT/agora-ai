@@ -85,6 +85,7 @@ function copyForLang(language: string) {
     kyc: zh ? "KYC" : "KYC",
     marketplace: zh ? "Agent 市场" : "Agent marketplace",
     admin: zh ? "管理员" : "Admin",
+    userConsole: zh ? "用户管理" : "User console",
     accountSecurity: zh ? "账户安全" : "Account",
     logout: zh ? "退出" : "Logout",
     currentUser: zh ? "当前用户" : "Signed in as",
@@ -161,6 +162,11 @@ const MastersHub: React.FC = () => {
   const copy = useMemo(() => copyForLang(language), [language]);
   const session = getStoredSession();
   const isAdmin = session?.role === "super_admin";
+  // The /admin/users console accepts both admin and super_admin
+  // server-side (admin_users_handler.requireAdmin), so the nav pill
+  // mirrors that. Kept separate from `isAdmin` because the legacy
+  // /admin entry remains super-admin-only.
+  const canSeeUserConsole = session?.role === "super_admin" || session?.role === "admin";
 
   // agent_team_mode gates the optional 5th card. We *show* the card
   // when (a) the flag is on for everybody, or (b) the current user
@@ -262,6 +268,7 @@ const MastersHub: React.FC = () => {
             <Link to="/kyc" className={PILL_CORAL}>{copy.kyc}</Link>
             <Link to="/marketplace" className={PILL_MINT}>{copy.marketplace}</Link>
             {isAdmin ? <Link to="/admin" className={PILL_INFO}>{copy.admin}</Link> : null}
+            {canSeeUserConsole ? <Link to="/admin/users" className={PILL_INFO}>{copy.userConsole}</Link> : null}
             <Link to="/account/security" className={PILL_INFO}>{copy.accountSecurity}</Link>
             <button onClick={() => void handleLogout()} className={PILL_INFO}>
               {copy.logout}

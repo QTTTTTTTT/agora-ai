@@ -154,6 +154,10 @@ func yahooRangeForLookback(i Interval, n int) string {
 		return "2y"
 	default:
 		// Daily — 250 bars covers a year of trading days. Round up.
+		// Note: Yahoo silently down-samples to monthly bars when
+		// the range is "max" + interval=1d, so we cap at "10y" to
+		// preserve the daily cadence consumers expect. Callers
+		// needing >10y should slice the request into windows.
 		switch {
 		case n <= 30:
 			return "3mo"
@@ -163,8 +167,10 @@ func yahooRangeForLookback(i Interval, n int) string {
 			return "1y"
 		case n <= 400:
 			return "2y"
-		default:
+		case n <= 1300:
 			return "5y"
+		default:
+			return "10y"
 		}
 	}
 }

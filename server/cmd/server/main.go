@@ -2208,14 +2208,15 @@ type authRequest struct {
 }
 
 type authenticatedUser struct {
-	ID           string
-	Email        string
-	DisplayName  string
-	Role         string
-	Status       string
-	PasswordHash string
-	KYCStatus    string
-	KYCLevel     string
+	ID                string
+	Email             string
+	DisplayName       string
+	Role              string
+	Status            string
+	PasswordHash      string
+	KYCStatus         string
+	KYCLevel          string
+	PreferredLanguage string
 }
 
 func handleRegister(svc *Services, cfg *Config) http.HandlerFunc {
@@ -2388,16 +2389,21 @@ func writeAuthSuccess(w http.ResponseWriter, cfg *Config, requestID string, user
 		return
 	}
 	setSessionCookie(w, token, expiresAt)
+	preferredLang := strings.TrimSpace(user.PreferredLanguage)
+	if preferredLang == "" {
+		preferredLang = string(UserLanguageZH)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":        token,
-		"user_id":      user.ID,
-		"email":        user.Email,
-		"display_name": user.DisplayName,
-		"role":         user.Role,
-		"kyc_status":   user.KYCStatus,
-		"kyc_level":    user.KYCLevel,
-		"expires_at":   expiresAt.UTC().Format(time.RFC3339),
-		"request_id":   requestID,
+		"token":              token,
+		"user_id":            user.ID,
+		"email":              user.Email,
+		"display_name":       user.DisplayName,
+		"role":               user.Role,
+		"kyc_status":         user.KYCStatus,
+		"kyc_level":          user.KYCLevel,
+		"preferred_language": preferredLang,
+		"expires_at":         expiresAt.UTC().Format(time.RFC3339),
+		"request_id":         requestID,
 	})
 }
 
@@ -3177,11 +3183,11 @@ func loadUserByEmail(ctx context.Context, db *sql.DB, email string) (*authentica
 	}
 	var user authenticatedUser
 	err := db.QueryRowContext(ctx, `
-		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic')
+		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic'), COALESCE(preferred_language, 'zh-CN')
 		FROM users
 		WHERE LOWER(email) = LOWER($1)
 		LIMIT 1
-	`, email).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel)
+	`, email).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel, &user.PreferredLanguage)
 	if err != nil {
 		return nil, err
 	}
@@ -3201,11 +3207,11 @@ func loadActiveUserByID(ctx context.Context, db *sql.DB, userID string) (*authen
 	}
 	var user authenticatedUser
 	err = db.QueryRowContext(ctx, `
-		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic')
+		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic'), COALESCE(preferred_language, 'zh-CN')
 		FROM users
 		WHERE id = $1
 		LIMIT 1
-	`, parsedUserID.String()).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel)
+	`, parsedUserID.String()).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel, &user.PreferredLanguage)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errUserNotFoundOrInactive
@@ -3273,8 +3279,8 @@ func registerUserOnce(ctx context.Context, db *sql.DB, email, passwordHash, disp
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO users (id, username, display_name, email, password_hash, status, role)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status
-	`, userID, username, displayName, email, passwordHash, userStatusActive, role).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status); err != nil {
+		RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(preferred_language, 'zh-CN')
+	`, userID, username, displayName, email, passwordHash, userStatusActive, role).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PreferredLanguage); err != nil {
 		if isUniqueViolation(err) {
 			return nil, errEmailAlreadyExists
 		}
@@ -3338,7 +3344,12 @@ func isPublicRoute(path string) bool {
 			// sees the "NOT a registered investment adviser"
 			// notice). The endpoint returns text only — no PII —
 			// so anonymous access is safe.
-			"/api/compliance/disclosure":
+			"/api/compliance/disclosure",
+			// Support-contact config powers the floating "Get
+			// help" button rendered on every page including the
+			// login screen. Public-by-design — same data for
+			// every viewer, no PII.
+			"/api/support-contact":
 			return true
 		default:
 			return false

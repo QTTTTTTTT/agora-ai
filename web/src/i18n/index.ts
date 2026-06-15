@@ -105,6 +105,11 @@ import memoryCenterZh from "./locales/zh-CN/memoryCenter";
 // `{{index}}` interpolation templates.
 import decisionCenterEn from "./locales/en-US/decisionCenter";
 import decisionCenterZh from "./locales/zh-CN/decisionCenter";
+// Step 6 — apiErrors namespace centralises every user-visible error
+// string emitted by web/src/lib/api.ts so en-US users no longer see
+// Chinese fallbacks when fetch / 401 / timeout / parse paths trip.
+import apiErrorsEn from "./locales/en-US/apiErrors";
+import apiErrorsZh from "./locales/zh-CN/apiErrors";
 
 export type SupportedLanguage = "zh-CN" | "en-US";
 
@@ -123,6 +128,7 @@ const RESOURCES = {
     fundPerformance: fundPerformanceZh,
     memoryCenter: memoryCenterZh,
     decisionCenter: decisionCenterZh,
+    apiErrors: apiErrorsZh,
   },
   "en-US": {
     forgotPassword: forgotPasswordEn,
@@ -138,6 +144,7 @@ const RESOURCES = {
     fundPerformance: fundPerformanceEn,
     memoryCenter: memoryCenterEn,
     decisionCenter: decisionCenterEn,
+    apiErrors: apiErrorsEn,
   },
 } as const;
 

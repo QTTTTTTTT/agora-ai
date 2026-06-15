@@ -30,6 +30,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -48,7 +49,16 @@ func buildPaperTradingPublicHandler(svc *Services) *paperTradingPublicHandler {
 	}
 	repo := repository.NewPaperTradingRepo(svc.DB)
 	service := papertrading.New(repo, papertrading.StubOTSClient{}, nil)
-	return newPaperTradingPublicHandler(service)
+	h := newPaperTradingPublicHandler(service)
+	// Master-team backtest runner shares the same OHLC chain the
+	// rest of the platform uses (Yahoo + Akshare + Eastmoney +
+	// Binance, cache-wrapped). nil fetcher is a soft-degrade —
+	// the endpoint just returns 503 so the SPA falls back to a
+	// quiet placeholder card.
+	if fetcher := buildOHLCFetcherFromEnv(); fetcher != nil && h != nil {
+		h.masterBacktest = papertrading.NewMasterBacktestRunner(fetcher, nil)
+	}
+	return h
 }
 
 // paperTradingPublicHandler is the thin HTTP shim. It holds the
@@ -56,7 +66,8 @@ func buildPaperTradingPublicHandler(svc *Services) *paperTradingPublicHandler {
 // service object, just a different code path that calls the public
 // methods.
 type paperTradingPublicHandler struct {
-	svc *papertrading.Service
+	svc            *papertrading.Service
+	masterBacktest *papertrading.MasterBacktestRunner
 }
 
 func newPaperTradingPublicHandler(svc *papertrading.Service) *paperTradingPublicHandler {
@@ -76,6 +87,10 @@ func registerPublicPaperTradingRoutes(mux *http.ServeMux, h *paperTradingPublicH
 	}
 	mux.HandleFunc("GET /api/papertrading/public/track-record", h.handleList)
 	mux.HandleFunc("GET /api/papertrading/public/track-record/{portfolioId}", h.handleGet)
+	// Master-team factor backtest. Public on purpose: same data
+	// for every viewer keeps the SEC Publisher's-Exclusion
+	// posture intact — this is a marketing curve, not advice.
+	mux.HandleFunc("GET /api/papertrading/public/master-backtest", h.handleMasterBacktest)
 }
 
 // handleList returns every portfolio currently flagged for public
@@ -149,3 +164,68 @@ func (h *paperTradingPublicHandler) handleGet(w http.ResponseWriter, r *http.Req
 // pathological deadlock can't pile up requests on the public
 // surface.
 const publicTrackTimeout = 5 * time.Second
+
+// masterBacktestTimeout is wider than publicTrackTimeout because
+// a cold-cache run pulls ~12 daily OHLC histories from upstream
+// providers (Yahoo). The runner caches results for 6h so warm
+// hits return in milliseconds.
+const masterBacktestTimeout = 30 * time.Second
+
+// handleMasterBacktest returns the master-team factor backtest
+// curve plus benchmark curves for the /papertrading SPA.
+//
+// Query params (all optional):
+//
+//	start=YYYY-MM-DD       default 2015-01-01
+//	end=YYYY-MM-DD         default today
+//	initial=100000         default $100k
+//	benchmarks=SPY,QQQ     default SPY,QQQ
+func (h *paperTradingPublicHandler) handleMasterBacktest(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.masterBacktest == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorPayload("unavailable", "master backtest not configured (no OHLC fetcher)"))
+		return
+	}
+	q := r.URL.Query()
+	req := papertrading.MasterBacktestRequest{}
+	if s := strings.TrimSpace(q.Get("start")); s != "" {
+		t, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorPayload("bad_input", "start must be YYYY-MM-DD"))
+			return
+		}
+		req.Start = t
+	}
+	if s := strings.TrimSpace(q.Get("end")); s != "" {
+		t, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorPayload("bad_input", "end must be YYYY-MM-DD"))
+			return
+		}
+		req.End = t
+	}
+	if s := strings.TrimSpace(q.Get("initial")); s != "" {
+		var v float64
+		if _, err := fmtSscan(s, &v); err == nil && v > 0 {
+			req.InitialCapital = v
+		}
+	}
+	if s := strings.TrimSpace(q.Get("benchmarks")); s != "" {
+		parts := strings.Split(s, ",")
+		req.Benchmarks = parts
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), masterBacktestTimeout)
+	defer cancel()
+	result, err := h.masterBacktest.Run(ctx, req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorPayload("internal", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// fmtSscan is a tiny wrapper around fmt.Sscan to keep the import
+// list visible at the top of the file.
+func fmtSscan(s string, v *float64) (int, error) {
+	return fmt.Sscan(s, v)
+}

@@ -599,6 +599,78 @@ func (r *FundRepo) SetBaseCurrency(ctx context.Context, fundID, currency string)
 	return checkRowsAffected(res, "fund_repo: set base currency")
 }
 
+// GetPreferredLanguage returns the per-fund language override, falling
+// back to the fund.owner's users.preferred_language when the column is
+// NULL (the common case). This is what the loop locale helpers consume
+// for non-HTTP code paths (A/B shadow, agent self-learning, etc.).
+//
+// One JOIN, one round-trip: the loop scheduler calls this once per
+// (fund, tick) pair so query throughput matters. The COALESCE chain
+// resolves to a non-NULL "zh-CN" / "en-US" string in every case so
+// callers can branch-free read the result.
+func (r *FundRepo) GetPreferredLanguage(ctx context.Context, fundID string) (string, error) {
+	if r == nil || r.db == nil {
+		return "", fmt.Errorf("fund_repo: nil db")
+	}
+	var lang sql.NullString
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(
+		    NULLIF(TRIM(f.preferred_language), ''),
+		    NULLIF(TRIM(u.preferred_language), ''),
+		    'zh-CN'
+		)
+		FROM funds f
+		LEFT JOIN fund_companies c ON c.id = f.company_id
+		LEFT JOIN users u          ON u.id = c.owner_id
+		WHERE f.id = $1
+	`, fundID).Scan(&lang)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("fund_repo: get preferred language: %w", err)
+	}
+	resolved := strings.TrimSpace(lang.String)
+	if resolved != "zh-CN" && resolved != "en-US" {
+		// Defence in depth: if a stray non-canonical value slipped past
+		// the CHECK constraint (e.g. legacy data, manual SQL fix),
+		// collapse to the safe default rather than propagating it into
+		// the i18nmsg bundle where it would surface as "!!MISSING:".
+		return "zh-CN", nil
+	}
+	return resolved, nil
+}
+
+// SetPreferredLanguage writes a per-fund language override. Pass an
+// empty string to clear the override and let the fund inherit from
+// fund.owner.users.preferred_language again.
+func (r *FundRepo) SetPreferredLanguage(ctx context.Context, fundID, language string) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("fund_repo: nil db")
+	}
+	trimmed := strings.TrimSpace(language)
+	var arg interface{}
+	if trimmed == "" {
+		arg = nil
+	} else {
+		if trimmed != "zh-CN" && trimmed != "en-US" {
+			return fmt.Errorf("fund_repo: unsupported language %q", language)
+		}
+		arg = trimmed
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE funds
+		    SET preferred_language = $2,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		fundID, arg,
+	)
+	if err != nil {
+		return fmt.Errorf("fund_repo: set preferred language: %w", err)
+	}
+	return checkRowsAffected(res, "fund_repo: set preferred language")
+}
+
 // GetByIDForUpdateTx locks the fund row inside the caller's transaction
 // using `SELECT ... FOR UPDATE`, serialising concurrent writers on the
 // same fund. This is the read leg of an UpdateFund flow that wants to

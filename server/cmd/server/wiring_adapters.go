@@ -42,6 +42,7 @@ import (
 	"github.com/fundai/server/internal/regime"
 	"github.com/fundai/server/internal/strategy"
 	"github.com/fundai/server/internal/fundamental"
+	"github.com/fundai/server/internal/i18nmsg"
 	"github.com/fundai/server/internal/indicator"
 	instrument2 "github.com/fundai/server/internal/instrument"
 	"github.com/fundai/server/internal/llm"
@@ -9414,6 +9415,15 @@ func (s *abTestServiceAdapter) ensureABShadowExecution(ctx context.Context, test
 	if test == nil || test.VariableType != abTestVariableStrategyCompare {
 		return nil
 	}
+	// Loop entry point: the upstream callers (StartTest / AnalyzeTest)
+	// pass context.Background(), so resolve the locale here from the
+	// control fund's preference. The bSide LLM prompts and the
+	// fallback strings in writeABSyntheticTradesAndDiffs both read
+	// LanguageFromContext / i18nmsg.FromCtx downstream.
+	if s.funds != nil {
+		ctx = ctxWithFundLocale(ctx, s.funds, test.ControlFundID)
+		ctx = withLoopOrigin(ctx, "ab_shadow")
+	}
 	controlShadow, hasControl, err := s.loadABShadowVariantData(ctx, test.ID, "A")
 	if err != nil {
 		return err
@@ -14400,16 +14410,29 @@ func summarizePlanActionsForReasoning(actions []repository.PlanAction) string {
 	return strings.Join(limitStrings(items, 5), "；")
 }
 
+// humanizeActionForReasoning is the legacy zh-only formatter. New
+// callers should prefer humanizeActionForReasoningI18n which honours
+// i18nmsg.FromCtx(ctx); this shim is kept so the existing summary
+// reasoning path continues to compile while we migrate.
 func humanizeActionForReasoning(action string) string {
+	return humanizeActionForReasoningI18n(context.Background(), action)
+}
+
+// humanizeActionForReasoningI18n returns a localised verdict label
+// (Buy / Sell / Hold / Watch). The locale comes from i18nmsg.FromCtx(ctx),
+// stamped by the HTTP middleware (X-User-Language) or the Loop helper
+// (loop_locale.go).
+func humanizeActionForReasoningI18n(ctx context.Context, action string) string {
+	loc := i18nmsg.FromCtx(ctx)
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "buy", "add":
-		return "买入/增配"
+		return i18nmsg.T(loc, i18nmsg.KeyPlanVerdict_BuyIncrease)
 	case "sell", "reduce":
-		return "卖出/降仓"
+		return i18nmsg.T(loc, i18nmsg.KeyPlanVerdict_SellReduce)
 	case "hold":
-		return "持有观察"
+		return i18nmsg.T(loc, i18nmsg.KeyPlanVerdict_HoldWatch)
 	case "watch":
-		return "仅观察"
+		return i18nmsg.T(loc, i18nmsg.KeyPlanVerdict_WatchOnly)
 	default:
 		return strings.TrimSpace(action)
 	}
@@ -21427,6 +21450,16 @@ func formatNullTime(value sql.NullTime) string {
 }
 
 func (m *runtimeMemorySystem) ConsolidateDaily(ctx context.Context, fundID string, state workflow.WorkflowState) error {
+	// Loops calling into ConsolidateDaily come from the workflow
+	// scheduler with a context.Background()-derived ctx that has no
+	// X-User-Language attached. Resolve the fund's preferred language
+	// here so the downstream prompt builders (generateAgentLessonsLLM,
+	// runReflection*, attribution) and message-bundle lookups in
+	// wiring_adapters all see the right locale.
+	if m.fundRepo != nil {
+		ctx = ctxWithFundLocale(ctx, m.fundRepo, fundID)
+		ctx = withLoopOrigin(ctx, "agent_self_learning")
+	}
 	tradingDate := parseTradingDateOrNow(state.TradingDate)
 	learningCtx, err := m.buildLearningContext(ctx, fundID, tradingDate)
 	if err != nil {
@@ -22009,17 +22042,9 @@ func (m *runtimeMemorySystem) generateAgentLessonsLLM(ctx context.Context, role,
 	// We explicitly tell the model to substitute the placeholders
 	// with real symbols pulled from the fund's holdings / plan
 	// data above.
-	systemPrompt := "你是 AI 基金团队的复盘教练。基于给定的当日数据为一位 agent 生成今日复盘和明日调整方向。" +
-		"严格按 JSON 对象输出（不要 markdown 围栏、不要任何说明文字）。每条字符串：简体中文 1 句，引用数据中的具体数字、占比或股票代码，以 。 结尾。" +
-		"不允许的句子：以 \"为了让\"、\"为了实现\"、\"To maximize\"、\"To improve\" 开头的空洞陈述。\n\n" +
-		roleSpecificSystemHint(role) + "\n\n" +
-		"重要：示例中的 <SYM_A> / <SYM_B> 是占位符，请用上文上下文里出现的真实股票代码替换；不要在最终输出中保留这两个尖括号占位符。\n\n" +
-		"输出格式（这是一个示例，必须完全照抄结构）：\n" +
-		"{\"lessons\":[\"<SYM_A> 当日成交 49984 元，仓位扩张到 5%，符合风控预期。\",\"组合当日收益持平但 watch 类标的仍占 60%，明显说明执行力度不足。\"]," +
-		"\"adjustments\":[\"明日开盘前评估 watch 类标的是否具备转 buy 条件。\",\"对 <SYM_B> 设置明确的放弃条件以减少观望成本。\"]}"
+	systemPrompt, userTail := agentLearningPromptParts(ctx, role)
 
-	userPrompt := userPromptBody +
-		"\n\n请仅输出 JSON 对象，2-3 条 lessons + 2-3 条 adjustments，每条不超过 60 个中文字符。"
+	userPrompt := userPromptBody + userTail
 
 	req := llm.ChatRequest{
 		FundID:    learningCtx.fund.ID,

@@ -68,6 +68,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fundai/server/internal/i18nmsg"
 	"github.com/fundai/server/internal/llm"
 	"github.com/fundai/server/internal/repository"
 )
@@ -491,7 +492,7 @@ func (d *llmBSideDecider) DecideTrade(ctx context.Context, variant abShadowVaria
 	}
 	req := llm.ChatRequest{
 		Messages: []llm.ChatMessage{
-			{Role: "system", Content: bSideSystemPrompt},
+			{Role: "system", Content: bSideSystemPromptFor(i18nmsg.FromCtx(ctx))},
 			{Role: "user", Content: prompt},
 		},
 	}
@@ -531,7 +532,7 @@ func (d *llmBSideDecider) SummarizeBLearning(ctx context.Context, variant abShad
 	}
 	req := llm.ChatRequest{
 		Messages: []llm.ChatMessage{
-			{Role: "system", Content: bSideRecapSystemPrompt},
+			{Role: "system", Content: bSideRecapSystemPromptFor(i18nmsg.FromCtx(ctx))},
 			{Role: "user", Content: prompt},
 		},
 	}
@@ -560,7 +561,30 @@ func (d *llmBSideDecider) SummarizeBLearning(ctx context.Context, variant abShad
 // located with the decider that uses it.
 // ----------------------------------------------------------------------
 
-const bSideSystemPrompt = `你是一名严谨的量化对照实验影子 agent。
+// bSideSystemPromptFor returns the locale-appropriate system prompt
+// for the per-trade B-side decider. The two language variants are
+// hand-authored (rather than runtime-translated) because the JSON
+// schema lines and the field constraints are load-bearing — the
+// LLM downstream parser pins them.
+func bSideSystemPromptFor(loc i18nmsg.Locale) string {
+	if loc == i18nmsg.LocaleEN {
+		return `You are a rigorous shadow agent for a quant A/B experiment.
+Task: read a real fund (variant A) trade, combine variant B's strategy config + team roles + the live market / NAV state, and infer how variant B would have decided this trade.
+Return STRICT JSON only (no comments, no prefix/suffix):
+{
+  "skip": true|false,
+  "quantity_scale": 0.0~3.0,
+  "side_override": ""|"BUY"|"SELL",
+  "reasoning": "<=80 words English explaining why variant B would decide this way"
+}
+Constraints:
+- When variant B is conservative and drawdown is already deep, lower quantity_scale or skip.
+- When variant B is aggressive and the trend is favourable, increase quantity_scale.
+- Do NOT flip the side without explicit evidence; default side_override = "".
+- reasoning must reference at least one piece of context (strategy / team / NAV / drawdown).
+- Any out-of-range or missing field is treated as an error; ensure the JSON is valid.`
+	}
+	return `你是一名严谨的量化对照实验影子 agent。
 任务：阅读真实基金（A 组）的一笔交易，结合 B 组的策略配置 + 团队角色 + 当下市场/NAV 状态，判断 B 组本次会如何决策。
 只允许返回**严格的 JSON**（无注释、无前后缀）：
 {
@@ -575,6 +599,7 @@ const bSideSystemPrompt = `你是一名严谨的量化对照实验影子 agent�
 - 不允许翻转方向除非明确证据；side_override 默认 ""。
 - reasoning 必须引用至少一项上下文（策略 / 团队 / NAV / 回撤）。
 - 任何字段越界或缺失会被视为错误，请确保 JSON 合法。`
+}
 
 // promptStrategyJSON marshals the strategy config and clips the
 // JSON to a hard ceiling so a runaway custom field can't blow
@@ -640,7 +665,26 @@ func buildBSideTradePrompt(variant abShadowVariantRuntime, t repository.TradeExe
 	)
 }
 
-const bSideRecapSystemPrompt = `你是 AI 基金平台的影子学习总结器。
+// bSideRecapSystemPromptFor returns the locale-appropriate recap system
+// prompt. Same hand-authored / pin-with-tests reasoning as
+// bSideSystemPromptFor.
+func bSideRecapSystemPromptFor(loc i18nmsg.Locale) string {
+	if loc == i18nmsg.LocaleEN {
+		return `You are the shadow-learning recap engine of the AI fund platform.
+Task: based on variant B's strategy config + team roles + variant A's real trade sequence + the full NAV trajectory, produce variant B's lessons for this shadow run.
+Return STRICT JSON only:
+{
+  "lessons": ["<=20 words", "<=20 words"],
+  "adjustments": ["<=25 words", "<=25 words"],
+  "summary": "<=80 words English summary",
+  "specialization_learning": "<=50 words",
+  "proposed_evolution_config": { ...nested object, may be empty }
+}
+- lessons / adjustments each have 1-3 entries.
+- summary MUST reference the NAV path (peak / trough / max drawdown) AND the trade aggregate stats.
+- proposed_evolution_config is the diff proposal against variant B's config; emit {} when no change is warranted.`
+	}
+	return `你是 AI 基金平台的影子学习总结器。
 任务：基于 B 组策略配置 + 团队角色 + A 组真实交易序列 + 全程 NAV 走势，给出 B 组本轮影子运行的学习要点。
 只允许返回严格 JSON：
 {
@@ -653,6 +697,7 @@ const bSideRecapSystemPrompt = `你是 AI 基金平台的影子学习总结器�
 - lessons / adjustments 各 1~3 条
 - summary 必须引用 NAV 走势（峰/谷/最大回撤之一）以及交易聚合统计。
 - proposed_evolution_config 是 B 策略配置的差异提议；不必要时给 {}`
+}
 
 // recapNAVHeadline summarises the test window's NAV trajectory in
 // one prompt-ready line: start/end NAV, peak, trough, total

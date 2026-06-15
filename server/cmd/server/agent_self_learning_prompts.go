@@ -26,12 +26,14 @@ package main
 // unit-testable.
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/fundai/server/internal/i18nmsg"
 	"github.com/fundai/server/internal/repository"
 )
 
@@ -85,6 +87,26 @@ func buildRoleSpecificLearningBody(
 // the dominant prompt instruction; a longer per-role rant would
 // dilute it.
 func roleSpecificSystemHint(role string) string {
+	return roleSpecificSystemHintFor(i18nmsg.LocaleZH, role)
+}
+
+// roleSpecificSystemHintFor is the locale-aware variant. Existing
+// callers should migrate to this; roleSpecificSystemHint is kept for
+// the no-ctx callers that exist in tests.
+func roleSpecificSystemHintFor(loc i18nmsg.Locale, role string) string {
+	if loc == i18nmsg.LocaleEN {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "pm", "portfolio_manager":
+			return "You are the Portfolio Manager (PM): recap from the [allocation, sleeve weights, plan completion, return attribution] perspective. Do NOT recap individual fill micro-structure or per-stock research themes."
+		case "researcher", "analyst":
+			return "You are the Researcher: recap only from the focus areas you cover (when a focus list is given above, restrict yourself to those tickers). Skip portfolio-level metrics."
+		case "trader":
+			return "You are the Trader: recap only from the [fill ratio, slippage, reject distribution, per-trade pacing] perspective. Skip portfolio weights and research themes."
+		case "risk", "risk_overseer":
+			return "You are Risk Control: recap from the [concentration, risk-budget consumption, gate signals, drawdown-vs-budget] perspective. Skip research themes; do not directly judge plan quality."
+		}
+		return "Focus on the perspective unique to your role; avoid overlap with other roles."
+	}
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "pm", "portfolio_manager":
 		return "你是组合经理 (PM)：从【组合配置、套件权重、计划完成度、收益归因】视角写复盘。不复盘单笔执行细节、不复盘个股研究主题。"
@@ -96,6 +118,37 @@ func roleSpecificSystemHint(role string) string {
 		return "你是风险控制：从【集中度、风险预算占用、拒单边界、收益波动是否在预算内】视角复盘。不复盘研究主题、不直接评价计划好坏。"
 	}
 	return "请聚焦于自身角色独有的关注点，避免与其他角色复盘内容重叠。"
+}
+
+// agentLearningPromptParts produces the (system, userTail) tuple for
+// generateAgentLessonsLLM, picking the locale registered on ctx by
+// the loop helper (Step 3). We keep the JSON skeleton example fixed
+// across both languages because the parser pins on its shape; only
+// the surrounding prose is translated.
+func agentLearningPromptParts(ctx context.Context, role string) (system, userTail string) {
+	loc := i18nmsg.FromCtx(ctx)
+	if loc == i18nmsg.LocaleEN {
+		system = "You are the AI fund team's recap coach. Based on the day's data, generate a recap and tomorrow's adjustments for one agent. " +
+			"Output a STRICT JSON object (no markdown fences, no commentary). Each string: one English sentence that cites a concrete number, percentage, or ticker from the data, ending with a period. " +
+			"Forbidden openings: hollow generalities such as \"In order to\", \"To improve\", \"To maximize\".\n\n" +
+			roleSpecificSystemHintFor(loc, role) + "\n\n" +
+			"IMPORTANT: <SYM_A> / <SYM_B> in the example are placeholders — replace them with real tickers that appear in the context above; do NOT keep the angle-bracket placeholders in your final output.\n\n" +
+			"Output schema (this is an example you must match exactly in shape):\n" +
+			"{\"lessons\":[\"<SYM_A> traded 49984 USD today and the position grew to 5%, in line with risk expectations.\",\"Daily P&L was flat but watch-list names still represent 60% of coverage, signalling weak execution conviction.\"]," +
+			"\"adjustments\":[\"Before tomorrow's open, evaluate whether watch-list names meet the criteria to flip to buy.\",\"Set an explicit give-up condition for <SYM_B> to cut observation cost.\"]}"
+		userTail = "\n\nReturn the JSON object only. 2-3 lessons + 2-3 adjustments, each <= 200 characters."
+		return
+	}
+	system = "你是 AI 基金团队的复盘教练。基于给定的当日数据为一位 agent 生成今日复盘和明日调整方向。" +
+		"严格按 JSON 对象输出（不要 markdown 围栏、不要任何说明文字）。每条字符串：简体中文 1 句，引用数据中的具体数字、占比或股票代码，以 。 结尾。" +
+		"不允许的句子：以 \"为了让\"、\"为了实现\"、\"To maximize\"、\"To improve\" 开头的空洞陈述。\n\n" +
+		roleSpecificSystemHintFor(loc, role) + "\n\n" +
+		"重要：示例中的 <SYM_A> / <SYM_B> 是占位符，请用上文上下文里出现的真实股票代码替换；不要在最终输出中保留这两个尖括号占位符。\n\n" +
+		"输出格式（这是一个示例，必须完全照抄结构）：\n" +
+		"{\"lessons\":[\"<SYM_A> 当日成交 49984 元，仓位扩张到 5%，符合风控预期。\",\"组合当日收益持平但 watch 类标的仍占 60%，明显说明执行力度不足。\"]," +
+		"\"adjustments\":[\"明日开盘前评估 watch 类标的是否具备转 buy 条件。\",\"对 <SYM_B> 设置明确的放弃条件以减少观望成本。\"]}"
+	userTail = "\n\n请仅输出 JSON 对象，2-3 条 lessons + 2-3 条 adjustments，每条不超过 60 个中文字符。"
+	return
 }
 
 // writeLearningHeader emits the common 4-line preamble every role

@@ -45,6 +45,7 @@ import AdminStopTriggerSection from "../components/AdminStopTriggerSection";
 import AdminFeatureFlagsSection from "../components/AdminFeatureFlagsSection";
 import AdminAnnouncementsSection from "../components/AdminAnnouncementsSection";
 import AdminUserRolesSection from "../components/AdminUserRolesSection";
+import AdminSupportContactSection from "../components/AdminSupportContactSection";
 
 interface PlatformSettings {
   access_mode: "paid_open" | "free_open";
@@ -1019,6 +1020,8 @@ const Admin: React.FC = () => {
               {saveSuccess ? <p className="text-sm text-emerald-700">{saveSuccess}</p> : null}
             </div>
           </section>
+
+          <AdminSupportContactSection />
 
           <section className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-5 shadow-sm">
             <div>

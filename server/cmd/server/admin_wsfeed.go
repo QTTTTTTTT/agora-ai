@@ -66,7 +66,11 @@ func (h *adminHandler) handleWSFeedStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !h.wsFeedAvailable() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		// Soft-degrade with HTTP 200 so the /admin SPA can read
+		// `enabled: false` and silently hide the WSFeed section
+		// instead of rendering a red 503 banner. The reason
+		// string stays for operator debugging.
+		writeJSON(w, http.StatusOK, map[string]any{
 			"enabled": false,
 			"reason":  "wsfeed not configured (WSFEED_ENABLED=false or wiring missing)",
 		})
@@ -103,7 +107,10 @@ func (h *adminHandler) handleWSFeedConnections(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !h.wsFeedAvailable() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "wsfeed not configured"})
+		// Soft-degrade — return empty list with HTTP 200 so the
+		// admin SPA can render without a red banner. See
+		// handleWSFeedStatus for the rationale.
+		writeJSON(w, http.StatusOK, map[string]any{"connections": []any{}})
 		return
 	}
 	rows := h.wsFeedManager.ConnectionsSnapshot()
@@ -129,7 +136,7 @@ func (h *adminHandler) handleWSFeedSubscriptions(w http.ResponseWriter, r *http.
 		return
 	}
 	if !h.wsFeedAvailable() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "wsfeed not configured"})
+		writeJSON(w, http.StatusOK, map[string]any{"subscriptions": []any{}})
 		return
 	}
 	subs := h.wsFeedManager.Subscriptions()
@@ -151,7 +158,10 @@ func (h *adminHandler) handleWSFeedCacheList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !h.wsFeedAvailable() || h.wsFeedCache == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "wsfeed cache not configured"})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"snapshots": []any{},
+			"stats":     map[string]any{"symbols": 0, "hits": 0, "misses": 0, "stales": 0, "evicts": 0},
+		})
 		return
 	}
 	snaps := h.wsFeedCache.SnapshotAll()

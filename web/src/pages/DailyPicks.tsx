@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
+  ApiError,
   formatApiError,
   getDailyPickDetail,
   listDailyPicks,
@@ -150,6 +151,11 @@ function copyForLang(language: string) {
         ? `Free 套餐延迟 ${days} 天观看。${newest ? `最新公开日是 ${newest}，` : ""}升级 Pro 看实时榜单。`
         : `Free tier sees content with a ${days}-day delay.${newest ? ` Latest available: ${newest}.` : ""} Upgrade to Pro for real-time picks.`,
     upgradeToToday: zh ? "升级解锁今日榜单" : "Upgrade to see today's picks",
+    upgradeIndicators: zh ? "🔒 升级查看完整指标" : "🔒 Upgrade to see indicators",
+    latestPeriodPill: zh ? "最近一期 · 延迟 3 天" : "Latest period · 3-day delayed",
+    freeTierGridBanner: zh
+      ? "免费版 · 仅展示颠覆创新视角的 Top 3 · 数据延迟 3 天 · 详情升级后可见"
+      : "Free tier · top 3 disruptive picks · 3-day delayed · indicators behind upgrade",
     headlineFallback: zh ? "（暂无观点摘要）" : "(no thesis summary)",
     score: zh ? "评分" : "Score",
     consensus: zh ? "共识度" : "Consensus",
@@ -203,7 +209,11 @@ export default function DailyPicks() {
   const [date, setDate] = useState<string>("");
   const [picks, setPicks] = useState<DailyPickRow[]>([]);
   const [tier, setTier] = useState<string>("free");
-  const [freeLagDays, setFreeLagDays] = useState<number>(14);
+  // Default to the v2 free-tier lag (3d). The first list-fetch
+  // overwrites this with whatever the server reports, but the
+  // initial default has to match the FE-side enforcement so the
+  // UI doesn't flash a longer lag during the first paint.
+  const [freeLagDays, setFreeLagDays] = useState<number>(3);
   const [newestAvailable, setNewestAvailable] = useState<string | undefined>();
   const [newestForTier, setNewestForTier] = useState<string | undefined>();
   const [upgradeForToday, setUpgradeForToday] = useState<boolean>(false);
@@ -292,13 +302,27 @@ export default function DailyPicks() {
         if (cancelled) return;
         setPicks(res.picks ?? []);
         setTier(res.tier ?? "free");
-        setFreeLagDays(res.free_lag_days ?? 14);
+        setFreeLagDays(res.free_lag_days ?? 3);
         setNewestAvailable(res.newest_available_date);
         setNewestForTier(res.newest_for_tier_date);
         setUpgradeForToday(Boolean(res.upgrade_required_for_today));
       })
       .catch((err) => {
         if (cancelled) return;
+        // Free-tier preset whitelist: the server returns 403
+        // forbidden_preset whenever a free user tampers with the
+        // URL to ?preset=<paid>. Bounce them back to disruptive
+        // (the only allowed lens) silently — the useEffect will
+        // refetch automatically on the preset change. Without
+        // this branch the user would see a generic error toast
+        // for what is really an "FE chip-hiding bypassed" event.
+        if (err instanceof ApiError && err.status === 403) {
+          const payload = err.payload as { error?: string } | undefined;
+          if (payload?.error === "forbidden_preset" && preset !== "disruptive") {
+            setPreset("disruptive");
+            return;
+          }
+        }
         setListError(formatApiError(err, copy.error));
       })
       .finally(() => {
@@ -308,10 +332,24 @@ export default function DailyPicks() {
     return () => {
       cancelled = true;
     };
+  // preset is intentionally part of the dep list so the effect
+  // re-fires when the catch branch above flips it back to
+  // disruptive after a forbidden_preset response.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [market, preset, date]);
+
+  const isFree = tier === "free";
 
   const handleOpenDetail = useCallback(
     (row: DailyPickRow) => {
+      // Free tier never sees indicator details. The card UI
+      // shows a "🔒 Upgrade to see indicators" CTA inline; this
+      // guard is defense-in-depth in case a programmatic call
+      // (keyboard shortcut, tests, future quick-view) tries to
+      // open the modal anyway.
+      if (isFree) {
+        return;
+      }
       setDetail(null);
       setDetailSymbol(row.symbol);
       setDetailError(null);
@@ -327,7 +365,7 @@ export default function DailyPicks() {
           setDetailLoading(false);
         });
     },
-    [copy.error],
+    [copy.error, isFree],
   );
 
   const handleCloseDetail = useCallback(() => {
@@ -335,8 +373,6 @@ export default function DailyPicks() {
     setDetailSymbol(null);
     setDetailError(null);
   }, []);
-
-  const isFree = tier === "free";
 
   return (
     <div className="min-h-screen bg-slate-50 px-6 py-8">
@@ -374,16 +410,23 @@ export default function DailyPicks() {
 
         <ComplianceBanner surface="daily_picks" />
 
-        {/* Filters */}
+        {/* Filters
+            Free tier sees a degraded form of these controls:
+              - preset locked to disruptive (only one option)
+              - date input replaced with a static "latest period" pill
+            We still render the same grid shell so the layout doesn't
+            shift between tiers; just swap the inner controls. */}
         <section className="grid grid-cols-1 gap-3 rounded-2xl bg-white p-5 shadow-sm sm:grid-cols-4">
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-slate-600">{copy.preset}</span>
             <select
               value={preset}
               onChange={(e) => setPreset(e.target.value)}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              disabled={isFree}
+              title={isFree ? copy.upgradeIndicators : undefined}
+              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500"
             >
-              {PRESETS.map((p) => (
+              {(isFree ? PRESETS.filter((p) => p.key === "disruptive") : PRESETS).map((p) => (
                 <option key={p.key} value={p.key}>
                   {language === "zh-CN" ? p.labelZh : p.labelEn}
                 </option>
@@ -404,27 +447,49 @@ export default function DailyPicks() {
               ))}
             </select>
           </label>
-          <label className="block sm:col-span-2">
-            <span className="mb-1 block text-xs font-medium text-slate-600">
-              {copy.date}{" "}
-              <button
-                type="button"
-                onClick={() => setDate("")}
-                className="ml-2 rounded-full border border-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-500 hover:bg-slate-50"
-                disabled={!date}
-              >
-                {copy.today}
-              </button>
-            </span>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              max={newestForTier || newestAvailable}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-            />
-          </label>
+          {isFree ? (
+            <div className="block sm:col-span-2">
+              <span className="mb-1 block text-xs font-medium text-slate-600">{copy.date}</span>
+              <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                <span aria-hidden="true">🔒</span>
+                <span>{copy.latestPeriodPill}</span>
+              </div>
+            </div>
+          ) : (
+            <label className="block sm:col-span-2">
+              <span className="mb-1 block text-xs font-medium text-slate-600">
+                {copy.date}{" "}
+                <button
+                  type="button"
+                  onClick={() => setDate("")}
+                  className="ml-2 rounded-full border border-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-500 hover:bg-slate-50"
+                  disabled={!date}
+                >
+                  {copy.today}
+                </button>
+              </span>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                max={newestForTier || newestAvailable}
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+            </label>
+          )}
         </section>
+
+        {/* Free-tier paywall banner — explicitly enumerates the
+            three knobs (preset, top-3, lag) so users understand
+            what they're missing rather than wondering why the page
+            looks sparse. The existing tier strip below still shows
+            the lag warning, but this banner gets the higher-impact
+            position above the list. */}
+        {isFree ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+            {copy.freeTierGridBanner}
+          </div>
+        ) : null}
 
         {/* Tier strip */}
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs text-slate-500">
@@ -524,6 +589,43 @@ export default function DailyPicks() {
                       <div className="divide-y divide-slate-100">
                         {rows.map((row) => {
                           const accent = accentFor(row.aggregate_verdict);
+                          // Free tier: render a non-clickable
+                          // card with company name + 1-line
+                          // thesis + an explicit upgrade CTA.
+                          // Indicators (verdict chip, score,
+                          // consensus) are all hidden — those
+                          // are the "indicators" the upgrade
+                          // unlocks. Linking the CTA to /wallet
+                          // matches the existing upgrade flow.
+                          if (isFree) {
+                            return (
+                              <div
+                                key={`${row.symbol}-${row.pick_date}`}
+                                className={`block w-full px-5 py-4 text-left ${accent.row}`}
+                              >
+                                <div className="flex flex-wrap items-baseline gap-3">
+                                  <span className="text-base font-semibold text-slate-900">
+                                    {row.symbol_name ? `${row.symbol_name} (${row.symbol})` : row.symbol}
+                                  </span>
+                                </div>
+                                {row.headline_thesis ? (
+                                  <p className="mt-1 text-sm text-slate-600 line-clamp-2">
+                                    {row.headline_thesis}
+                                  </p>
+                                ) : (
+                                  <p className="mt-1 text-xs italic text-slate-400">{copy.headlineFallback}</p>
+                                )}
+                                <div className="mt-2">
+                                  <Link
+                                    to="/wallet"
+                                    className="inline-flex items-center gap-1 rounded-full bg-indigo-600 px-3 py-1 text-[11px] font-medium text-white shadow-sm hover:bg-indigo-700"
+                                  >
+                                    {copy.upgradeIndicators}
+                                  </Link>
+                                </div>
+                              </div>
+                            );
+                          }
                           return (
                             <button
                               type="button"

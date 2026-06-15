@@ -3,6 +3,9 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -11,10 +14,12 @@ import {
 import {
   createPaperPortfolio,
   formatApiError,
+  getMasterTeamBacktest,
   getPaperNavHistory,
   listPaperOrders,
   listPaperPortfolios,
   proposePaperOrder,
+  type MasterBacktestResultView,
   type PaperNavPointView,
   type PaperOrderView,
   type PaperPortfolioInput,
@@ -91,6 +96,19 @@ const COPY = {
     newOrderSubmitting: "提交中...",
     error: "操作失败",
     loading: "加载中...",
+    masterCardTitle: "大师团队因子回测 vs 美股指数",
+    masterCardSubtitle:
+      "10 位大师风格映射到代表性标的，月度等权再平衡，与 SPY / QQQ 同窗口对比。",
+    masterMetricCumulative: "大师团队累计收益",
+    masterMetricAnnual: "年化收益",
+    masterMetricSharpe: "Sharpe",
+    masterMetricMaxDD: "最大回撤",
+    masterBenchmarkLabel: "{symbol} 累计收益",
+    masterUniverseTitle: "因子映射股票池",
+    masterRangeLabel: "回测区间",
+    masterEmpty: "暂无回测数据",
+    masterError: "回测加载失败",
+    masterLegendStrategy: "大师团队",
   },
   en: {
     title: "Paper Trading Performance Archive",
@@ -134,6 +152,19 @@ const COPY = {
     newOrderSubmitting: "Submitting...",
     error: "Operation failed",
     loading: "Loading...",
+    masterCardTitle: "Master-team factor backtest vs US indices",
+    masterCardSubtitle:
+      "10 master personas mapped to representative tickers, equal-weight monthly rebalanced, compared with SPY / QQQ over the same window.",
+    masterMetricCumulative: "Master team cum. return",
+    masterMetricAnnual: "Annualised",
+    masterMetricSharpe: "Sharpe",
+    masterMetricMaxDD: "Max drawdown",
+    masterBenchmarkLabel: "{symbol} cum. return",
+    masterUniverseTitle: "Factor anchors",
+    masterRangeLabel: "Window",
+    masterEmpty: "No backtest data",
+    masterError: "Backtest load failed",
+    masterLegendStrategy: "Master team",
   },
 } as const;
 
@@ -213,6 +244,7 @@ const PaperTrading: React.FC = () => {
       </header>
       <ComplianceBanner surface="paper_trading" />
 
+      <MasterTeamBacktestCard copy={copy} language={language} />
 
       {error ? (
         <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
@@ -731,5 +763,201 @@ const Field: React.FC<{ label: string; children: React.ReactNode; colspan?: numb
     {children}
   </label>
 );
+
+// ----- Master-team factor backtest card -------------------------------------
+
+// Stable colour palette for the strategy + first two benchmarks, plus a
+// fallback list for additional benchmarks.
+const MASTER_COLORS = ["#0ea5e9", "#f97316", "#10b981", "#8b5cf6", "#f43f5e"];
+
+const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = ({
+  copy,
+  language,
+}) => {
+  const [data, setData] = useState<MasterBacktestResultView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getMasterTeamBacktest({ start: "2015-01-01", benchmarks: ["SPY", "QQQ"] })
+      .then((res) => {
+        if (!cancelled) {
+          setData(res);
+          setError(null);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(formatApiError(e, copy.masterError));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [copy.masterError]);
+
+  // Merge strategy + each benchmark curve onto a shared X axis (date).
+  // We build a date→{nav, bench:{symbol→pct}} map keyed off the
+  // strategy curve, since it's the densest and SPY/QQQ trading days
+  // are a strict subset.
+  const chartData = useMemo(() => {
+    if (!data) return [];
+    type Row = Record<string, number | string>;
+    const merged = new Map<string, Row>();
+    for (const p of data.navCurve) {
+      const date = p.date.slice(0, 10);
+      merged.set(date, { date, strategy: p.pct * 100 });
+    }
+    for (const b of data.benchmarks) {
+      for (const p of b.curve) {
+        const date = p.date.slice(0, 10);
+        const row: Row = merged.get(date) ?? { date, strategy: NaN };
+        row[b.symbol] = p.pct * 100;
+        merged.set(date, row);
+      }
+    }
+    return Array.from(merged.values()).sort((a, b) =>
+      String(a.date).localeCompare(String(b.date)),
+    );
+  }, [data]);
+
+  const fmtPct = (v: number) =>
+    `${formatNumberForLanguage(v * 100, language, { maximumFractionDigits: 2 })}%`;
+  const fmtPctAxis = (v: number) =>
+    `${formatNumberForLanguage(v, language, { maximumFractionDigits: 0 })}%`;
+
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <header className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h2 className="text-base font-semibold text-slate-900">{copy.masterCardTitle}</h2>
+          <p className="mt-1 text-xs text-slate-500">{copy.masterCardSubtitle}</p>
+        </div>
+        {data ? (
+          <div className="text-[11px] text-slate-500">
+            <span className="uppercase tracking-wide">{copy.masterRangeLabel}: </span>
+            <span className="font-mono text-slate-700">
+              {data.start.slice(0, 10)} → {data.end.slice(0, 10)}
+            </span>
+          </div>
+        ) : null}
+      </header>
+
+      {error ? (
+        <div className="mt-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </div>
+      ) : null}
+
+      {loading && !data ? (
+        <div className="mt-6 flex h-56 items-center justify-center text-xs text-slate-400">
+          {copy.loading}
+        </div>
+      ) : !data ? (
+        <div className="mt-6 flex h-56 items-center justify-center text-xs text-slate-400">
+          {copy.masterEmpty}
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 grid grid-cols-2 gap-3 rounded-md bg-slate-50 p-3 sm:grid-cols-4">
+            <Kpi
+              label={copy.masterMetricCumulative}
+              value={fmtPct(data.metrics.cumulativeReturn)}
+              tone={data.metrics.cumulativeReturn >= 0 ? "text-emerald-600" : "text-rose-600"}
+            />
+            <Kpi
+              label={copy.masterMetricAnnual}
+              value={fmtPct(data.metrics.annualizedReturn)}
+              tone={data.metrics.annualizedReturn >= 0 ? "text-emerald-600" : "text-rose-600"}
+            />
+            <Kpi
+              label={copy.masterMetricSharpe}
+              value={formatNumberForLanguage(data.metrics.sharpeRatio, language, {
+                maximumFractionDigits: 2,
+              })}
+            />
+            <Kpi
+              label={copy.masterMetricMaxDD}
+              value={fmtPct(data.metrics.maxDrawdown)}
+              tone="text-rose-600"
+            />
+          </div>
+
+          <div className="mt-4 h-72 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 8, left: 4 }}>
+                <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={64} />
+                <YAxis
+                  tick={{ fontSize: 11 }}
+                  tickFormatter={fmtPctAxis}
+                  width={56}
+                  domain={["auto", "auto"]}
+                />
+                <Tooltip
+                  formatter={(v: number) =>
+                    `${formatNumberForLanguage(v, language, { maximumFractionDigits: 2 })}%`
+                  }
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line
+                  type="monotone"
+                  dataKey="strategy"
+                  name={copy.masterLegendStrategy}
+                  stroke={MASTER_COLORS[0]}
+                  strokeWidth={2.2}
+                  dot={false}
+                  isAnimationActive={false}
+                  connectNulls
+                />
+                {data.benchmarks.map((b, i) => (
+                  <Line
+                    key={b.symbol}
+                    type="monotone"
+                    dataKey={b.symbol}
+                    name={copy.masterBenchmarkLabel.replace("{symbol}", b.symbol)}
+                    stroke={MASTER_COLORS[(i + 1) % MASTER_COLORS.length]}
+                    strokeWidth={1.6}
+                    strokeDasharray="4 4"
+                    dot={false}
+                    isAnimationActive={false}
+                    connectNulls
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="mt-4">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              {copy.masterUniverseTitle}
+            </h3>
+            <ul className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-5">
+              {data.universe.map((a) => (
+                <li
+                  key={a.master}
+                  className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px]"
+                >
+                  <div className="flex items-baseline justify-between gap-1">
+                    <span className="font-medium capitalize text-slate-700">{a.master}</span>
+                    <span className="font-mono text-[11px] text-slate-900">{a.symbol}</span>
+                  </div>
+                  <div className="mt-0.5 truncate text-[10px] text-slate-500" title={a.style}>
+                    {a.style}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
+    </section>
+  );
+};
 
 export default PaperTrading;

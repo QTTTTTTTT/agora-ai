@@ -398,10 +398,64 @@ func extractAssistPlan(raw string) (FundAssistPlan, error) {
 // onto examples and enum lists much more reliably than terse
 // instructions. The extra ~400 tokens of prompt is worth it for
 // first-shot success.
+//
+// The two language branches are deliberately not produced by
+// running the zh template through a translator at runtime — the
+// schema, enum set, and formatting rules are load-bearing for
+// downstream parsing, so we hand-author both versions and pin them
+// with the english-smoke test in Step 12.
 func buildAssistSystemPrompt(languageHint string) string {
-	lang := "zh-CN"
-	if h := strings.TrimSpace(languageHint); h != "" {
-		lang = h
+	lang := strings.TrimSpace(languageHint)
+	if lang == "" {
+		lang = "zh-CN"
+	}
+	if strings.HasPrefix(strings.ToLower(lang), "en") {
+		return `You are the "Fund Creation Assistant" on the fundai platform. The user describes the fund they want to launch, and what teammates they need, in free-form natural language. Your job is to translate that description into a structured JSON plan.
+
+[Hard rules]
+1. Output exactly one JSON object. No commentary, greeting, or code-fence markers.
+2. When a field is missing, fall back to a reasonable default; when unknown, omit rather than fabricate.
+3. Every market code MUST be one of the whitelist: a_share, us_equity, hk_equity, crypto, futures. A fund has exactly one market.
+4. Each team member's focus must belong to the fund's market. For example, a us_equity fund must NOT contain A-share/HK tickers like 600519 / 0700; an a_share fund must NOT contain US tickers like NVDA / AAPL.
+5. fund.specialization.markets, when present, must contain only the fund's own market. Multi-market funds are forbidden.
+6. The team must contain at least one role=pm member; without a PM the workflow cannot run.
+7. Role must be one of: pm, researcher, trader, risk.
+8. Respond in English. Write description / rationale / systemPrompt fields in English.
+
+[Output JSON schema]
+{
+  "fund": {
+    "name": "string, fund name",
+    "description": "string, 1-2 sentence fund overview",
+    "market": "a_share | us_equity | hk_equity | crypto | futures",
+    "exchange": "optional, e.g. NASDAQ, NYSE, SSE, SZSE, HKEX",
+    "assetClass": "optional, e.g. equity, futures, crypto",
+    "baseCurrency": "optional, e.g. USD, CNY, HKD",
+    "primaryDirection": "long | long_short | short, default long",
+    "initialCapital": number, initial capital (in baseCurrency), default 1000000,
+    "universe": {
+      "mode": "explicit | sector | theme",
+      "symbols": ["optional, explicit ticker list"],
+      "themes": ["optional, theme tags"]
+    },
+    "specialization": {
+      "markets": ["must contain only fund.market"],
+      "themes": ["optional"],
+      "instruments": ["optional"]
+    }
+  },
+  "agents": [
+    {
+      "role": "pm | researcher | trader | risk",
+      "name": "string, role display name",
+      "focus": "optional, the researcher's specific theme / ticker (e.g. \"NVDA\" or \"semiconductors\")",
+      "systemPrompt": "1-3 English sentences describing this agent's responsibility, scope, and output requirements"
+    }
+  ],
+  "rationale": "1-2 English sentences explaining how you interpreted the user's brief"
+}
+
+Return JSON only, no additional text.`
 	}
 	return fmt.Sprintf(`你是 fundai 平台的"基金创建助手"。用户会用自然语言告诉你他想做什么样的基金，以及团队需要哪些成员；你的任务是把这段描述转换为结构化的 JSON 计划。
 
@@ -456,7 +510,10 @@ func buildAssistSystemPrompt(languageHint string) string {
 // occasionally answers conversationally ("好的，我帮您设计一个基金...")
 // and skips the JSON entirely. The reminder is short and stable so
 // it doesn't blow up the prompt cache.
-func buildAssistUserPrompt(brief string) string {
+func buildAssistUserPrompt(brief, languageHint string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(languageHint)), "en") {
+		return "User brief:\n\n" + strings.TrimSpace(brief) + "\n\nReturn JSON exactly per the schema in the system prompt."
+	}
 	return "用户的需求如下：\n\n" + strings.TrimSpace(brief) + "\n\n请按 system prompt 中的 schema 输出 JSON。"
 }
 
@@ -476,7 +533,7 @@ func computeAssistPlan(ctx context.Context, svc FundAssistService, userID string
 	}
 
 	system := buildAssistSystemPrompt(req.LanguageHint)
-	user := buildAssistUserPrompt(prompt)
+	user := buildAssistUserPrompt(prompt, req.LanguageHint)
 
 	raw, err := svc.Chat(ctx, userID, system, user)
 	if err != nil {

@@ -47,6 +47,7 @@ import type {
   ABAttributionSymbolRow as SharedABAttributionSymbolRow,
   ABTestOperationalAttribution as SharedABTestOperationalAttribution,
 } from "@fundai/api-client";
+import i18n from "i18next";
 import { dispatchSessionExpired } from "./sessionExpiryEvent";
 import { toast } from "./toast";
 
@@ -177,7 +178,7 @@ export function getStoredUserId(): string {
 }
 
 export function getMissingTokenMessage(): string {
-  return "当前会话缺少访问凭证，请先登录。";
+  return i18n.t("apiErrors:missingToken");
 }
 
 function buildUrl(path: string): string {
@@ -303,7 +304,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
         { zh: "服务响应较慢，请稍后重试。", en: "The server is slow to respond. Please retry shortly." },
       );
       throw new ApiError(
-        "请求超时，请稍后重试。",
+        i18n.t("apiErrors:timeout"),
         0,
         `Timed out after ${DEFAULT_REQUEST_TIMEOUT_MS}ms`,
         requestId,
@@ -326,21 +327,30 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   const payload = isJSON ? await response.json().catch(() => null) : await response.text().catch(() => "");
 
   if (!response.ok) {
-    const fallback = typeof payload === "string" && payload ? payload : `请求失败，状态码 ${response.status}`;
+    const fallback =
+      typeof payload === "string" && payload
+        ? payload
+        : i18n.t("apiErrors:requestFailedStatus", { status: response.status });
     const normalized = normalizeErrorMessage(payload, fallback);
     if (response.status === 401) {
       clearApiToken();
       // Notify the global SessionExpiryWatcher so the UI can show a
       // friendly toast and soft-navigate to /login carrying ?next=…
-      // instead of leaving every page to paint its own raw "登录失效"
-      // banner. Throwing still happens — callers that already render
-      // localised inline error states keep working unchanged.
+      // instead of leaving every page to paint its own raw "session
+      // expired" banner. Throwing still happens — callers that already
+      // render localised inline error states keep working unchanged.
       dispatchSessionExpired({
         requestId: responseRequestId,
         path,
         reason: "api_request_401",
       });
-      throw new ApiError("登录状态已失效，请重新登录后再试。", response.status, normalized.detail, responseRequestId, payload);
+      throw new ApiError(
+        i18n.t("apiErrors:sessionExpired"),
+        response.status,
+        normalized.detail,
+        responseRequestId,
+        payload,
+      );
     }
     // Server errors (5xx) are infrastructure failures, not business
     // outcomes — every caller benefits from a uniform toast rather
@@ -420,6 +430,7 @@ export type LoginResponse = SharedLoginResponse & {
   role: string;
   kyc_status?: string;
   kyc_level?: string;
+  preferred_language?: string;
   expires_at: string;
   request_id?: string;
 };
@@ -428,6 +439,7 @@ export type SessionResponse = SharedSessionResponse & {
   authenticated: boolean;
   kyc_status?: string;
   kyc_level?: string;
+  preferred_language?: string;
   request_id?: string;
   error?: string;
   detail?: string;
@@ -486,7 +498,7 @@ async function submitAuth(path: string, body: AuthPayload): Promise<LoginOutcome
     | (TwoFAEnrollmentRequiredResponse & { request_id?: string })
     | null;
   if (!response.ok) {
-    const fallback = `登录失败，状态码 ${response.status}`;
+    const fallback = i18n.t("apiErrors:loginFailedStatus", { status: response.status });
     const normalized = normalizeErrorMessage(payload, fallback);
     throw new ApiError(normalized.message, response.status, normalized.detail, payload?.request_id);
   }
@@ -499,7 +511,12 @@ async function submitAuth(path: string, body: AuthPayload): Promise<LoginOutcome
     return { kind: "enrollment_required", grant: en.enrollment_grant, expiresAt: en.expires_at };
   }
   if (!payload || !(payload as LoginResponse).token || !(payload as LoginResponse).user_id) {
-    throw new ApiError("登录失败，响应体异常", response.status, undefined, payload?.request_id);
+    throw new ApiError(
+      i18n.t("apiErrors:loginBadResponse"),
+      response.status,
+      undefined,
+      payload?.request_id,
+    );
   }
   return { kind: "session", payload: persistLogin(payload as LoginResponse) };
 }
@@ -669,7 +686,7 @@ async function jsonRequest<T>(path: string, init: RequestInit): Promise<T> {
   });
   const payload = (await response.json().catch(() => null)) as (T & { error?: string; detail?: string; request_id?: string }) | null;
   if (!response.ok) {
-    const fallback = `请求失败，状态码 ${response.status}`;
+    const fallback = i18n.t("apiErrors:requestFailedStatus", { status: response.status });
     const normalized = normalizeErrorMessage(payload, fallback);
     throw new ApiError(normalized.message, response.status, normalized.detail, payload?.request_id);
   }
@@ -696,7 +713,7 @@ export async function fetchSession(): Promise<SessionResponse> {
   }
   if (!response.ok) {
     clearApiToken();
-    const fallback = `会话请求失败，状态码 ${response.status}`;
+    const fallback = i18n.t("apiErrors:sessionFailedStatus", { status: response.status });
     const normalized = normalizeErrorMessage(payload, fallback);
     throw new ApiError(normalized.message, response.status, normalized.detail, payload?.request_id);
   }
@@ -1226,6 +1243,103 @@ export async function getPaperNavHistory(portfolioId: string): Promise<PaperNavP
 }
 
 // ---------------------------------------------------------------------------
+// Support contact ("Get help" floating button)
+//
+//   GET /api/support-contact         — public, drives the global button
+//   PUT /api/admin/support-contact   — super_admin, edits the singleton config
+// ---------------------------------------------------------------------------
+
+export interface SupportContactView {
+  enabled: boolean;
+  discordUrl: string;
+  qrImageUrl: string;
+  message: string;
+  updatedAt: string;
+}
+
+export type SupportContactInput = Omit<SupportContactView, "updatedAt">;
+
+export async function getSupportContact(): Promise<SupportContactView> {
+  return apiGet<SupportContactView>(`/api/support-contact`);
+}
+
+export async function updateSupportContact(
+  input: SupportContactInput,
+): Promise<SupportContactView> {
+  return apiPut<SupportContactView>(`/api/admin/support-contact`, input);
+}
+
+// ---------------------------------------------------------------------------
+// Master-team factor backtest (public, unauthenticated). The /papertrading
+// page renders this as a single hero card showing the 10-master ensemble vs
+// SPY/QQQ over the 2015→today window. Defaults match the backend handler.
+// ---------------------------------------------------------------------------
+
+export interface MasterAnchorView {
+  master: string;
+  symbol: string;
+  style: string;
+}
+
+export interface MasterCurvePointView {
+  date: string;
+  nav: number;
+  pct: number;
+}
+
+export interface MasterBenchmarkCurveView {
+  symbol: string;
+  curve: MasterCurvePointView[];
+  cumulativeReturn: number;
+}
+
+export interface MasterBacktestMetricsView {
+  cumulativeReturn: number;
+  annualizedReturn: number;
+  volatility: number;
+  sharpeRatio: number;
+  maxDrawdown: number;
+  winRate: number;
+}
+
+export interface MasterBacktestResultView {
+  strategy: string;
+  start: string;
+  end: string;
+  initialCapital: number;
+  finalNav: number;
+  universe: MasterAnchorView[];
+  navCurve: MasterCurvePointView[];
+  benchmarks: MasterBenchmarkCurveView[];
+  metrics: MasterBacktestMetricsView;
+  generatedAt: string;
+}
+
+export interface MasterBacktestQuery {
+  start?: string; // YYYY-MM-DD
+  end?: string;
+  initial?: number;
+  benchmarks?: string[];
+}
+
+export async function getMasterTeamBacktest(
+  query: MasterBacktestQuery = {},
+): Promise<MasterBacktestResultView> {
+  const params = new URLSearchParams();
+  if (query.start) params.set("start", query.start);
+  if (query.end) params.set("end", query.end);
+  if (typeof query.initial === "number" && query.initial > 0) {
+    params.set("initial", String(query.initial));
+  }
+  if (query.benchmarks && query.benchmarks.length > 0) {
+    params.set("benchmarks", query.benchmarks.join(","));
+  }
+  const qs = params.toString();
+  const path = `/api/papertrading/public/master-backtest${qs ? `?${qs}` : ""}`;
+  return apiGet<MasterBacktestResultView>(path);
+}
+
+// ---------------------------------------------------------------------------
 // Stage 5 — A-share intraday signal dry-run
 // ---------------------------------------------------------------------------
 
@@ -1718,6 +1832,31 @@ export async function upsertAdminFXRate(input: UpsertFXRateInput): Promise<{ id:
 export async function updateFundBaseCurrency(fundId: string, baseCurrency: string): Promise<{ ok: true }> {
   return apiPost<{ ok: true }>(`/api/funds/${encodeURIComponent(fundId)}/settings/base-currency`, {
     base_currency: baseCurrency,
+  });
+}
+
+// updateFundPreferredLanguage persists a per-fund language override.
+// Pass null (or "") to clear the override and let the fund inherit the
+// owner's users.preferred_language. The server validates against
+// {"zh-CN","en-US"} so anything else returns 400.
+export async function updateFundPreferredLanguage(
+  fundId: string,
+  preferredLanguage: string | null,
+): Promise<{ ok: true; preferred_language: string }> {
+  return apiPost<{ ok: true; preferred_language: string }>(
+    `/api/funds/${encodeURIComponent(fundId)}/settings/preferred-language`,
+    { preferred_language: preferredLanguage ?? "" },
+  );
+}
+
+// updateUserPreferredLanguage flips the authenticated user's language
+// preference. The PATCH lands on /api/me/preferences and returns the
+// resulting state for the caller to mirror into local stores.
+export async function updateUserPreferredLanguage(
+  language: "zh-CN" | "en-US",
+): Promise<{ preferred_language: string }> {
+  return apiPatch<{ preferred_language: string }>(`/api/me/preferences`, {
+    language,
   });
 }
 
@@ -5405,7 +5544,7 @@ export class FundAssistRejectedError extends Error {
   readonly plan?: FundAssistPlan;
   readonly warnings: string[];
   constructor(payload: { detail?: string; issues?: FundAssistPlanIssue[]; plan?: FundAssistPlan; warnings?: string[] }) {
-    super(payload.detail ?? "AI 输出的方案未通过校验");
+    super(payload.detail ?? i18n.t("apiErrors:planValidationFailed"));
     this.name = "FundAssistRejectedError";
     this.issues = payload.issues ?? [];
     this.plan = payload.plan;
@@ -6388,4 +6527,131 @@ export interface AdvisorByokInfo {
 
 export async function fetchAdvisorByokInfo(): Promise<AdvisorByokInfo> {
   return apiGet<AdvisorByokInfo>("/api/advisor/byok/info");
+}
+
+// --- Admin user-management console (read-only) -----------------------------
+//
+// Mirrors the wire shapes returned by server/cmd/server/admin_users_handler.go.
+// Endpoints are admin-gated server-side; the client does its own role guard
+// to redirect non-admins before they ever fire these requests, but the
+// guard is convenience only — the server is the source of truth.
+
+export interface AdminUsersListItem {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  role: string;
+  status: string;
+  kycStatus: string;
+  createdAt: string;
+  lastLoginAt?: string;
+  currentTier: string;
+  tierUntil?: string;
+  lifetimeLLMCostCents: number;
+  lifetimeLLMCalls: number;
+}
+
+export interface AdminUsersListResponse {
+  users: AdminUsersListItem[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface AdminUsersListParams {
+  q?: string;
+  tier?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface AdminDailyCount {
+  date: string;
+  count: number;
+}
+
+export interface AdminTierCount {
+  tier: string;
+  count: number;
+}
+
+export interface AdminUsersStatsResponse {
+  totalUsers: number;
+  activeUsers7d: number;
+  newUsers30d: AdminDailyCount[];
+  tierDistribution: AdminTierCount[];
+  mrrCents: number;
+  asOf: string;
+}
+
+export interface AdminUserDetailProfile {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  phone?: string;
+  role: string;
+  status: string;
+  kycStatus: string;
+  kycLevel: string;
+  emailVerified: boolean;
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface AdminUserSubscription {
+  planTier: string;
+  status: string;
+  startDate: string;
+  endDate: string;
+  paymentMethod?: string;
+  autoRenew: boolean;
+}
+
+export interface AdminUsageBreakdown {
+  key: string;
+  calls: number;
+  costCents: number;
+}
+
+export interface AdminUsageDayPoint {
+  date: string;
+  calls: number;
+  costCents: number;
+}
+
+export interface AdminUserUsageSummary {
+  lifetimeCalls: number;
+  lifetimeCostCents: number;
+  byStep: AdminUsageBreakdown[];
+  byProvider: AdminUsageBreakdown[];
+  last30d: AdminUsageDayPoint[];
+}
+
+export interface AdminUserDetailResponse {
+  profile: AdminUserDetailProfile;
+  subscriptions: AdminUserSubscription[];
+  usageSummary: AdminUserUsageSummary;
+  walletBalanceCents: number;
+}
+
+export async function fetchAdminUsersStats(): Promise<AdminUsersStatsResponse> {
+  return apiGet<AdminUsersStatsResponse>("/api/admin/users/stats");
+}
+
+export async function fetchAdminUsersList(
+  params: AdminUsersListParams = {},
+): Promise<AdminUsersListResponse> {
+  const qs = new URLSearchParams();
+  if (params.q && params.q.trim() !== "") qs.set("q", params.q.trim());
+  if (params.tier && params.tier.trim() !== "") qs.set("tier", params.tier.trim());
+  if (typeof params.page === "number" && params.page > 0) qs.set("page", String(params.page));
+  if (typeof params.size === "number" && params.size > 0) qs.set("size", String(params.size));
+  const tail = qs.toString() ? `?${qs.toString()}` : "";
+  return apiGet<AdminUsersListResponse>(`/api/admin/users${tail}`);
+}
+
+export async function fetchAdminUserDetail(userId: string): Promise<AdminUserDetailResponse> {
+  return apiGet<AdminUserDetailResponse>(`/api/admin/users/${encodeURIComponent(userId)}`);
 }

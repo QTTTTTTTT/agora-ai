@@ -345,6 +345,12 @@ func divIgnoreZero(x float64, n int) float64 {
 // scheduled run instant for today AND we haven't already run it
 // today; if both, fires runWatchlistWave.
 func (l *dailyPicksLoop) tick(ctx context.Context) {
+	// Daily picks runs under the synthetic publisher user, not a
+	// human owner. Stamp the publisher's preferred_language so any
+	// downstream prompt builder / message-bundle lookup honours the
+	// publisher-configured language for the newsletter content.
+	ctx = ctxWithUserLocale(ctx, l.db, advisor.PublisherUserID)
+	ctx = withLoopOrigin(ctx, "daily_picks")
 	wls, err := l.picks.ListActiveWatchlists(ctx)
 	if err != nil {
 		slog.Warn("daily_picks_loop.tick.list_failed", "err", err)
@@ -439,7 +445,7 @@ func (l *dailyPicksLoop) runWatchlistWave(ctx context.Context, wl dailypicks.Wat
 	waveCtx, cancel := context.WithTimeout(ctx, l.opts.WaveTimeout)
 	defer cancel()
 
-	today := l.clock().UTC().Truncate(24 * time.Hour)
+	today := pickDateFor(l.clock())
 
 	// Pre-flight cost guard: if SkipIfAlreadyComplete and we
 	// already have N rows for (market, preset, today) where N >=
@@ -792,6 +798,73 @@ func sameUTCDate(a, b time.Time) bool {
 	au := a.UTC()
 	bu := b.UTC()
 	return au.Year() == bu.Year() && au.Month() == bu.Month() && au.Day() == bu.Day()
+}
+
+// pickDateFor returns the calendar date the daily_picks row written
+// at instant `t` should be labelled with. Anchored to Asia/Shanghai
+// so the UI's date-archive accordion (DailyPicks.tsx grouping by
+// pick_date) lines up with the BJT calendar day a reader sees on
+// their device.
+//
+// Return value layout: an instant of `t`s BJT calendar day named
+// in UTC midnight (e.g. for `t = 2026-06-12 04:30 +08:00` returns
+// `time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)`). The repo layer
+// does `pickDate.UTC()` on every reader / writer before casting to
+// Postgres `::DATE`; storing the calendar BJT day as UTC-midnight
+// makes that conversion a no-op and the cast therefore lands on
+// the BJT day rather than UTC-shifting a day backward. Returning
+// a time tagged in `Asia/Shanghai` instead would cause the same
+// 04:30 BJT instant to silently `.UTC()`-shift to the previous
+// day at the SQL layer — that was the 2026-06-12 morning bug.
+//
+// Why NOT UTC (the pre-2026-06-12 behaviour):
+//
+//	The four US watchlists fire at 16:30 ET = 20:30 UTC = 04:30 BJT
+//	the next day. Truncating l.clock().UTC() at 04:30 BJT pins
+//	pickDate to "yesterday in UTC" — exactly the day the previous
+//	morning's wave already wrote 50 rows for. CountForDay matches,
+//	the wave skip_completes, and the new ET trading day's picks
+//	never get written until 08:00 BJT when UTC finally rolls. That's
+//	the bug observed on 2026-06-12 morning: 04:39 BJT skip_complete
+//	with existing=50, want=50, but daily_picks for 2026-06-12 BJT
+//	had zero rows.
+//
+// Why Asia/Shanghai specifically (vs America/New_York, vs schedule-
+// local):
+//
+//	The product's primary readers are in BJT. Labelling picks by
+//	the BJT calendar day they become visible (rather than by the
+//	ET trading day they're derived from) makes "today's picks" the
+//	picks the user opens at breakfast on day X. Switching to
+//	America/New_York would label US picks one BJT-day behind, which
+//	is technically correct ("trading day 2026-06-11 ET, derived
+//	from the close 2026-06-11 16:00 ET") but reads as stale to the
+//	BJT user opening the app at 09:00 BJT June 12. CN watchlists
+//	already fire at 15:30 BJT (their local), so BJT and CN-local
+//	agree for them; using BJT is therefore consistent across both
+//	market families.
+//
+// Backward compatibility:
+//
+//	Every historical run in production landed AFTER 08:00 BJT
+//	(verified against daily_picks for 2026-06-09..06-11), at which
+//	point UTC-date and BJT-date are equal. So the existing rows
+//	don't need migration — their pick_date column still names the
+//	same calendar day under both conventions.
+func pickDateFor(t time.Time) time.Time {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		// Container shipped without tzdata is a deployment bug
+		// we won't paper over with a magic offset; fall back to
+		// UTC so the failure mode is "labelled in UTC" (the old
+		// behaviour) rather than "labelled in a wrong fixed
+		// offset" which would be subtly worse to debug.
+		loc = time.UTC
+	}
+	tl := t.In(loc)
+	// Name the BJT calendar day in UTC midnight — see doc above
+	// on why we don't return a Shanghai-tagged time.Time.
+	return time.Date(tl.Year(), tl.Month(), tl.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // shouldFireWave is the pure gate function deciding whether a tick

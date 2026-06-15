@@ -8,17 +8,20 @@
 // Tier model (this file is the SINGLE source of truth for who
 // sees what):
 //
-//	Free   : list capped at pick_date <= today-14d, detail same lag,
-//	         no per-day quota on detail because they can't even reach
-//	         today's rows in the first place.
-//	Basic  : list shows today's rows; detail capped at 10 / day.
-//	Pro    : list shows today; detail capped at 30 / day.
+//	Free   : list capped at pick_date <= today-3d AND limited to the
+//	         single most-recent allowed pick_date AND clamped to top
+//	         3 rows AND restricted to the `disruptive` preset only.
+//	         Detail endpoint always 403s with upgrade_required.
+//	Pro    : list shows today's rows; detail capped at 30 / day.
+//	Premium: list shows today; detail capped at 30 / day.
 //	Enterprise : list shows today; detail uncapped.
 //
 //	The list ENDPOINT serves the same rows to every tier — what
-//	differs is the pick_date upper-bound filter. This preserves the
+//	differs is the pick_date upper-bound filter, the preset
+//	whitelist, and the row count cap. This preserves the
 //	publisher-mode invariant ("one row, all readers") while still
-//	giving paid tiers something to pay for (timeliness).
+//	giving paid tiers something to pay for (timeliness + breadth +
+//	depth).
 
 package main
 
@@ -41,14 +44,35 @@ import (
 	"github.com/fundai/server/internal/subscription"
 )
 
-// freeTierLagDays is the time-lag applied to free readers. 14d
-// matches the figure baked into the product spec and is the
-// shortest gap that still creates a meaningful upgrade prompt.
-const freeTierLagDays = 14
+// freeTierLagDays is the time-lag applied to free readers. 3d is
+// the v2 product knob — short enough that the lagged data is still
+// recognisably "recent", long enough that paid tiers retain a
+// meaningful timeliness edge. v1 used 14d; the longer gap was
+// converting too few free users because the data felt stale rather
+// than tantalising.
+const freeTierLagDays = 3
+
+// freeTierVisiblePresets is the whitelist of strategy presets a
+// free-tier reader can browse. Disruptive is the only entry: it
+// has the shortest LLM fan-out (so it's the freshest each day)
+// and Wood-style picks generate the loudest "should I upgrade?"
+// signal. Any other preset on the list call returns 403.
+var freeTierVisiblePresets = map[string]struct{}{
+	"disruptive": {},
+}
+
+// freeTierTopN clamps the row count for free-tier list calls. The
+// frontend hides the per-card detail anyway; surfacing more than
+// 3 rows just dilutes the "scarcity → upgrade" funnel.
+const freeTierTopN = 3
 
 // dailyPickDetailQuotaByTier maps subscription plan to the per-day
 // cap on detail reads. Tiers omitted from this map (or unknown) get
 // the free tier's cap. Enterprise gets -1 = unlimited.
+//
+// Free is 0 because the free path takes a hard 403 in handleDetail
+// before this map is even read; the entry stays as a defense-in-
+// depth in case that branch is ever bypassed.
 var dailyPickDetailQuotaByTier = map[subscription.PlanTier]int{
 	subscription.PlanFree:       0, // free can't reach today's rows so this is unreachable; we keep it 0 for safety
 	subscription.PlanPro:        30,
@@ -166,6 +190,20 @@ func (h *dailyPicksHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	if preset == "" {
 		preset = "disruptive"
 	}
+
+	// Free-tier guard #1 — preset whitelist. Hard 403 so a
+	// URL-tampering reader can't bypass the FE chip-hiding. The
+	// FE catches this and resets the URL to ?preset=disruptive.
+	if tier == subscription.PlanFree {
+		if _, allowed := freeTierVisiblePresets[preset]; !allowed {
+			writeJSON(w, http.StatusForbidden, errorPayload(
+				"forbidden_preset",
+				"this preset requires a paid plan",
+			))
+			return
+		}
+	}
+
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 {
 		limit = 100
@@ -174,6 +212,14 @@ func (h *dailyPicksHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
+
+	// Free-tier guard #2 — clamp pagination. The chip UI hides
+	// multi-page nav anyway; URL tampering must produce the same
+	// row set the FE renders.
+	if tier == subscription.PlanFree {
+		limit = freeTierTopN
+		offset = 0
+	}
 
 	// Tier-driven time lag is the SECURITY-CRITICAL slot —
 	// the SQL upper bound here is what gates free users away
@@ -184,10 +230,16 @@ func (h *dailyPicksHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	// day is later than the tier permits, clamp instead of 404 —
 	// the frontend gets back "the newest you're allowed" along
 	// with the explicit "you wanted X but get Y" signal.
+	//
+	// Free tier ignores ?date= entirely — guard #3 below pins to
+	// the single most-recent allowed pick_date so the UX matches
+	// the "history: latest period only" product copy.
 	var requestedDate time.Time
-	if s := strings.TrimSpace(q.Get("date")); s != "" {
-		if d, err := time.Parse("2006-01-02", s); err == nil {
-			requestedDate = d
+	if tier != subscription.PlanFree {
+		if s := strings.TrimSpace(q.Get("date")); s != "" {
+			if d, err := time.Parse("2006-01-02", s); err == nil {
+				requestedDate = d
+			}
 		}
 	}
 	pinDate := time.Time{}
@@ -197,6 +249,40 @@ func (h *dailyPicksHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		} else {
 			pinDate = requestedDate
 		}
+	}
+
+	// Free-tier guard #3 — pin to the single most-recent allowed
+	// pick_date. Without this, a "limit 3" run sorted by
+	// (pick_date DESC, score DESC) could spill into the previous
+	// day if today's slice has fewer than 3 rows, producing a
+	// confusing mixed-date card list. Explicit pinning is two
+	// queries instead of one but makes the slice deterministic.
+	if tier == subscription.PlanFree && pinDate.IsZero() {
+		latest, lerr := h.picks.List(r.Context(), dailypicks.ListFilter{
+			Market:      market,
+			PresetKey:   preset,
+			MaxPickDate: maxDate,
+			Limit:       1,
+		})
+		if lerr != nil {
+			writeJSON(w, http.StatusInternalServerError, errorPayload("list_failed", lerr.Error()))
+			return
+		}
+		if len(latest) == 0 {
+			// No rows in window — return an explicit empty
+			// payload (with tier metadata) so the FE can
+			// render its empty state without a second
+			// fetch.
+			writeJSON(w, http.StatusOK, dailyPicksListResponse{
+				Picks:                   nil,
+				TotalCount:              0,
+				Tier:                    string(tier),
+				FreeLagDays:             freeTierLagDays,
+				UpgradeRequiredForToday: true,
+			})
+			return
+		}
+		pinDate = latest[0].PickDate
 	}
 
 	rows, err := h.picks.List(r.Context(), dailypicks.ListFilter{
@@ -273,6 +359,19 @@ func (h *dailyPicksHandler) handleDetail(w http.ResponseWriter, r *http.Request)
 	}
 	tier := h.resolveTier(r.Context(), userID)
 
+	// Free tier never sees indicator details. The FE renders a
+	// "🔒 Upgrade to see indicators" CTA in place of the open-
+	// detail button, so this branch is only reachable via direct
+	// URL access. Hard 403 so the upgrade story stays consistent
+	// across the chip UI and the address bar.
+	if tier == subscription.PlanFree {
+		writeJSON(w, http.StatusForbidden, errorPayload(
+			"upgrade_required",
+			"indicator details are not available on the free tier",
+		))
+		return
+	}
+
 	dateStr, symbol, ok := parseDetailPath(r.URL.Path)
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, errorPayload("bad_path", "expected /api/daily-picks/{yyyy-mm-dd}/{symbol}"))
@@ -283,9 +382,9 @@ func (h *dailyPicksHandler) handleDetail(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, errorPayload("bad_date", "date must be yyyy-mm-dd"))
 		return
 	}
-	// Tier gate — same maxDate as the list view. Free users that
-	// guess a today URL get the same 403 they'd get from the
-	// frontend's hidden card.
+	// Tier gate — same maxDate as the list view. Paid users that
+	// guess a future URL get the upgrade pointer rather than a
+	// 404 so the error story is uniform.
 	if pickDate.After(h.maxAllowedDateForTier(tier)) {
 		writeJSON(w, http.StatusForbidden, errorPayload("upgrade_required", "this date is not available on your tier"))
 		return

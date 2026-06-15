@@ -37,6 +37,7 @@ import (
 	"github.com/fundai/server/internal/agentreputation"
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/compliance"
+	"github.com/fundai/server/internal/i18nmsg"
 	"github.com/fundai/server/internal/repository"
 )
 
@@ -212,8 +213,16 @@ func (h *advisorHandler) handleListPresets(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, errorPayload("list_failed", err.Error()))
 		return
 	}
+	// Filter cn_tactic-bound presets out of the en-US response so
+	// the picker UI only shows what the user can actually run. The
+	// per-Consult locale guard remains in place as defence in depth
+	// in case a stale frontend caches a now-blocked preset key.
+	hideTactic := i18nmsg.FromCtx(r.Context()) == i18nmsg.LocaleEN
 	out := make([]advisorPresetWire, 0, len(presets))
 	for _, p := range presets {
+		if hideTactic && len(p.TacticKeys) > 0 {
+			continue
+		}
 		out = append(out, advisorPresetWire{
 			Key:           p.Key,
 			LabelZh:       p.LabelZh,
@@ -320,6 +329,11 @@ func (h *advisorHandler) handleConsult(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, advisor.ErrPresetNotFound):
 			writeJSON(w, http.StatusNotFound, errorPayload("preset_not_found", err.Error()))
+		case errors.Is(err, advisor.ErrPresetLocaleBlocked):
+			writeJSON(w, http.StatusBadRequest, errorPayload(
+				"preset_locale_blocked",
+				i18nmsg.T(i18nmsg.FromCtx(r.Context()), i18nmsg.KeyAdvisorPresetLocaleBlocked),
+			))
 		case errors.Is(err, advisor.ErrUnsupportedPreset):
 			writeJSON(w, http.StatusNotImplemented, errorPayload("preset_not_supported", "this preset requires a panel not yet wired (e.g. A-share short-term tactics in Phase 4)"))
 		case errors.Is(err, advisor.ErrNotReady):

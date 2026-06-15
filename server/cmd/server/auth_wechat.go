@@ -206,11 +206,11 @@ func upsertWechatUser(ctx context.Context, db *sql.DB, openid, unionid string) (
 
 	var user authenticatedUser
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic')
+		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic'), COALESCE(preferred_language, 'zh-CN')
 		FROM users
 		WHERE wechat_openid = $1
 		LIMIT 1
-	`, openid).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel)
+	`, openid).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel, &user.PreferredLanguage)
 	if err == nil {
 		if !strings.EqualFold(user.Status, userStatusActive) {
 			return nil, errUserNotFoundOrInactive
@@ -247,9 +247,9 @@ func upsertWechatUser(ctx context.Context, db *sql.DB, openid, unionid string) (
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO users (id, username, display_name, wechat_openid, status, role)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic')
+		RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic'), COALESCE(preferred_language, 'zh-CN')
 	`, userID, username, displayName, openid, userStatusActive, role).Scan(
-		&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel,
+		&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel, &user.PreferredLanguage,
 	); err != nil {
 		if isUniqueViolation(err) {
 			// Race: another concurrent request created the row. Re-fetch and return.
@@ -269,11 +269,11 @@ func upsertWechatUser(ctx context.Context, db *sql.DB, openid, unionid string) (
 func reloadWechatUser(ctx context.Context, db *sql.DB, openid string) (*authenticatedUser, error) {
 	var user authenticatedUser
 	err := db.QueryRowContext(ctx, `
-		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic')
+		SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic'), COALESCE(preferred_language, 'zh-CN')
 		FROM users
 		WHERE wechat_openid = $1
 		LIMIT 1
-	`, openid).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel)
+	`, openid).Scan(&user.ID, &user.Email, &user.DisplayName, &user.Role, &user.Status, &user.PasswordHash, &user.KYCStatus, &user.KYCLevel, &user.PreferredLanguage)
 	if err != nil {
 		return nil, err
 	}

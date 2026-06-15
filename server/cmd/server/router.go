@@ -79,6 +79,7 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	}
 	mux.HandleFunc("GET /api/account/kyc", handleGetAccountKYC(svc))
 	mux.HandleFunc("POST /api/account/kyc", handleSubmitAccountKYC(svc))
+	mux.HandleFunc("PATCH /api/me/preferences", handlePatchMePreferences(svc))
 
 	// Sprint 4 / android-core: FCM device-token registry + push
 	// fan-out hook for terminal plan transitions.
@@ -101,12 +102,14 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		// Public-facing surfaces of the admin features:
 		//   * /api/feature-flags                  — soft-hide hints for the SPA
 		//   * /api/announcements + .../{id}/read  — banner data + dismissal
+		//   * /api/support-contact                — floating help button config
 		// Both reuse the cache/service constructed inside adminHandler
 		// so we don't have a second connection pool reading the same
 		// rows. Auth is "any logged-in user" (handled inline by the
 		// individual handlers — see feature_flags.go / announcements.go).
 		registerFeatureFlagPublicRoutes(mux, adminHandler.featureFlags)
 		registerAnnouncementPublicRoutes(mux, adminHandler.announcements)
+		mux.HandleFunc("GET /api/support-contact", adminHandler.handleGetSupportContact)
 	}
 	// P0-8 — audit log hash chain verifier (super-admin only).
 	// Mounted independently of adminHandler so an admin handler

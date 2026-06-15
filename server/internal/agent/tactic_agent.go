@@ -48,6 +48,7 @@ import (
 
 	"github.com/fundai/server/internal/agent/cn_tactics"
 	"github.com/fundai/server/internal/cnmarketstructure"
+	"github.com/fundai/server/internal/i18nmsg"
 )
 
 // ---------------------------------------------------------------------------
@@ -165,6 +166,16 @@ func (a *TacticAgent) Analyze(ctx context.Context, in TacticInput) (TacticReport
 	if strings.TrimSpace(in.Symbol) == "" {
 		return TacticReport{}, errors.New("tactic: input.Symbol required")
 	}
+	// Defence in depth: cn_tactics persona JSON is hand-authored in
+	// Chinese, so even with the buildSystemPrompt EN branch above the
+	// LLM still sees zh in the persona context and reliably echoes
+	// it. The advisor service already blocks en-US users from
+	// selecting cn_tactic presets (Step 5); this guard ensures that
+	// any future code path which constructs a TacticAgent directly
+	// also fails closed instead of leaking Chinese into the UI.
+	if i18nmsg.FromCtx(ctx) == i18nmsg.LocaleEN {
+		return TacticReport{}, errors.New("tactic: cn_tactics personas are not available for the en-US locale")
+	}
 	rep := TacticReport{
 		TacticKey:    a.persona.Key,
 		TacticNameZh: a.persona.NameZh,
@@ -260,8 +271,8 @@ func (a *TacticAgent) Analyze(ctx context.Context, in TacticInput) (TacticReport
 	// it only enriches thesis + reasons + risks. If the LLM
 	// call fails we keep the deterministic outputs.
 	if a.llm != nil {
-		sys := a.buildSystemPrompt()
-		user := a.buildUserPrompt(in, rep)
+		sys := a.buildSystemPrompt(ctx)
+		user := a.buildUserPrompt(ctx, in, rep)
 		raw, err := a.complete(ctx, sys, user)
 		if err == nil {
 			parsed, perr := parseTacticLLM(raw)
@@ -699,8 +710,31 @@ func tacticDefaultHolding(p TacticPersona) int {
 // LLM prompt rendering + parsing
 // ---------------------------------------------------------------------------
 
-func (a *TacticAgent) buildSystemPrompt() string {
+func (a *TacticAgent) buildSystemPrompt(ctx context.Context) string {
+	loc := i18nmsg.FromCtx(ctx)
 	var b strings.Builder
+	if loc == i18nmsg.LocaleEN {
+		fmt.Fprintf(&b, "You are %s (%s), a strategy agent specialised in A-share short-term trading.\n",
+			a.persona.NameEn, a.persona.NameZh)
+		if a.persona.HoldingPeriod != "" {
+			fmt.Fprintf(&b, "Holding period: %s.\n", a.persona.HoldingPeriod)
+		}
+		if a.persona.Philosophy != "" {
+			fmt.Fprintf(&b, "Core trading philosophy: %s\n", a.persona.Philosophy)
+		}
+		b.WriteString("\nYou must obey:\n")
+		b.WriteString("1) Do NOT rewrite verdict — verdict is set by deterministic server-side rules; you only enrich thesis / key_reasons / key_risks in English narration;\n")
+		b.WriteString("2) Do NOT fabricate prices or historical data; if a number is needed but not provided, write 'data_unavailable';\n")
+		b.WriteString("3) Output exactly one JSON object (no ``` fences) per the schema below.\n")
+		b.WriteString("4) The persona JSON below may include Chinese context — translate the meaning faithfully into English in your output. Never echo Chinese in thesis / key_reasons / key_risks.\n")
+		b.WriteString("\n=== PERSONA JSON ===\n")
+		if raw, err := json.MarshalIndent(a.persona.Raw, "", "  "); err == nil {
+			b.Write(raw)
+		}
+		b.WriteString("\n=== OUTPUT JSON SCHEMA ===\n")
+		b.WriteString("{ \"thesis\": string<=200 words English, \"key_reasons\": [string,...], \"key_risks\": [string,...] }\n")
+		return b.String()
+	}
 	fmt.Fprintf(&b, "你是 %s（%s），一位专注于 A 股短线交易的策略 agent。\n",
 		a.persona.NameZh, a.persona.NameEn)
 	if a.persona.HoldingPeriod != "" {
@@ -722,11 +756,18 @@ func (a *TacticAgent) buildSystemPrompt() string {
 	return b.String()
 }
 
-func (a *TacticAgent) buildUserPrompt(in TacticInput, rep TacticReport) string {
+func (a *TacticAgent) buildUserPrompt(ctx context.Context, in TacticInput, rep TacticReport) string {
+	loc := i18nmsg.FromCtx(ctx)
 	var b strings.Builder
-	b.WriteString("请为下面这笔已被服务器侧规则判定为 ")
-	b.WriteString(rep.Verdict)
-	b.WriteString(" 的交易，撰写一段简洁的 thesis 并列出 reasons / risks。\n\n")
+	if loc == i18nmsg.LocaleEN {
+		b.WriteString("Write a concise English thesis with reasons / risks for the trade below. Server-side rules already produced verdict=")
+		b.WriteString(rep.Verdict)
+		b.WriteString(".\n\n")
+	} else {
+		b.WriteString("请为下面这笔已被服务器侧规则判定为 ")
+		b.WriteString(rep.Verdict)
+		b.WriteString(" 的交易，撰写一段简洁的 thesis 并列出 reasons / risks。\n\n")
+	}
 	fmt.Fprintf(&b, "symbol: %s\n", in.Symbol)
 	if name := strings.TrimSpace(in.Name); name != "" {
 		// See master_agent.buildUserPrompt — same rationale.
