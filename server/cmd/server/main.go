@@ -3349,7 +3349,11 @@ func isPublicRoute(path string) bool {
 			// help" button rendered on every page including the
 			// login screen. Public-by-design — same data for
 			// every viewer, no PII.
-			"/api/support-contact":
+			"/api/support-contact",
+			// /api/plans drives the public /pricing landing —
+			// price points + features must be readable without
+			// auth so SEO / PH / HN traffic can land directly.
+			"/api/plans":
 			return true
 		default:
 			return false

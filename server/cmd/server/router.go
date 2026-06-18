@@ -111,6 +111,15 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		registerAnnouncementPublicRoutes(mux, adminHandler.announcements)
 		mux.HandleFunc("GET /api/support-contact", adminHandler.handleGetSupportContact)
 	}
+	// Subscription checkout (LemonSqueezy hosted): registered
+	// independently of the SubscriptionHandler because it needs
+	// raw *sql.DB + LS client which the api-layer handler doesn't
+	// have. Same /api/lemonsqueezy/webhook is shared with the
+	// advisor credits handler — added subscription_* event
+	// branches in advisor_credits_handler.go's handleWebhook.
+	if subCheckout := newSubscriptionCheckoutHandler(svc); subCheckout != nil {
+		subCheckout.RegisterRoutes(mux)
+	}
 	// P0-8 — audit log hash chain verifier (super-admin only).
 	// Mounted independently of adminHandler so an admin handler
 	// outage doesn't take the verifier offline.
@@ -290,6 +299,7 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 	if svc.AdvisorService != nil && svc.DailyPicksRepo != nil {
 		dph := newDailyPicksHandler(svc.AdvisorService, svc.DailyPicksRepo, svc.SubscriptionService, svc.DB, svc.DailyPicksLoop)
 		mux.HandleFunc("GET /api/daily-picks", dph.handleList)
+		mux.HandleFunc("GET /api/daily-picks/status", dph.handleStatus)
 		mux.HandleFunc("GET /api/daily-picks/{date}/{symbol}", dph.handleDetail)
 		mux.HandleFunc("POST /api/daily-picks/_admin/run-once", dph.handleAdminRunOnce)
 	}

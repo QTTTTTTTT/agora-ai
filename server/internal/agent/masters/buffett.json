@@ -14,8 +14,19 @@
     "business_model_clarity": "一句话能说清楚"
   },
   "qualitative_filters": {
-    "moat_types": ["品牌（如可口可乐）", "成本优势（如GEICO）", "网络效应", "转换成本", "规模壁垒"],
-    "management": ["资本配置能力强", "诚信透明", "owner-oriented", "回购优于股息"],
+    "moat_types": [
+      "品牌（如可口可乐）",
+      "成本优势（如GEICO）",
+      "网络效应",
+      "转换成本",
+      "规模壁垒"
+    ],
+    "management": [
+      "资本配置能力强",
+      "诚信透明",
+      "owner-oriented",
+      "回购优于股息"
+    ],
     "industry": "无快速颠覆风险（避开技术迭代过快的赛道）"
   },
   "valuation_method": {
@@ -30,15 +41,30 @@
     "管理层有诚信污点",
     "ROE主要靠杠杆撑起"
   ],
-  "verdict_enum": ["BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "BUY / HOLD / AVOID",
     "confidence": "0-100",
     "intrinsic_value_per_share": "$XXX",
     "current_margin_of_safety": "XX%",
     "moat_score": "1-10",
-    "key_reasons": ["3条核心买入/卖出逻辑"],
-    "key_risks": ["2条主要风险"],
+    "key_reasons": [
+      "3条核心买入/卖出逻辑"
+    ],
+    "key_risks": [
+      "2条主要风险"
+    ],
     "recommended_holding": "永久 / 10年+ / 不持有"
-  }
+  },
+  "red_lines_en": [
+    "Complex business beyond circle of competence",
+    "Strong cyclical stock dependent on macro assumptions",
+    "Persistent shareholder dilution",
+    "Management with integrity red flags",
+    "ROE driven mainly by leverage"
+  ]
 }

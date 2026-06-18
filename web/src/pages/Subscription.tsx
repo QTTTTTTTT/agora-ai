@@ -11,6 +11,8 @@ interface Plan {
   tier: string;
   name: string;
   price_cents_month: number;
+  // USD cents — Phase 1 LS 接入后由后端回填，老部署兼容旧版仍可能为 0
+  price_cents_usd_month?: number;
   max_funds: number;
   max_calls_per_day: number;
   model_tiers: string[];
@@ -247,7 +249,22 @@ const Subscription: React.FC = () => {
   );
 
   const formatPrice = useCallback(
-    (priceCentsMonth: number) => `${formatMoneyMinorForDisplay(priceCentsMonth, "CNY", displayCurrency, language)}${copy.monthSuffix}`,
+    (plan: Plan) => {
+      // Phase 1 — LemonSqueezy 接入后所有付费档按 USD 计费。
+      // PriceCentsUSDMonth > 0 时直接渲染美元；老部署 / 老 fund 仍
+      // 走兼容路径用 CNY 价格，并按 displayCurrency 做 FX 换算。
+      if (plan.price_cents_usd_month && plan.price_cents_usd_month > 0) {
+        const dollars = plan.price_cents_usd_month / 100;
+        const formatted = dollars % 1 === 0
+          ? `$${dollars.toFixed(0)}`
+          : `$${dollars.toFixed(2).replace(/0$/, "")}`;
+        return `${formatted}${copy.monthSuffix}`;
+      }
+      if (!plan.price_cents_month || plan.price_cents_month <= 0) {
+        return language === "en-US" ? "Free" : "免费";
+      }
+      return `${formatMoneyMinorForDisplay(plan.price_cents_month, "CNY", displayCurrency, language)}${copy.monthSuffix}`;
+    },
     [copy.monthSuffix, displayCurrency, language],
   );
 
@@ -470,7 +487,7 @@ const Subscription: React.FC = () => {
                     </span>
                   ) : null}
                   <h3 className="mb-1 text-xl font-bold text-gray-900">{plan.name}</h3>
-                  <p className="mb-2 text-3xl font-extrabold text-gray-900">{formatPrice(plan.price_cents_month)}</p>
+                  <p className="mb-2 text-3xl font-extrabold text-gray-900">{formatPrice(plan)}</p>
                   <p className="mb-4 text-sm text-gray-500">
                     {formatModelTiers(plan.model_tiers)} {copy.modelAccessSuffix}
                   </p>

@@ -15,7 +15,12 @@
     "M_Market_Direction": "大盘趋势向上才买"
   },
   "technical_setup": {
-    "base_patterns": ["Cup with Handle", "Flat Base", "Double Bottom", "Ascending Base"],
+    "base_patterns": [
+      "Cup with Handle",
+      "Flat Base",
+      "Double Bottom",
+      "Ascending Base"
+    ],
     "buy_point": "突破pivot point + 成交量放大50%+",
     "stop_loss": "买入价下方 7-8% 严格止损",
     "profit_taking": "上涨20-25%考虑减仓"
@@ -33,7 +38,11 @@
     "亏损公司",
     "破支撑位不止损"
   ],
-  "verdict_enum": ["BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "BUY / HOLD / SELL",
     "confidence": "0-100",
@@ -42,7 +51,17 @@
     "chart_pattern": "Cup with Handle / Flat Base / etc",
     "pivot_point": "$XXX",
     "stop_loss": "$XXX",
-    "key_reasons": ["3条"],
-    "key_risks": ["2条"]
-  }
+    "key_reasons": [
+      "3条"
+    ],
+    "key_risks": [
+      "2条"
+    ]
+  },
+  "red_lines_en": [
+    "Buying in a market downtrend (M-factor negative)",
+    "Weak relative strength (RS < 70)",
+    "Money-losing company",
+    "No stop-loss when key support breaks"
+  ]
 }

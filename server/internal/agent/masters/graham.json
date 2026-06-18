@@ -32,7 +32,11 @@
     "无形资产占比过高",
     "频繁增发稀释股东"
   ],
-  "verdict_enum": ["BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "BUY / HOLD / AVOID",
     "confidence": "0-100",
@@ -40,7 +44,18 @@
     "current_discount": "XX%",
     "passes_defensive_criteria": "X/10",
     "is_net_net": "true/false",
-    "key_reasons": ["3条"],
-    "key_risks": ["2条"]
-  }
+    "key_reasons": [
+      "3条"
+    ],
+    "key_risks": [
+      "2条"
+    ]
+  },
+  "red_lines_en": [
+    "Market cap too small (< $500M, liquidity risk)",
+    "High leverage (debt/equity > 1)",
+    "Money-losing company (unless net-net)",
+    "Disproportionate intangible asset share",
+    "Frequent dilutive share issuance"
+  ]
 }

@@ -4,10 +4,12 @@ import {
   ApiError,
   formatApiError,
   getDailyPickDetail,
+  getDailyPicksStatus,
   listDailyPicks,
   type AdvisorVerdict,
   type DailyPickDetailResponse,
   type DailyPickRow,
+  type DailyPicksStatusResponse,
 } from "../lib/api";
 import { useAppPreferences } from "../lib/preferences";
 import MasterVerdictCard from "../components/MasterVerdictCard";
@@ -231,6 +233,9 @@ export default function DailyPicks() {
   // life nudge so users coming back to the page always see today's
   // picks expanded by default (see `openDates` derivation below).
   const [openDates, setOpenDates] = useState<Set<string>>(() => new Set());
+
+  // Daily-picks loop progress / status (poll every 30s).
+  const [pipelineStatus, setPipelineStatus] = useState<DailyPicksStatusResponse | null>(null);
   const toggleDate = useCallback((d: string) => {
     setOpenDates((prev) => {
       const next = new Set(prev);
@@ -265,6 +270,30 @@ export default function DailyPicks() {
     if (picksByDate.length === 0) return;
     setOpenDates(new Set([picksByDate[0][0]]));
   }, [picksByDate]);
+
+  // Poll /api/daily-picks/status so the progress bar can show whether
+  // the nightly publisher loop has fired yet, how many tickers it's
+  // already scored, and whether anything is stuck. 30s cadence is
+  // plenty given a wave takes 5-7 minutes; we keep it on every page
+  // entry so a returning user sees fresh state instantly.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchOnce = () => {
+      getDailyPicksStatus()
+        .then((s) => {
+          if (!cancelled) setPipelineStatus(s);
+        })
+        .catch(() => {
+          // 静默失败：进度条非关键 UX
+        });
+    };
+    fetchOnce();
+    const id = window.setInterval(fetchOnce, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   // Mirror `preset` into the URL so the choice survives a refresh
   // and is shareable. Uses replace=true so we don't pollute the
@@ -410,6 +439,14 @@ export default function DailyPicks() {
 
         <ComplianceBanner surface="daily_picks" />
 
+        {/* Pipeline progress card — shows whether today's publisher
+            loop has fired and how many tickers it has already scored.
+            Polled every 30s. Hidden when /api/daily-picks/status
+            failed (non-critical UX). */}
+        {pipelineStatus ? (
+          <PipelineProgressCard status={pipelineStatus} language={language} />
+        ) : null}
+
         {/* Filters
             Free tier sees a degraded form of these controls:
               - preset locked to disruptive (only one option)
@@ -515,7 +552,7 @@ export default function DailyPicks() {
                 {copy.freeLagWarning(freeLagDays, newestAvailable)}
               </p>
               <Link
-                to="/wallet"
+                to="/pricing?source=daily_picks_lag"
                 className="mt-4 inline-block rounded-full bg-indigo-600 px-6 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700"
               >
                 {language === "zh-CN" ? "查看升级方案" : "View Pro plans"}
@@ -595,8 +632,9 @@ export default function DailyPicks() {
                           // Indicators (verdict chip, score,
                           // consensus) are all hidden — those
                           // are the "indicators" the upgrade
-                          // unlocks. Linking the CTA to /wallet
-                          // matches the existing upgrade flow.
+                          // unlocks. CTA goes to /pricing with a
+                          // source query param so we can attribute
+                          // conversions back to this entry point.
                           if (isFree) {
                             return (
                               <div
@@ -617,7 +655,7 @@ export default function DailyPicks() {
                                 )}
                                 <div className="mt-2">
                                   <Link
-                                    to="/wallet"
+                                    to="/pricing?source=daily_picks_indicators"
                                     className="inline-flex items-center gap-1 rounded-full bg-indigo-600 px-3 py-1 text-[11px] font-medium text-white shadow-sm hover:bg-indigo-700"
                                   >
                                     {copy.upgradeIndicators}
@@ -648,7 +686,8 @@ export default function DailyPicks() {
                                   {copy.score}: {row.aggregate_score}
                                 </span>
                                 <span className="text-[11px] text-slate-500">
-                                  {copy.consensus}: {Math.round((row.consensus ?? 0) * 100)}%
+                                  {/* consensus 后端已经是 0..100 整数，不再 ×100 */}
+                                  {copy.consensus}: {Math.round(row.consensus ?? 0)}%
                                 </span>
                               </div>
                               {row.headline_thesis ? (
@@ -739,7 +778,8 @@ export default function DailyPicks() {
                       )}
                     </span>
                     <span className="text-xs text-slate-500">
-                      {copy.consensus}: {Math.round((detail.pick.consensus_score ?? 0) * 100)}%
+                      {/* consensus_score 后端已经是 0..100 整数 */}
+                      {copy.consensus}: {Math.round(detail.pick.consensus_score ?? 0)}%
                     </span>
                     <span className="text-xs text-slate-500">
                       Confidence: {detail.pick.aggregate_confidence}%
@@ -789,3 +829,160 @@ export default function DailyPicks() {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// PipelineProgressCard — 「定时器是否启动 / 当前进度」面板。
+//
+// 数据来自 GET /api/daily-picks/status (每 30s 轮询)。逻辑：
+//   - overall=completed → 绿色，"今日全部完成"
+//   - overall=running   → 蓝色脉冲，per-preset bar 实时填充
+//   - overall=pending   → 灰色虚线，"等待今日定时器启动"
+//   - overall=stalled   → 黄色，"上次更新已停滞 >10min"
+// 进度 = done/total，per preset 各一根 bar。
+// ---------------------------------------------------------------------------
+const PRESET_LABEL_ZH: Record<string, string> = {
+  disruptive: "颠覆成长",
+  conservative: "防御价值",
+  garp: "合理成长",
+  macro: "宏观资产",
+};
+const PRESET_LABEL_EN: Record<string, string> = {
+  disruptive: "Disruptive",
+  conservative: "Conservative",
+  garp: "GARP",
+  macro: "Macro",
+};
+
+const PipelineProgressCard: React.FC<{
+  status: DailyPicksStatusResponse;
+  language: string;
+}> = ({ status, language }) => {
+  const isEn = language === "en-US";
+  const overallTone = (() => {
+    switch (status.overall) {
+      case "completed":
+        return {
+          dot: "bg-emerald-500",
+          chip: "bg-emerald-100 text-emerald-700 ring-emerald-200",
+          label: isEn ? "Today's wave: completed" : "今日定时器：已完成",
+        };
+      case "running":
+        return {
+          dot: "bg-blue-500 animate-pulse",
+          chip: "bg-blue-100 text-blue-700 ring-blue-200",
+          label: isEn ? "Today's wave: running" : "今日定时器：执行中",
+        };
+      case "stalled":
+        return {
+          dot: "bg-amber-500",
+          chip: "bg-amber-100 text-amber-700 ring-amber-200",
+          label: isEn ? "Today's wave: stalled (>10 min idle)" : "今日定时器：停滞（>10 分钟无新行）",
+        };
+      default:
+        return {
+          dot: "bg-slate-300",
+          chip: "bg-slate-100 text-slate-600 ring-slate-200",
+          label: isEn ? "Today's wave: pending" : "今日定时器：等待启动",
+        };
+    }
+  })();
+
+  const overallPct = status.total_all > 0 ? Math.round((status.done_all / status.total_all) * 100) : 0;
+  const lastRunIso = status.presets
+    .map((p) => p.last_run_at)
+    .filter((s): s is string => !!s)
+    .sort()
+    .pop();
+  const lastRunLabel = lastRunIso
+    ? new Date(lastRunIso).toLocaleString(isEn ? "en-US" : "zh-CN", {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "—";
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <header className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className={`h-2 w-2 rounded-full ${overallTone.dot}`} />
+          <h2 className="text-sm font-semibold text-slate-900">
+            {isEn ? "Master Team pipeline" : "大师团队定时器"}
+          </h2>
+          <span
+            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ${overallTone.chip}`}
+          >
+            {overallTone.label}
+          </span>
+        </div>
+        <div className="text-[11px] text-slate-500">
+          <span className="font-mono">
+            {status.done_all}/{status.total_all}
+          </span>{" "}
+          ({overallPct}%) ·{" "}
+          {isEn ? "Last update" : "最近更新"}: {lastRunLabel}
+        </div>
+      </header>
+
+      {/* Overall bar */}
+      <div className="mb-3 h-2 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className={`h-full transition-all duration-500 ${
+            status.overall === "completed"
+              ? "bg-emerald-500"
+              : status.overall === "running"
+                ? "bg-blue-500"
+                : status.overall === "stalled"
+                  ? "bg-amber-500"
+                  : "bg-slate-300"
+          }`}
+          style={{ width: `${overallPct}%` }}
+        />
+      </div>
+
+      {/* Per-preset bars */}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {status.presets.map((p) => {
+          const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+          const barColor =
+            p.status === "completed"
+              ? "bg-emerald-500"
+              : p.status === "running"
+                ? "bg-blue-500"
+                : p.status === "stalled"
+                  ? "bg-amber-500"
+                  : "bg-slate-300";
+          const label = (isEn ? PRESET_LABEL_EN : PRESET_LABEL_ZH)[p.preset] ?? p.preset;
+          return (
+            <div
+              key={`${p.preset}-${p.market}`}
+              className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2"
+            >
+              <div className="mb-1 flex items-baseline justify-between text-[11px]">
+                <span className="font-medium text-slate-700">
+                  {label}{" "}
+                  <span className="text-slate-400">· {p.market}</span>
+                </span>
+                <span className="font-mono text-slate-600">
+                  {p.done}/{p.total}
+                  {p.error_count > 0 ? (
+                    <span className="ml-1 text-rose-600">
+                      ({isEn ? "err" : "失败"} {p.error_count})
+                    </span>
+                  ) : null}
+                </span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+                <div
+                  className={`h-full transition-all duration-500 ${barColor}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+};

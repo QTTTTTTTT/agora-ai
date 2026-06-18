@@ -67,13 +67,13 @@ import (
 // frameworks like Munger's 25 biases, CANSLIM, etc.) flow through
 // the Raw map and get rendered into the LLM system prompt verbatim.
 type MasterPersona struct {
-	Key             string   `json:"agent_id"`
-	NameZh          string   `json:"name_zh"`
-	NameEn          string   `json:"name_en"`
-	Style           string   `json:"style"`
-	HoldingPeriod   string   `json:"holding_period"`
-	Philosophy      string   `json:"philosophy"`
-	VerdictEnum     []string `json:"verdict_enum,omitempty"`
+	Key           string   `json:"agent_id"`
+	NameZh        string   `json:"name_zh"`
+	NameEn        string   `json:"name_en"`
+	Style         string   `json:"style"`
+	HoldingPeriod string   `json:"holding_period"`
+	Philosophy    string   `json:"philosophy"`
+	VerdictEnum   []string `json:"verdict_enum,omitempty"`
 
 	// Raw is the full parsed JSON. The renderer in
 	// buildSystemPrompt walks Raw to embed every key — that
@@ -107,27 +107,35 @@ func (p MasterPersona) Validate() error {
 // (BUY/HOLD/AVOID) and carry per-master extras (intrinsic value,
 // PEG ratio, moat score) the analyst quartet doesn't have.
 type MasterReport struct {
-	MasterKey       string         `json:"master_key"`
-	MasterNameZh    string         `json:"master_name_zh"`
-	MasterNameEn    string         `json:"master_name_en"`
-	Symbol          string         `json:"symbol"`
+	MasterKey    string `json:"master_key"`
+	MasterNameZh string `json:"master_name_zh"`
+	MasterNameEn string `json:"master_name_en"`
+	Symbol       string `json:"symbol"`
 	// SymbolName is the issuer's short Chinese / English name (e.g.
 	// "德科立"). Optional — empty when the upstream provider doesn't
 	// resolve it. Plumbed through so the UI can show
 	// "德科立 (688205)" without round-tripping a separate lookup.
-	SymbolName      string         `json:"symbol_name,omitempty"`
-	AsOf            time.Time      `json:"asof"`
-	GeneratedAt     time.Time      `json:"generated_at"`
-	Verdict         string         `json:"verdict"`
-	Confidence      int            `json:"confidence"`
-	Thesis          string         `json:"thesis"`
-	KeyReasons      []string       `json:"key_reasons"`
-	KeyRisks        []string       `json:"key_risks"`
-	MasterSpecific  map[string]any `json:"master_specific,omitempty"`
-	RedLinesHit     []string       `json:"red_lines_hit,omitempty"`
-	LLMModel        string         `json:"llm_model,omitempty"`
-	PromptTokens    int            `json:"prompt_tokens,omitempty"`
-	CompletionTokens int           `json:"completion_tokens,omitempty"`
+	SymbolName     string         `json:"symbol_name,omitempty"`
+	AsOf           time.Time      `json:"asof"`
+	GeneratedAt    time.Time      `json:"generated_at"`
+	Verdict        string         `json:"verdict"`
+	Confidence     int            `json:"confidence"`
+	Thesis         string         `json:"thesis"`
+	KeyReasons     []string       `json:"key_reasons"`
+	KeyRisks       []string       `json:"key_risks"`
+	MasterSpecific map[string]any `json:"master_specific,omitempty"`
+	RedLinesHit    []string       `json:"red_lines_hit,omitempty"`
+	// RedLinesHitEn is the parallel English translation of any
+	// red-line entries triggered. Populated only when the persona
+	// JSON ships a `red_lines_en` array of equal length; the
+	// front-end picks this list when language=en-US so SEC marketing
+	// surfaces don't bleed Chinese into English copy. The original
+	// RedLinesHit (Chinese, verbatim) stays as-is so the compliance
+	// scanner's exact-string match keeps working.
+	RedLinesHitEn    []string `json:"red_lines_hit_en,omitempty"`
+	LLMModel         string   `json:"llm_model,omitempty"`
+	PromptTokens     int      `json:"prompt_tokens,omitempty"`
+	CompletionTokens int      `json:"completion_tokens,omitempty"`
 }
 
 // Validate enforces what must be set before persistence.
@@ -163,19 +171,19 @@ func (r MasterReport) Validate() error {
 // per-category blocks. The Notes field is a freeform escape hatch
 // for caller-supplied context (e.g. "EPS preview tomorrow").
 type MasterInput struct {
-	Symbol          string
+	Symbol string
 	// Name is the issuer's short Chinese / English name (e.g.
 	// "德科立", "Apple Inc."). Optional — when present the
 	// master prompt prefixes it so the LLM reasons about the
 	// company by name rather than only by ticker, and the UI
 	// shows e.g. "德科立 (688205)" in the verdict header.
-	Name            string
-	AssetClass      string
-	Market          string
-	AsOf            time.Time
-	PriceLast       float64
-	PriceChange     float64
-	Currency        string
+	Name        string
+	AssetClass  string
+	Market      string
+	AsOf        time.Time
+	PriceLast   float64
+	PriceChange float64
+	Currency    string
 
 	// Fundamentals is the single-period snapshot from
 	// internal/fundamental (PE, PB, ROE, dividend yield, …).
@@ -183,7 +191,7 @@ type MasterInput struct {
 	// validate "10年ROE平均≥15%" type criteria. nil-safe:
 	// the agent prompts the LLM to honestly say "数据缺失"
 	// rather than fabricate values.
-	Fundamentals    *FundamentalsBlock
+	Fundamentals *FundamentalsBlock
 
 	// Technical is the price-action / momentum / volatility
 	// snapshot. Optional — when the wiring layer's OHLC fetcher
@@ -195,7 +203,7 @@ type MasterInput struct {
 	// Notes is freeform context. Operators may prepend
 	// "earnings in 3 days" or "$$$ insider buying detected"
 	// to bias the prompt.
-	Notes           string
+	Notes string
 }
 
 // ---------------------------------------------------------------------------
@@ -353,8 +361,29 @@ func (a *MasterAgent) Analyze(ctx context.Context, in MasterInput) (MasterReport
 	// or (b) match known monologue tells. Anything that survives
 	// is kept as a genuine red-line hit.
 	cleaned := sanitizeRedLines(parsed.RedLinesHit)
+	// Strict whitelist: only keep entries that are an EXACT match
+	// (after trim) to one of the persona's canonical red_lines.
+	// This drops every LLM monologue leak the byte-pattern blacklist
+	// missed — schema field names ("master_specific", "expected_IRR"),
+	// reasoning suffixes ("传统行业的小修小补（修正）"), Hindi character
+	// slop ("传统行业的小修小补 मासूम]"), thinking-mode tails ("最终数组：…"),
+	// etc. The persona JSON is authoritative; if the model invents a
+	// new red-line phrase, we drop it instead of trusting it.
+	cleaned = whitelistAgainstPersona(cleaned, a.persona.Raw)
+	// Mega-cap exemption: certain red-lines logically can't apply
+	// to companies that themselves are the "scale incumbent". Drop
+	// them so the LLM doesn't end up flagging GOOGL / MSFT / META
+	// as "out-scaled by a competitor". Threshold is $500B market
+	// cap (USD), measured against the snapshot fundamentals.
+	cleaned = applyMegaCapExemptions(cleaned, in.Fundamentals)
 	if len(cleaned) > 0 {
 		rep.RedLinesHit = cleaned
+		// Map each Chinese red-line hit to its English counterpart
+		// using the persona's parallel red_lines / red_lines_en
+		// arrays. Anything that doesn't have an exact match in the
+		// canonical list falls back to its Chinese form so the UI
+		// at least shows something rather than dropping the entry.
+		rep.RedLinesHitEn = translateRedLinesHit(cleaned, a.persona.Raw)
 		// Honouring the persona contract: any red-line hit
 		// forces the verdict to AVOID regardless of what the
 		// LLM said. The Go side is authoritative on hard rules.
@@ -534,19 +563,14 @@ func (a *MasterAgent) buildSystemPrompt() string {
 		"The only exception: red_lines_hit entries MUST be quoted verbatim from the persona's red_lines list — " +
 		"if a red-line entry is in Chinese in the persona JSON, keep it in Chinese (the downstream scanner relies on exact-string match).\n")
 	b.WriteString("\n=== PERSONA JSON ===\n")
-	if raw, err := json.MarshalIndent(a.persona.Raw, "", "  "); err == nil {
+	// Compact JSON is materially cheaper than pretty-printed JSON at
+	// daily-picks scale (hundreds of master calls per run) and preserves
+	// exactly the same semantic content for the model.
+	if raw, err := json.Marshal(a.persona.Raw); err == nil {
 		b.Write(raw)
 	}
-	b.WriteString("\n=== OUTPUT JSON SCHEMA ===\n")
-	b.WriteString("{\n")
-	b.WriteString("  \"verdict\": \"STRONG_BUY|BUY|HOLD|AVOID|SHORT|PASS|SKIP\",\n")
-	b.WriteString("  \"confidence\": 0-100,\n")
-	b.WriteString("  \"thesis\": \"a single English paragraph, no more than 200 words\",\n")
-	b.WriteString("  \"key_reasons\": [\"the 3 most decisive judgement factors, each in English\"],\n")
-	b.WriteString("  \"key_risks\": [\"the 2 most material risks, each in English\"],\n")
-	b.WriteString("  \"red_lines_hit\": [\"red-line entries triggered, quoted verbatim from persona; [] if none\"],\n")
-	b.WriteString("  \"master_specific\": { \"...\": \"persona-specific fields such as intrinsic_value / PEG / graham_number / CANSLIM_score, etc.\" }\n")
-	b.WriteString("}\n")
+	b.WriteString("\n=== OUTPUT JSON SHAPE ===\n")
+	b.WriteString("Return exactly one JSON object with keys: verdict, confidence, thesis (a single English paragraph), key_reasons (the 3 most decisive judgement factors, each in English), key_risks (the 2 most material risks, each in English), red_lines_hit, master_specific.\n")
 	return b.String()
 }
 
@@ -571,7 +595,12 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 		fmt.Fprintf(&b, "market: %s\n", in.Market)
 	}
 	if !in.AsOf.IsZero() {
-		fmt.Fprintf(&b, "asof: %s\n", in.AsOf.Format(time.RFC3339))
+		// Daily-picks cache keys include the full prompt. A seconds-level
+		// timestamp makes otherwise identical manual reruns miss the
+		// 24h advisor_master chat cache and re-burn tokens. The filing
+		// periods and technical.asof carry the real data freshness; the
+		// top-level prompt only needs the run date.
+		fmt.Fprintf(&b, "asof_date: %s\n", in.AsOf.Format(time.DateOnly))
 	}
 	if in.PriceLast > 0 {
 		fmt.Fprintf(&b, "price_last: %.4f %s\n", in.PriceLast, in.Currency)
@@ -667,8 +696,9 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 		if hist := in.Fundamentals.History; len(hist) > 0 {
 			b.WriteString("\n--- history (most recent first) ---\n")
 			limit := len(hist)
-			if limit > 10 {
-				limit = 10
+			maxHist := maxHistoryRowsForMaster(a.persona.Key)
+			if limit > maxHist {
+				limit = maxHist
 			}
 			for i := 0; i < limit; i++ {
 				y := hist[i]
@@ -707,7 +737,7 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 		}
 	}
 	if in.Technical != nil {
-		renderTechnicalBlock(&b, in.Technical)
+		renderTechnicalBlock(&b, in.Technical, technicalDetailForMaster(a.persona.Key))
 	}
 	if in.Notes != "" {
 		fmt.Fprintf(&b, "\n--- notes ---\n%s\n", in.Notes)
@@ -731,7 +761,39 @@ func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 // directly. Without them the LLM tends to over-quantify
 // ("price 0.0123 above 20D high") instead of using readable
 // labels ("MA20>MA50>MA200, multi-timeframe uptrend").
-func renderTechnicalBlock(b *strings.Builder, t *MasterTechnicalBlock) {
+type technicalDetailLevel int
+
+const (
+	technicalDetailCompact technicalDetailLevel = iota
+	technicalDetailMedium
+	technicalDetailFull
+)
+
+func maxHistoryRowsForMaster(masterKey string) int {
+	switch strings.ToLower(strings.TrimSpace(masterKey)) {
+	case "buffett", "munger", "graham", "greenblatt":
+		return 10
+	case "lynch", "oneil", "wood":
+		return 5
+	case "dalio", "marks", "druckenmiller":
+		return 3
+	default:
+		return 5
+	}
+}
+
+func technicalDetailForMaster(masterKey string) technicalDetailLevel {
+	switch strings.ToLower(strings.TrimSpace(masterKey)) {
+	case "oneil", "druckenmiller", "wood":
+		return technicalDetailFull
+	case "lynch", "dalio", "marks":
+		return technicalDetailMedium
+	default:
+		return technicalDetailCompact
+	}
+}
+
+func renderTechnicalBlock(b *strings.Builder, t *MasterTechnicalBlock, detail technicalDetailLevel) {
 	if t == nil {
 		return
 	}
@@ -756,6 +818,13 @@ func renderTechnicalBlock(b *strings.Builder, t *MasterTechnicalBlock) {
 	if t.PctChange52WHi != 0 {
 		fmt.Fprintf(b, "pct_change_from_52w_high=%+.2f%%\n", t.PctChange52WHi*100)
 	}
+	if detail == technicalDetailCompact {
+		if t.MAAlignment != "" {
+			fmt.Fprintf(b, "ma_alignment=%s\n", t.MAAlignment)
+		}
+		writeTechnicalTags(b, t.Tags, 2)
+		return
+	}
 	if t.SMA20 != 0 {
 		fmt.Fprintf(b, "sma20=%.4f\n", t.SMA20)
 	}
@@ -774,6 +843,19 @@ func renderTechnicalBlock(b *strings.Builder, t *MasterTechnicalBlock) {
 			fmt.Fprintf(b, " (%s)", t.RSI14Zone)
 		}
 		b.WriteString("\n")
+	}
+	if detail == technicalDetailMedium {
+		if t.ATR14PctOfPx != 0 {
+			fmt.Fprintf(b, "atr14_pct_of_price=%.2f%%\n", t.ATR14PctOfPx*100)
+		}
+		if t.RelativeVolume != 0 {
+			fmt.Fprintf(b, "relative_volume=%.2fx (latest / 20-bar SMA)\n", t.RelativeVolume)
+		}
+		if t.BreakoutState != "" {
+			fmt.Fprintf(b, "breakout_state=%s\n", t.BreakoutState)
+		}
+		writeTechnicalTags(b, t.Tags, 4)
+		return
 	}
 	if t.MACDLine != 0 || t.MACDSignal != 0 || t.MACDHist != 0 {
 		fmt.Fprintf(b, "macd_line=%.4f macd_signal=%.4f macd_hist=%.4f", t.MACDLine, t.MACDSignal, t.MACDHist)
@@ -800,11 +882,19 @@ func renderTechnicalBlock(b *strings.Builder, t *MasterTechnicalBlock) {
 	if t.BreakoutState != "" {
 		fmt.Fprintf(b, "breakout_state=%s\n", t.BreakoutState)
 	}
-	if len(t.Tags) > 0 {
-		b.WriteString("technical_tags:\n")
-		for _, tag := range t.Tags {
-			fmt.Fprintf(b, "  - %s\n", tag)
-		}
+	writeTechnicalTags(b, t.Tags, 0)
+}
+
+func writeTechnicalTags(b *strings.Builder, tags []string, limit int) {
+	if len(tags) == 0 {
+		return
+	}
+	if limit <= 0 || limit > len(tags) {
+		limit = len(tags)
+	}
+	b.WriteString("technical_tags:\n")
+	for _, tag := range tags[:limit] {
+		fmt.Fprintf(b, "  - %s\n", tag)
 	}
 }
 
@@ -887,14 +977,14 @@ func normaliseMasterVerdict(s string) string {
 //
 // Drop rules — an item is dropped if it matches ANY of:
 //
-//	1. length > redLineMaxRunes (catches paragraph-long monologues)
-//	2. contains a known monologue tell, case-insensitive:
-//	     EN: "wait,", "i must", "ignore", "monologue", "removing",
-//	         "json generation", "let me", "actually", "instead"
-//	     ZH: "此处", "修正为", "等待", "重做", "重置", "我必须", "实际上"
-//	3. wrapped in parens AND contains an English imperative ("Ignore
-//	   previous", "Setting array", "Removing invalid") — the parens
-//	   are a strong signal the model is talking to itself
+//  1. length > redLineMaxRunes (catches paragraph-long monologues)
+//  2. contains a known monologue tell, case-insensitive:
+//     EN: "wait,", "i must", "ignore", "monologue", "removing",
+//     "json generation", "let me", "actually", "instead"
+//     ZH: "此处", "修正为", "等待", "重做", "重置", "我必须", "实际上"
+//  3. wrapped in parens AND contains an English imperative ("Ignore
+//     previous", "Setting array", "Removing invalid") — the parens
+//     are a strong signal the model is talking to itself
 //
 // Anything that survives is kept verbatim — the persona prompts
 // emit canonical short tags like "无技术壁垒的'伪创新'" (14 chars)
@@ -939,6 +1029,132 @@ func sanitizeRedLines(items []string) []string {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// megaCapThresholdUSD is the market-cap threshold above which the
+// "out-scaled by a competitor" red-line is structurally implausible.
+// $500B captures every FAANG-tier name plus current AI majors
+// (NVDA, TSM, ...) without false-positive-ing $200-400B large caps
+// where the relative-scale argument can still bite.
+const megaCapThresholdUSD = 500_000_000_000.0
+
+// megaCapExemptRedLines lists the red-line phrases that should be
+// dropped when the subject is itself a mega-cap incumbent. Keep
+// this list deliberately small and obvious — a red-line that
+// might still apply (e.g. management-quality lines) is left in.
+var megaCapExemptRedLines = map[string]struct{}{
+	"竞争对手具备同等技术且规模更大": {},
+}
+
+// applyMegaCapExemptions drops red-line entries that don't make
+// physical sense for mega-cap companies. The market-cap signal
+// comes from FundamentalsBlock.Metrics["market_cap"] (USD per the
+// upstream provider contract). When the metric is missing the
+// list is returned unchanged — we don't want to silently drop
+// legitimate hits because a Yahoo quote was throttled.
+func applyMegaCapExemptions(hits []string, fund *FundamentalsBlock) []string {
+	if len(hits) == 0 || fund == nil || len(fund.Metrics) == 0 {
+		return hits
+	}
+	mcap, ok := fund.Metrics["market_cap"]
+	if !ok || mcap < megaCapThresholdUSD {
+		return hits
+	}
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		if _, drop := megaCapExemptRedLines[strings.TrimSpace(h)]; drop {
+			continue
+		}
+		out = append(out, h)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// whitelistAgainstPersona enforces that each red-line entry is an
+// EXACT match (after trim) to one of the persona's canonical
+// red_lines. Items outside the whitelist are dropped. This is the
+// authoritative gate against LLM hallucination / thinking-mode
+// leakage on the red_lines_hit array — the byte-pattern
+// sanitizeRedLines stays in front as a cheap pre-filter, but
+// whitelisting is what guarantees only known red-line phrases
+// reach UI / scanner.
+func whitelistAgainstPersona(hits []string, raw map[string]any) []string {
+	if len(hits) == 0 {
+		return nil
+	}
+	zhList := stringSliceFromAny(raw["red_lines"])
+	if len(zhList) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(zhList))
+	for _, s := range zhList {
+		allowed[strings.TrimSpace(s)] = struct{}{}
+	}
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		key := strings.TrimSpace(h)
+		if key == "" || key == "无" {
+			continue
+		}
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		out = append(out, key)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// translateRedLinesHit maps each (Chinese) red-line entry to its
+// English counterpart using the persona's parallel `red_lines` and
+// `red_lines_en` arrays from the JSON config. Returns nil when the
+// English list isn't provided or is the wrong length; falls back
+// to the original Chinese string for any single entry that doesn't
+// hit an exact match in the canonical zh list.
+func translateRedLinesHit(hits []string, raw map[string]any) []string {
+	if len(hits) == 0 || len(raw) == 0 {
+		return nil
+	}
+	zhList := stringSliceFromAny(raw["red_lines"])
+	enList := stringSliceFromAny(raw["red_lines_en"])
+	if len(enList) == 0 || len(enList) != len(zhList) {
+		return nil
+	}
+	idxByZh := make(map[string]int, len(zhList))
+	for i, s := range zhList {
+		idxByZh[strings.TrimSpace(s)] = i
+	}
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		key := strings.TrimSpace(h)
+		if i, ok := idxByZh[key]; ok && i < len(enList) {
+			out = append(out, strings.TrimSpace(enList[i]))
+			continue
+		}
+		// Fallback — keep the original entry so the UI doesn't
+		// silently drop a triggered red-line.
+		out = append(out, h)
+	}
+	return out
+}
+
+func stringSliceFromAny(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
 	}
 	return out
 }
@@ -992,8 +1208,8 @@ var MasterReportJSONSchema = []byte(`{
 // ---------------------------------------------------------------------------
 
 var (
-	personaMu     sync.RWMutex
-	personaCache  map[string]MasterPersona
+	personaMu    sync.RWMutex
+	personaCache map[string]MasterPersona
 )
 
 // LoadMasterPersonas reads every *.json under internal/agent/masters/

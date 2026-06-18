@@ -21,6 +21,12 @@ type SubscriptionPlan struct {
 	Tier              string   `json:"tier"`
 	Name              string   `json:"name"`
 	PriceCentsMonth   int      `json:"price_cents_month"`
+	// PriceCentsUSDMonth 是面向海外 SaaS 的美元月费 (USD cents)，
+	// 由 LemonSqueezy 接入路径使用。前端 /pricing 页固定按这个字段渲染。
+	PriceCentsUSDMonth int     `json:"price_cents_usd_month"`
+	PriceCentsUSDYear  int     `json:"price_cents_usd_year"`
+	MinSeats           int     `json:"min_seats"`
+	ContactSales       bool    `json:"contact_sales"`
 	MaxFunds          int      `json:"max_funds"`
 	MaxCallsPerDay    int      `json:"max_calls_per_day"`
 	ModelTiers        []string `json:"model_tiers"`

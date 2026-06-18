@@ -378,6 +378,15 @@ func userScopedAdvisorLLM(svc *Services, userID, stepName string) agent.LLMClien
 	opts := []agent.LLMAdapterOption{
 		agent.WithLLMAdapterStep(stepName),
 	}
+	if stepName == "advisor_master" {
+		// Master reports include thesis, reasons, risks and persona-specific
+		// fields. DeepSeek's non-native JSON mode can be more verbose than
+		// Gemini responseSchema mode, so the default 4096 cap occasionally
+		// cuts the object in half and causes parse_error:no json object found.
+		// Give advisor_master enough headroom while leaving shorter tactic
+		// calls at their provider/default cap.
+		opts = append(opts, agent.WithLLMAdapterMaxTokens(7168))
+	}
 	if userID != "" {
 		opts = append(opts, agent.WithLLMAdapterUser(userID))
 	}
@@ -525,6 +534,65 @@ func newAdvisorFundamentalsLoader(svc *Services, _ map[string]agent.MasterPerson
 					EarningsGrowthYoY: y.EarningsGrowthYoY,
 				})
 			}
+			// Backfill the most recent year's missing fields from
+			// the single-period snapshot. Yahoo's quoteSummary
+			// historical modules are increasingly rate-limited
+			// (HTTP 429), which means the per-year rows often only
+			// carry ProfitMargin and the rest fall to 0. Without
+			// this backfill the master prompt sees `roe=0% gross=0%
+			// op=0% fcf=0 …` even when fundamentals.* has the live
+			// values, which makes the deterministic rule_based_prior
+			// pre-check come back UNKNOWN on every criterion and the
+			// LLM correctly defaults every verdict to HOLD.
+			//
+			// We only patch the LATEST year (index 0 since History is
+			// sorted most-recent-first) and only when the field is
+			// the literal zero — preserving any actual historical
+			// values the fetcher did manage to retrieve.
+			if len(block.History) > 0 {
+				h := &block.History[0]
+				if h.ReturnOnEquity == 0 && metrics.ReturnOnEquity != 0 {
+					h.ReturnOnEquity = metrics.ReturnOnEquity
+				}
+				if h.GrossMargin == 0 && metrics.GrossMarginLatest != 0 {
+					h.GrossMargin = metrics.GrossMarginLatest
+				}
+				if h.OperatingMargin == 0 && metrics.OperatingMargin != 0 {
+					h.OperatingMargin = metrics.OperatingMargin
+				}
+				if h.ProfitMargin == 0 && metrics.ProfitMargin != 0 {
+					h.ProfitMargin = metrics.ProfitMargin
+				}
+				if h.RevenueGrowthYoY == 0 && metrics.RevenueGrowth != 0 {
+					h.RevenueGrowthYoY = metrics.RevenueGrowth
+				}
+				if h.EarningsGrowthYoY == 0 && metrics.EarningsGrowth != 0 {
+					h.EarningsGrowthYoY = metrics.EarningsGrowth
+				}
+				if h.DebtToEquity == 0 && metrics.DebtToEquity != 0 {
+					h.DebtToEquity = metrics.DebtToEquity
+				}
+			}
+		} else if metrics.ReturnOnEquity != 0 || metrics.ProfitMargin != 0 ||
+			metrics.OperatingMargin != 0 || metrics.GrossMarginLatest != 0 ||
+			metrics.RevenueGrowth != 0 || metrics.EarningsGrowth != 0 ||
+			metrics.DebtToEquity != 0 {
+			// History fetcher was unwired or failed entirely (very
+			// common when Yahoo quoteSummary is throttled). Synthesise
+			// a single-row history from the live snapshot so the
+			// rule_based_prior layer has at least one usable data
+			// point per criterion instead of returning UNKNOWN
+			// across the board.
+			block.History = []agent.YearlyMetricsLite{{
+				Year:              time.Now().UTC().Year(),
+				ReturnOnEquity:    metrics.ReturnOnEquity,
+				GrossMargin:       metrics.GrossMarginLatest,
+				OperatingMargin:   metrics.OperatingMargin,
+				ProfitMargin:      metrics.ProfitMargin,
+				DebtToEquity:      metrics.DebtToEquity,
+				RevenueGrowthYoY:  metrics.RevenueGrowth,
+				EarningsGrowthYoY: metrics.EarningsGrowth,
+			}}
 		}
 		return block, nil
 	}

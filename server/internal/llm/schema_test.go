@@ -162,7 +162,7 @@ func TestCallGemini_StripsAdditionalProperties(t *testing.T) {
 	c := newCapturingClient(t, &body, stubGeminiResp)
 	cfg := &ModelConfig{Provider: ProviderGemini, ModelName: "gemini-3.1-pro-preview", BaseURL: "https://gen.example", APIKey: "k", MaxTokens: 256}
 	req := ChatRequest{
-		Messages: []ChatMessage{{Role: "user", Content: "go"}},
+		Messages:       []ChatMessage{{Role: "user", Content: "go"}},
 		ResponseFormat: "json_schema",
 		ResponseSchema: []byte(`{
 			"type": "object",
@@ -346,7 +346,7 @@ func TestCallClaude_NoResponseFormat(t *testing.T) {
 	}
 }
 
-func TestCallDeepSeek_UsesOpenAIPath_SchemaSurvives(t *testing.T) {
+func TestCallDeepSeek_UsesOpenAIPath_SchemaAsPromptInstruction(t *testing.T) {
 	var body string
 	c := newCapturingClient(t, &body, stubOpenAIResp)
 	cfg := &ModelConfig{Provider: ProviderDeepSeek, ModelName: "deepseek-chat", BaseURL: "https://api.deepseek.com/v1", APIKey: "k"}
@@ -361,8 +361,11 @@ func TestCallDeepSeek_UsesOpenAIPath_SchemaSurvives(t *testing.T) {
 	if _, err := c.callOpenAI(context.Background(), cfg, req); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(body, `"type":"json_schema"`) {
-		t.Errorf("deepseek must also produce json_schema body: %s", body)
+	if strings.Contains(body, `"response_format"`) {
+		t.Errorf("deepseek should not send unsupported response_format field: %s", body)
+	}
+	if !strings.Contains(body, "Return ONLY one complete JSON object") {
+		t.Errorf("deepseek should preserve JSON intent via prompt instruction: %s", body)
 	}
 }
 

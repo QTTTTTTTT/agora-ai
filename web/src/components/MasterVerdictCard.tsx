@@ -52,7 +52,10 @@ export interface MasterVerdictCardProps {
 const MasterVerdictCard: React.FC<MasterVerdictCardProps> = ({ report, language }) => {
   const pill = verdictPill(report.verdict);
   const name = language === "en-US" ? report.master_name_en : report.master_name_zh;
-  const subName = language === "en-US" ? report.master_name_zh : report.master_name_en;
+  // 副标题：中文模式下展示英文名（"巴菲特" / "Warren Buffett"）作为
+  // 国际化补充；英文模式下故意不展示中文，避免在 SEC marketing 合规
+  // 语境下出现非英文文本污染。
+  const subName = language === "en-US" ? "" : report.master_name_en;
   const specificEntries = report.master_specific
     ? Object.entries(report.master_specific).filter(([, v]) => v !== null && v !== undefined && v !== "")
     : [];
@@ -86,16 +89,28 @@ const MasterVerdictCard: React.FC<MasterVerdictCardProps> = ({ report, language 
       ) : null}
 
       {report.red_lines_hit && report.red_lines_hit.length > 0 ? (
-        <div className="rounded-md bg-rose-50 p-3 text-xs text-rose-700">
-          <div className="mb-1 font-semibold">
-            {language === "en-US" ? "Red lines hit" : "触发红线"}
-          </div>
-          <ul className="list-disc space-y-0.5 pl-4">
-            {report.red_lines_hit.map((rl, i) => (
-              <li key={i}>{rl}</li>
-            ))}
-          </ul>
-        </div>
+        (() => {
+          // 英文模式优先用 red_lines_hit_en（如果后端 ship 了），否则
+          // fallback 到 zh 原文（合规扫描器的字面量）。中文模式始终用
+          // red_lines_hit。后端 master_agent.translateRedLinesHit 会
+          // 按 persona JSON 的 red_lines_en 索引产出对齐的英文。
+          const lines =
+            language === "en-US" && report.red_lines_hit_en && report.red_lines_hit_en.length > 0
+              ? report.red_lines_hit_en
+              : report.red_lines_hit;
+          return (
+            <div className="rounded-md bg-rose-50 p-3 text-xs text-rose-700">
+              <div className="mb-1 font-semibold">
+                {language === "en-US" ? "Red lines hit" : "触发红线"}
+              </div>
+              <ul className="list-disc space-y-0.5 pl-4">
+                {lines.map((rl, i) => (
+                  <li key={i}>{rl}</li>
+                ))}
+              </ul>
+            </div>
+          );
+        })()
       ) : null}
 
       <BulletSection

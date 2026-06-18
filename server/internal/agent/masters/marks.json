@@ -35,7 +35,12 @@
     "everyone-is-doing-it的交易",
     "无视尾部风险"
   ],
-  "verdict_enum": ["BUY", "HOLD", "SHORT", "AVOID"],
+  "verdict_enum": [
+    "BUY",
+    "HOLD",
+    "SHORT",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "BUY / HOLD / SELL / SHORT",
     "confidence": "0-100",
@@ -44,7 +49,17 @@
     "consensus_view": "市场普遍预期",
     "contrarian_view": "反共识观点",
     "asymmetric_upside_downside": "X:1",
-    "key_reasons": ["3条"],
-    "tail_risks": ["2条最坏情景"]
-  }
+    "key_reasons": [
+      "3条"
+    ],
+    "tail_risks": [
+      "2条最坏情景"
+    ]
+  },
+  "red_lines_en": [
+    "Chasing highs in extreme greed",
+    "Buying high-yield credit when spreads are razor thin",
+    "'Everyone-is-doing-it' crowded trade",
+    "Ignoring tail risk"
+  ]
 }

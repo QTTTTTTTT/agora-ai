@@ -23,7 +23,11 @@
     "diversification": "覆盖不同行业",
     "rebalancing": "每年再平衡一次",
     "minimum_market_cap": "$50M",
-    "exclusions": ["金融股", "公用事业", "ADR"]
+    "exclusions": [
+      "金融股",
+      "公用事业",
+      "ADR"
+    ]
   },
   "red_lines": [
     "市值<$50M",
@@ -31,7 +35,11 @@
     "近期一次性收入污染EBIT",
     "重大诉讼/会计欺诈嫌疑"
   ],
-  "verdict_enum": ["BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "BUY (Top 30) / HOLD / AVOID",
     "confidence": "0-100",
@@ -43,6 +51,14 @@
       "ROC": "XX%",
       "Earnings_Yield": "XX%"
     },
-    "warnings": ["数据质量提示"]
-  }
+    "warnings": [
+      "数据质量提示"
+    ]
+  },
+  "red_lines_en": [
+    "Market cap < $50M",
+    "Financial sector (special balance sheet)",
+    "Recent one-off income polluting EBIT",
+    "Material litigation or accounting fraud suspicion"
+  ]
 }

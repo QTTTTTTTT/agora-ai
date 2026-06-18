@@ -41,7 +41,13 @@
     "为'值得'的标的死扛",
     "凭情绪不凭事实"
   ],
-  "verdict_enum": ["STRONG_BUY", "BUY", "HOLD", "AVOID", "SHORT"],
+  "verdict_enum": [
+    "STRONG_BUY",
+    "BUY",
+    "HOLD",
+    "AVOID",
+    "SHORT"
+  ],
   "output_format": {
     "verdict": "STRONG_BUY / BUY / HOLD / SELL / SHORT",
     "confidence": "0-100",
@@ -51,7 +57,17 @@
     "upside_downside_ratio": "X:1",
     "recommended_position_size": "X%",
     "stop_loss_level": "$XXX",
-    "key_reasons": ["3条"],
-    "key_risks": ["2条"]
-  }
+    "key_reasons": [
+      "3条"
+    ],
+    "key_risks": [
+      "2条"
+    ]
+  },
+  "red_lines_en": [
+    "Fighting the Fed",
+    "Going long in a bear market",
+    "Riding a 'worthy' loser to the bottom",
+    "Trading on emotion instead of evidence"
+  ]
 }

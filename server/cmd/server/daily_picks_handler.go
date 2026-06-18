@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,14 +62,15 @@ var freeTierVisiblePresets = map[string]struct{}{
 	"disruptive": {},
 }
 
-// freeTierTopN clamps the row count for free-tier list calls. The
-// frontend hides the per-card detail anyway; surfacing more than
-// 3 rows just dilutes the "scarcity → upgrade" funnel.
-const freeTierTopN = 3
+// freeTierTopN clamps the row count for free-tier list calls.
+// Pricing rev (2026-06-15): bumped from 3 → 5 so the free user
+// can preview enough names to evaluate fit without giving away
+// the full Top 20 paid signal.
+const freeTierTopN = 5
 
 // dailyPickDetailQuotaByTier maps subscription plan to the per-day
 // cap on detail reads. Tiers omitted from this map (or unknown) get
-// the free tier's cap. Enterprise gets -1 = unlimited.
+// the free tier's cap. Team / Enterprise get -1 = unlimited.
 //
 // Free is 0 because the free path takes a hard 403 in handleDetail
 // before this map is even read; the entry stays as a defense-in-
@@ -77,6 +79,7 @@ var dailyPickDetailQuotaByTier = map[subscription.PlanTier]int{
 	subscription.PlanFree:       0, // free can't reach today's rows so this is unreachable; we keep it 0 for safety
 	subscription.PlanPro:        30,
 	subscription.PlanPremium:    30,
+	subscription.PlanTeam:       -1,
 	subscription.PlanEnterprise: -1,
 }
 
@@ -679,3 +682,189 @@ var (
 	detailQuotaStore = make(map[string]map[string]struct{})
 	detailQuotaMu    sync.Mutex
 )
+
+// ---------------------------------------------------------------------------
+// GET /api/daily-picks/status — 进度面板用
+//
+// 聚合：
+//   - 每个 active 的 daily_pick_watchlists 的 symbols 总数 (total)
+//   - 当天 daily_picks 已写入的行数 (done) — 当天 = newestAvailable(date)
+//     不过为了让用户看到「今天定时器跑没跑」，我们用 today := UTC date
+//     直接查；如果 today 行数 = 0 但 yesterday = total，说明今日定时器
+//     还没触发（pending）。
+//   - 最近一次 computed_at（per preset）
+//   - 当天的 error_count（error_reason IS NOT NULL）
+//
+// 状态推断（前端按 status 字段 + per-preset 进度自己渲染颜色）：
+//   - "completed":   today done == today total（全部跑完）
+//   - "running":     0 < done < total 且 MAX(computed_at) 距今 < 10 分钟
+//   - "pending":     today done == 0（定时器今天还没启动）
+//   - "stalled":     0 < done < total 且 MAX(computed_at) 距今 >= 10 分钟
+//
+// 该端点对所有登录用户开放（不强 plan gate）——它只返回元数据，不返回
+// pick 内容。
+type dailyPicksStatusPresetView struct {
+	Preset      string  `json:"preset"`
+	Market      string  `json:"market"`
+	Total       int     `json:"total"`
+	Done        int     `json:"done"`
+	ErrorCount  int     `json:"error_count"`
+	LastRunAt   *string `json:"last_run_at,omitempty"`   // RFC-3339, 该 preset 最近一次 computed_at
+	Status      string  `json:"status"`                  // pending / running / stalled / completed
+}
+
+type dailyPicksStatusResponse struct {
+	Today    string                       `json:"today"` // YYYY-MM-DD UTC
+	Overall  string                       `json:"overall"` // 同上四种
+	TotalAll int                          `json:"total_all"`
+	DoneAll  int                          `json:"done_all"`
+	Presets  []dailyPicksStatusPresetView `json:"presets"`
+}
+
+func (h *dailyPicksHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.db == nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorPayload("unavailable", "daily-picks not wired"))
+		return
+	}
+	ctx := r.Context()
+	today := time.Now().UTC().Format("2006-01-02")
+
+	// 1) 取每个 active watchlist 的 (preset, market, total)
+	wlRows, err := h.db.QueryContext(ctx, `
+		SELECT preset_key, market, COALESCE(array_length(symbols, 1), 0)
+		  FROM daily_pick_watchlists
+		 WHERE active = TRUE
+		 ORDER BY preset_key, market`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorPayload("status_failed", err.Error()))
+		return
+	}
+	defer wlRows.Close()
+	type wlKey struct{ preset, market string }
+	totals := make(map[wlKey]int)
+	for wlRows.Next() {
+		var preset, market string
+		var n int
+		if err := wlRows.Scan(&preset, &market, &n); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorPayload("status_scan_failed", err.Error()))
+			return
+		}
+		totals[wlKey{preset, market}] += n
+	}
+
+	// 2) 取当天每个 (preset, market) 已完成数 + 错误数 + last computed_at
+	doneRows, err := h.db.QueryContext(ctx, `
+		SELECT preset_key, market,
+		       COUNT(*),
+		       COUNT(*) FILTER (WHERE error_reason IS NOT NULL AND error_reason <> ''),
+		       MAX(computed_at)
+		  FROM daily_picks
+		 WHERE pick_date = $1::date
+		 GROUP BY preset_key, market`, today)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorPayload("done_failed", err.Error()))
+		return
+	}
+	defer doneRows.Close()
+	type doneStat struct {
+		done, errCount int
+		lastAt         sql.NullTime
+	}
+	dones := make(map[wlKey]doneStat)
+	for doneRows.Next() {
+		var preset, market string
+		var done, ec int
+		var last sql.NullTime
+		if err := doneRows.Scan(&preset, &market, &done, &ec, &last); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorPayload("done_scan_failed", err.Error()))
+			return
+		}
+		dones[wlKey{preset, market}] = doneStat{done: done, errCount: ec, lastAt: last}
+	}
+
+	now := time.Now().UTC()
+	out := dailyPicksStatusResponse{Today: today, Presets: []dailyPicksStatusPresetView{}}
+	totalAll := 0
+	doneAll := 0
+	anyRunning := false
+	anyStalled := false
+	allCompleted := true
+
+	// preset 排序：disruptive / conservative / garp / macro 与前端 UI 一致
+	order := []string{"disruptive", "conservative", "garp", "macro"}
+	rank := func(p string) int {
+		for i, k := range order {
+			if k == p {
+				return i
+			}
+		}
+		return len(order) + 1
+	}
+	keys := make([]wlKey, 0, len(totals))
+	for k := range totals {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		ri, rj := rank(keys[i].preset), rank(keys[j].preset)
+		if ri != rj {
+			return ri < rj
+		}
+		if keys[i].preset != keys[j].preset {
+			return keys[i].preset < keys[j].preset
+		}
+		return keys[i].market < keys[j].market
+	})
+
+	for _, k := range keys {
+		total := totals[k]
+		ds := dones[k]
+		view := dailyPicksStatusPresetView{
+			Preset:     k.preset,
+			Market:     k.market,
+			Total:      total,
+			Done:       ds.done,
+			ErrorCount: ds.errCount,
+		}
+		if ds.lastAt.Valid {
+			s := ds.lastAt.Time.UTC().Format(time.RFC3339)
+			view.LastRunAt = &s
+		}
+		// 状态推断
+		switch {
+		case total > 0 && ds.done >= total:
+			view.Status = "completed"
+		case ds.done == 0:
+			view.Status = "pending"
+			allCompleted = false
+		case ds.lastAt.Valid && now.Sub(ds.lastAt.Time) < 10*time.Minute:
+			view.Status = "running"
+			anyRunning = true
+			allCompleted = false
+		default:
+			view.Status = "stalled"
+			anyStalled = true
+			allCompleted = false
+		}
+		out.Presets = append(out.Presets, view)
+		totalAll += total
+		doneAll += ds.done
+	}
+
+	out.TotalAll = totalAll
+	out.DoneAll = doneAll
+	switch {
+	case totalAll == 0:
+		out.Overall = "pending"
+	case allCompleted:
+		out.Overall = "completed"
+	case anyRunning:
+		out.Overall = "running"
+	case anyStalled:
+		out.Overall = "stalled"
+	default:
+		out.Overall = "pending"
+	}
+
+	writeJSON(w, http.StatusOK, out)
+}
+

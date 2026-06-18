@@ -53,6 +53,7 @@ const TradeHistory = lazyWithRetry(() => import("./pages/TradeHistory"));
 const FundSettings = lazyWithRetry(() => import("./pages/FundSettings"));
 const CashLedger = lazyWithRetry(() => import("./pages/CashLedger"));
 const Subscription = lazyWithRetry(() => import("./pages/Subscription"));
+const Pricing = lazyWithRetry(() => import("./pages/Pricing"));
 const ModelConfig = lazyWithRetry(() => import("./pages/ModelConfig"));
 const Usage = lazyWithRetry(() => import("./pages/Usage"));
 const Admin = lazyWithRetry(() => import("./pages/Admin"));
@@ -409,6 +410,8 @@ const AppRoutes: React.FC = () => {
             <Route path="/login" element={<Login />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/reset-password" element={<ResetPassword />} />
+            {/* /pricing — 公开 SaaS 引导页，未登录可访问；CTA 跳 LS hosted checkout */}
+            <Route path="/pricing" element={<Pricing />} />
             <Route path="/verify-email" element={<AuthGate><VerifyEmail /></AuthGate>} />
             <Route path="/account/security" element={<AuthGate><AccountSecurity /></AuthGate>} />
             <Route path="/welcome" element={<AuthGate><Welcome /></AuthGate>} />

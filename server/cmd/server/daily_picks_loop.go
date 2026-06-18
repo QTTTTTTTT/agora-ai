@@ -72,6 +72,7 @@ import (
 
 	"github.com/fundai/server/internal/advisor"
 	"github.com/fundai/server/internal/dailypicks"
+	"github.com/fundai/server/internal/llm"
 	"github.com/fundai/server/internal/subscription"
 )
 
@@ -257,6 +258,14 @@ func (l *dailyPicksLoop) RunOnce(ctx context.Context) (int, error) {
 	if l == nil {
 		return 0, nil
 	}
+	// Trusted scheduler entry: opt out of the per-owner LLM rate
+	// limiter and per-step call budget. Those caps are sized for
+	// interactive HTTP traffic; a daily picks wave (4 watchlists ×
+	// 50 symbols × 9 masters ≈ 1800 calls under the same platform
+	// owner) would otherwise be starved into all-fallback HOLDs.
+	// Cost gates (dollar / fund quota) inside the LLM client are
+	// NOT bypassed.
+	ctx = llm.WithLimiterBypass(ctx)
 	wls, err := l.picks.ListActiveWatchlists(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("daily_picks_loop: list watchlists: %w", err)
@@ -351,6 +360,9 @@ func (l *dailyPicksLoop) tick(ctx context.Context) {
 	// publisher-configured language for the newsletter content.
 	ctx = ctxWithUserLocale(ctx, l.db, advisor.PublisherUserID)
 	ctx = withLoopOrigin(ctx, "daily_picks")
+	// Same rationale as RunOnce: scheduled batch run skips the
+	// interactive-traffic rate limiter & step budget.
+	ctx = llm.WithLimiterBypass(ctx)
 	wls, err := l.picks.ListActiveWatchlists(ctx)
 	if err != nil {
 		slog.Warn("daily_picks_loop.tick.list_failed", "err", err)

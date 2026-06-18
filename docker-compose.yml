@@ -172,6 +172,13 @@ services:
       # Sprint 12.2 — alertmanager webhook bearer token. Leave empty
       # to disable the /api/admin/alerts/webhook endpoint (503).
       FUNDAI_ALERT_WEBHOOK_SECRET: ${FUNDAI_ALERT_WEBHOOK_SECRET:-}
+      # ---- LemonSqueezy subscription billing ----
+      # All three are required; missing any → /api/subscription/checkout
+      # returns 503 (checkout_unavailable). See .env for how to obtain.
+      LEMONSQUEEZY_API_KEY: ${LEMONSQUEEZY_API_KEY:-}
+      LEMONSQUEEZY_STORE_ID: ${LEMONSQUEEZY_STORE_ID:-}
+      LEMONSQUEEZY_WEBHOOK_SECRET: ${LEMONSQUEEZY_WEBHOOK_SECRET:-}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8080}
     volumes:
       - app-data:/app/data
     networks:

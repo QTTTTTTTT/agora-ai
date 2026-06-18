@@ -39,6 +39,11 @@ type advisorCreditsHandler struct {
 	successURL    string
 	cancelURL     string
 	now           func() time.Time
+	// subscriptionExt fans out subscription_* events on the same
+	// /api/lemonsqueezy/webhook URL so we don't need a second
+	// webhook + secret. nil means LS is unconfigured or DB is
+	// missing — subscription events will simply ack and skip.
+	subscriptionExt *subscriptionWebhookExt
 }
 
 func newAdvisorCreditsHandler(svc *Services) *advisorCreditsHandler {
@@ -58,6 +63,9 @@ func newAdvisorCreditsHandler(svc *Services) *advisorCreditsHandler {
 		successURL: strings.TrimSpace(os.Getenv("ADVISOR_CREDITS_SUCCESS_URL")),
 		cancelURL:  strings.TrimSpace(os.Getenv("ADVISOR_CREDITS_CANCEL_URL")),
 		now:        time.Now,
+		// Wire the subscription dispatcher so subscription_*
+		// events on the same webhook URL get fanned out cleanly.
+		subscriptionExt: newSubscriptionWebhookExt(svc),
 	}
 }
 
@@ -321,6 +329,25 @@ func (h *advisorCreditsHandler) handleWebhook(w http.ResponseWriter, r *http.Req
 		// `meta.event_id` field; fall back to the data id.
 		eventID = strings.TrimSpace(payload.Data.ID)
 	}
+
+	// Subscription events live alongside advisor credit orders on
+	// the same webhook URL. The advisor flow uses
+	// custom_data.order_id; subscription flow uses
+	// custom_data.intent_id. If the event name is subscription_*
+	// dispatch to the subscription handler before advisor's
+	// "missing order_id" early-return.
+	if strings.HasPrefix(payload.Meta.EventName, "subscription_") {
+		if h.subscriptionExt != nil {
+			if _, err := h.subscriptionExt.dispatch(r.Context(), payload.Meta.EventName, eventID, body); err != nil {
+				// 业务错: 200 ack + warn, LS 不重试
+				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warn": err.Error()})
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+
 	if internalOrderID == "" {
 		// No internal id round-tripped — likely a manually-
 		// created LS order. Ack and skip.

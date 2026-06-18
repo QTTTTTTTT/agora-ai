@@ -52,14 +52,32 @@
     "行业本身在长期衰退",
     "高debt + 低incremental ROIC"
   ],
-  "verdict_enum": ["STRONG_BUY", "BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "STRONG_BUY",
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "STRONG_BUY / BUY / HOLD / AVOID",
     "confidence": "0-100",
     "quality_score": "1-10",
     "moat_durability": "1-10",
-    "psychological_traps_detected": ["哪些偏差需要警惕"],
-    "key_reasons": ["3条"],
-    "key_risks": ["2条"]
-  }
+    "psychological_traps_detected": [
+      "哪些偏差需要警惕"
+    ],
+    "key_reasons": [
+      "3条"
+    ],
+    "key_risks": [
+      "2条"
+    ]
+  },
+  "red_lines_en": [
+    "Any sign of management dishonesty",
+    "Complex accounting used to dress up earnings",
+    "Reliance on one-time income items",
+    "Industry in long-term secular decline",
+    "High debt combined with low incremental ROIC"
+  ]
 }

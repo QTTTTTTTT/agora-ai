@@ -809,14 +809,26 @@ func (s *Service) PublishConsult(ctx context.Context, in PublishConsultInput) (*
 	// without consensus (one screaming master, the rest abstaining)
 	// is empirically less reliable than a moderate-confidence
 	// verdict with broad agreement.
+	//
+	// pr.Consensus is in the 0..100 range (see master_panel.go
+	// computeConsensus / tactic_panel.go computeConsensusScore),
+	// so we divide by 100 here to map into [0,1] before blending
+	// with the 0.5 floor. Confidence is already 0..100; the
+	// resulting aggScore is 0..100 for BUY / -100..0 for AVOID.
+	consensusUnit := pr.Consensus / 100.0
+	if consensusUnit < 0 {
+		consensusUnit = 0
+	} else if consensusUnit > 1 {
+		consensusUnit = 1
+	}
 	aggScore := 0
 	if strings.EqualFold(pr.AggVerdict, "STRONG_BUY") || strings.EqualFold(pr.AggVerdict, "BUY") {
-		aggScore = int(float64(pr.AggConf) * (0.5 + 0.5*pr.Consensus))
+		aggScore = int(float64(pr.AggConf) * (0.5 + 0.5*consensusUnit))
 	} else if strings.EqualFold(pr.AggVerdict, "AVOID") || strings.EqualFold(pr.AggVerdict, "SHORT") {
 		// Negative-direction verdicts get a NEGATIVE score so the
 		// browse grid orders "strongest avoid → … → strongest buy"
 		// naturally when sorted DESC; the UI can flip if needed.
-		aggScore = -int(float64(pr.AggConf) * (0.5 + 0.5*pr.Consensus))
+		aggScore = -int(float64(pr.AggConf) * (0.5 + 0.5*consensusUnit))
 	}
 
 	if _, perr := s.picksRepo.UpsertPick(ctx, PicksUpsertInput{

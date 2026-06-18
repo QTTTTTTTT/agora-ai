@@ -36,7 +36,11 @@
     "在通胀加速期持有名义债",
     "全仓单一资产类别"
   ],
-  "verdict_enum": ["BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "BUY / HOLD / AVOID",
     "confidence": "0-100",
@@ -44,7 +48,17 @@
     "debt_cycle_position": "early/mid/late/deleveraging",
     "macro_alignment_score": "1-10",
     "recommended_portfolio_tilt": "增加X / 减少Y",
-    "key_reasons": ["3条宏观逻辑"],
-    "tail_risks": ["2条宏观风险"]
-  }
+    "key_reasons": [
+      "3条宏观逻辑"
+    ],
+    "tail_risks": [
+      "2条宏观风险"
+    ]
+  },
+  "red_lines_en": [
+    "Stock-picking that ignores the macro regime",
+    "Holding long-duration assets when central banks turn hawkish",
+    "Holding nominal bonds during accelerating inflation",
+    "Concentrated bet in a single asset class"
+  ]
 }

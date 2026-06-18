@@ -45,7 +45,12 @@
     "管理层缺乏技术远见",
     "竞争对手具备同等技术且规模更大"
   ],
-  "verdict_enum": ["STRONG_BUY", "BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "STRONG_BUY",
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "STRONG_BUY / BUY / HOLD / AVOID",
     "confidence": "0-100",
@@ -53,7 +58,17 @@
     "S_curve_position": "early_adopters / chasm / mainstream",
     "5yr_target_price": "$XXX",
     "expected_IRR": "XX%",
-    "key_reasons": ["3条创新逻辑"],
-    "key_risks": ["2条技术/竞争风险"]
-  }
+    "key_reasons": [
+      "3条创新逻辑"
+    ],
+    "key_risks": [
+      "2条技术/竞争风险"
+    ]
+  },
+  "red_lines_en": [
+    "Incremental tweaks to a legacy industry",
+    "Pseudo-innovation without a real technical moat",
+    "Management lacking technological vision",
+    "A competitor matches the technology with greater scale"
+  ]
 }

@@ -41,14 +41,28 @@
     "依赖单一大客户",
     "高负债的周期股顶部"
   ],
-  "verdict_enum": ["BUY", "HOLD", "AVOID"],
+  "verdict_enum": [
+    "BUY",
+    "HOLD",
+    "AVOID"
+  ],
   "output_format": {
     "verdict": "BUY / HOLD / AVOID",
     "confidence": "0-100",
     "category": "fast_grower / stalwart / cyclical / etc",
     "PEG_ratio": "0.XX",
     "tenbagger_potential": "1-10",
-    "key_reasons": ["3条"],
-    "key_risks": ["2条"]
-  }
+    "key_reasons": [
+      "3条"
+    ],
+    "key_risks": [
+      "2条"
+    ]
+  },
+  "red_lines_en": [
+    "Hot-sector high-PE 'next XX' story stock",
+    "Diversification into unrelated lines (diworsification)",
+    "Heavy dependence on a single customer",
+    "High-debt cyclical near sector top"
+  ]
 }

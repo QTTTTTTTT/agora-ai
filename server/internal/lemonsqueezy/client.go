@@ -248,6 +248,59 @@ func VariantIDFromEnv(envVarName string) string {
 	return strings.TrimSpace(os.Getenv(envVarName))
 }
 
+// GetCustomerPortalURL fetches the LemonSqueezy-hosted
+// customer-portal URL for an existing customer. The portal is
+// where the user can self-serve cancel / change card / view
+// invoices, so we don't have to build that surface ourselves.
+//
+// LS schema:
+//   GET /v1/customers/{id}
+//   → data.attributes.urls.customer_portal
+func (c *Client) GetCustomerPortalURL(ctx context.Context, customerID string) (string, error) {
+	if c == nil {
+		return "", errors.New("lemonsqueezy: client not configured")
+	}
+	if strings.TrimSpace(customerID) == "" {
+		return "", errors.New("lemonsqueezy: customer_id required")
+	}
+	endpoint := strings.TrimRight(c.cfg.BaseURL, "/") + "/customers/" + url.PathEscape(customerID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("lemonsqueezy: build request: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/vnd.api+json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("lemonsqueezy: http: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("lemonsqueezy: read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("lemonsqueezy: customer portal failed (%d): %s", resp.StatusCode, truncateBody(respBody, 400))
+	}
+	var parsed struct {
+		Data struct {
+			Attributes struct {
+				URLs struct {
+					CustomerPortal string `json:"customer_portal"`
+				} `json:"urls"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("lemonsqueezy: parse response: %w", err)
+	}
+	if parsed.Data.Attributes.URLs.CustomerPortal == "" {
+		return "", errors.New("lemonsqueezy: empty customer portal url")
+	}
+	return parsed.Data.Attributes.URLs.CustomerPortal, nil
+}
+
 // BuildCheckoutCustomData constructs the LS custom_data payload
 // we round-trip through the webhook. The order_id we store here
 // is the internal advisor_credit_orders.id (NOT the LS order id);

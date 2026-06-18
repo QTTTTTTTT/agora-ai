@@ -395,9 +395,16 @@ func (c *MultiProviderClient) chatWithResolvedConfig(ctx context.Context, req Ch
 	}
 
 	// 2. 配额 / 熔断（按 owner+provider 隔离）。limiter 为 nil 时跳过。
+	// Trusted scheduler entry points (see WithLimiterBypass) opt out of
+	// the per-owner rate limiter and per-step budget — those caps are
+	// sized for interactive HTTP traffic and would starve a batch run
+	// like daily_picks (4 watchlists × 50 symbols × 9 masters).
+	// Cost gates (dollarBudgetGate / fundQuotaGate) below are NOT
+	// bypassed; cost protection always applies.
 	owner := req.EffectiveOwner()
+	bypassLimiter := limiterBypassed(ctx)
 	limiter := c.ownerLimiter()
-	if limiter != nil {
+	if limiter != nil && !bypassLimiter {
 		if allowErr := limiter.Allow(owner, string(config.Provider)); allowErr != nil {
 			err = allowErr
 			if c.observer != nil {
@@ -411,7 +418,7 @@ func (c *MultiProviderClient) chatWithResolvedConfig(ctx context.Context, req Ch
 		}
 	}
 	budget := c.callBudget()
-	if budget != nil {
+	if budget != nil && !bypassLimiter {
 		if budgetErr := budget.Allow(owner, req.StepName); budgetErr != nil {
 			err = budgetErr
 			if c.observer != nil {
@@ -599,7 +606,7 @@ type openAIRequest struct {
 	// Wired by callOpenAI() from ChatRequest.ResponseFormat /
 	// ChatRequest.ResponseSchema. DeepSeek / Qwen / Custom share
 	// this path (UsesOpenAIChatCompletions). Providers that don't
-	// understand the field generally ignore it.
+	// support the field must be handled before marshaling this body.
 	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 }
 
@@ -684,10 +691,52 @@ func defaultRetryPolicy() retryPolicy {
 	}
 }
 
+func appendOpenAIJSONInstruction(messages []openAIMessage, format string, schema json.RawMessage) []openAIMessage {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		return messages
+	}
+
+	instruction := "Return ONLY a JSON object, no prose, no markdown fences."
+	if format == "json_schema" && len(schema) > 0 {
+		// The caller's system prompt already contains the human-readable
+		// output contract. Do NOT paste the full JSON Schema here: for
+		// providers without native response_format support (notably
+		// DeepSeek), duplicating the schema inflates the prompt and makes
+		// truncated half-JSON replies much more likely. A concise JSON-only
+		// reminder gives the tolerant downstream parser the best chance.
+		instruction = "Return ONLY one complete JSON object matching the requested schema, no prose, no markdown fences. Finish the JSON object completely."
+	}
+
+	for i := range messages {
+		if strings.EqualFold(strings.TrimSpace(messages[i].Role), "system") {
+			if strings.TrimSpace(messages[i].Content) == "" {
+				messages[i].Content = instruction
+			} else {
+				messages[i].Content += "\n\n" + instruction
+			}
+			return messages
+		}
+	}
+
+	return append([]openAIMessage{{Role: "system", Content: instruction}}, messages...)
+}
+
 func (c *MultiProviderClient) callOpenAI(ctx context.Context, config *ModelConfig, req ChatRequest) (*ChatResponse, error) {
 	messages := make([]openAIMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		messages = append(messages, openAIMessage{Role: m.Role, Content: m.Content})
+	}
+
+	// DeepSeek's OpenAI-compatible endpoint currently rejects the
+	// response_format field for some models (for example
+	// deepseek-v4-pro returns "This response_format type is unavailable
+	// now"). Keep structured-output intent by moving the JSON-only
+	// requirement into the prompt, like the Claude fallback path does,
+	// instead of sending an unsupported request field.
+	nativeResponseFormat := config.Provider != ProviderDeepSeek
+	if !nativeResponseFormat {
+		messages = appendOpenAIJSONInstruction(messages, req.ResponseFormat, req.ResponseSchema)
 	}
 
 	body := openAIRequest{
@@ -701,22 +750,24 @@ func (c *MultiProviderClient) callOpenAI(ctx context.Context, config *ModelConfi
 	// S8.3 — wire structured output. We treat "json_schema" with
 	// a non-empty schema as the strict variant; everything else
 	// falls back to the looser "json_object" mode (any JSON shape).
-	switch strings.ToLower(strings.TrimSpace(req.ResponseFormat)) {
-	case "json_schema":
-		if len(req.ResponseSchema) > 0 {
-			body.ResponseFormat = &openAIResponseFormat{
-				Type: "json_schema",
-				JSONSchema: &openAIResponseFormatJS{
-					Name:   "out",
-					Strict: true,
-					Schema: append(json.RawMessage(nil), req.ResponseSchema...),
-				},
+	if nativeResponseFormat {
+		switch strings.ToLower(strings.TrimSpace(req.ResponseFormat)) {
+		case "json_schema":
+			if len(req.ResponseSchema) > 0 {
+				body.ResponseFormat = &openAIResponseFormat{
+					Type: "json_schema",
+					JSONSchema: &openAIResponseFormatJS{
+						Name:   "out",
+						Strict: true,
+						Schema: append(json.RawMessage(nil), req.ResponseSchema...),
+					},
+				}
+			} else {
+				body.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
 			}
-		} else {
+		case "json_object":
 			body.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
 		}
-	case "json_object":
-		body.ResponseFormat = &openAIResponseFormat{Type: "json_object"}
 	}
 
 	bodyBytes, err := json.Marshal(body)

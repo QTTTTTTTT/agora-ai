@@ -1243,6 +1243,85 @@ export async function getPaperNavHistory(portfolioId: string): Promise<PaperNavP
 }
 
 // ---------------------------------------------------------------------------
+// Subscription / Pricing — surfaces /api/plans, /api/subscription/*
+//
+//  - PlanWire mirrors `subscription.Plan` from the Go side.
+//  - Pricing 页面固定按 USD (`price_cents_usd_month`) 渲染；老的
+//    Subscription.tsx 仍可读 `price_cents_month` 做 CNY 兼容。
+//  - createSubscriptionCheckout 创建一个 LemonSqueezy hosted-checkout
+//    intent，前端拿到 checkout_url 后跳走，回跳后用 intent_id 轮询。
+// ---------------------------------------------------------------------------
+
+export interface PlanWire {
+  tier: string;
+  name: string;
+  price_cents_month: number;       // CNY cents (legacy)
+  price_cents_usd_month: number;   // USD cents (new)
+  price_cents_usd_year: number;    // USD cents annual (0 = no yearly)
+  min_seats: number;               // 1 for personal, 3 for team
+  contact_sales: boolean;          // true = render "Contact Sales" instead of checkout
+  max_funds: number;
+  max_calls_per_day: number;
+  model_tiers: string[];
+  recommended: boolean;
+  max_agents_per_fund: number;
+  max_workflow_per_day: number;
+  allow_custom_key: boolean;
+  allow_ab_test: boolean;
+  allow_export: boolean;
+  simulation_capital: number;
+  included_tokens: number;
+  description: string;
+}
+
+export interface SubscriptionCheckoutInput {
+  tier: "pro" | "premium" | "team";
+  billing_period?: "monthly" | "yearly";
+  /** Team 档必填，min 3。其它档忽略。 */
+  seat_count?: number;
+}
+
+export interface SubscriptionCheckoutResponse {
+  intent_id: string;
+  checkout_url: string;
+  expires_at: string;
+}
+
+export interface SubscriptionIntentView {
+  intent_id: string;
+  status: "pending" | "completed" | "expired" | "cancelled";
+  plan_tier: string;
+  billing_period: string;
+  completed_at?: string;
+}
+
+export async function listPlans(): Promise<{ plans: PlanWire[] }> {
+  return apiGet<{ plans: PlanWire[] }>(`/api/plans`);
+}
+
+export async function createSubscriptionCheckout(
+  input: SubscriptionCheckoutInput,
+): Promise<SubscriptionCheckoutResponse> {
+  return apiPost<SubscriptionCheckoutResponse>(`/api/subscription/checkout`, {
+    tier: input.tier,
+    billing_period: input.billing_period ?? "monthly",
+    seat_count: input.seat_count ?? 1,
+  });
+}
+
+export async function getSubscriptionIntent(
+  intentID: string,
+): Promise<SubscriptionIntentView> {
+  return apiGet<SubscriptionIntentView>(
+    `/api/subscription/intent/${encodeURIComponent(intentID)}`,
+  );
+}
+
+export async function getCustomerPortalURL(): Promise<{ portal_url: string }> {
+  return apiGet<{ portal_url: string }>(`/api/subscription/portal`);
+}
+
+// ---------------------------------------------------------------------------
 // Support contact ("Get help" floating button)
 //
 //   GET /api/support-contact         — public, drives the global button
@@ -5935,6 +6014,7 @@ export interface AdvisorMasterReport {
   key_risks: string[];
   master_specific?: Record<string, unknown>;
   red_lines_hit?: string[];
+  red_lines_hit_en?: string[];
   llm_model?: string;
   generated_at: string;
 }
@@ -6250,6 +6330,29 @@ export interface DailyPickDetailResponse {
   quota_used_today: number;
   /** -1 = unlimited. */
   quota_cap_today: number;
+}
+
+export interface DailyPicksStatusPresetView {
+  preset: string;
+  market: string;
+  total: number;
+  done: number;
+  error_count: number;
+  last_run_at?: string;
+  status: "pending" | "running" | "stalled" | "completed";
+}
+
+export interface DailyPicksStatusResponse {
+  today: string; // YYYY-MM-DD
+  overall: "pending" | "running" | "stalled" | "completed";
+  total_all: number;
+  done_all: number;
+  presets: DailyPicksStatusPresetView[];
+}
+
+/** GET /api/daily-picks/status — 进度面板用，建议每 30s 刷新 */
+export async function getDailyPicksStatus(): Promise<DailyPicksStatusResponse> {
+  return apiGet<DailyPicksStatusResponse>(`/api/daily-picks/status`);
 }
 
 export async function listDailyPicks(params?: {
