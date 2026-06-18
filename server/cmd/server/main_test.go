@@ -193,7 +193,7 @@ func TestHandleRegisterAssignsSuperAdminToFirstUser(t *testing.T) {
 	passwordInsertMatcher := regexp.QuoteMeta(`
 			INSERT INTO users (id, username, display_name, email, password_hash, status, role)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status
+			RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(preferred_language, 'zh-CN')
 		`)
 
 	mock.ExpectBegin()
@@ -205,7 +205,7 @@ func TestHandleRegisterAssignsSuperAdminToFirstUser(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(passwordInsertMatcher).
 		WithArgs(sqlmock.AnyArg(), "founder@example.com", "Founder", "founder@example.com", sqlmock.AnyArg(), userStatusActive, userRoleSuperAdmin).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "display_name", "role", "status"}).AddRow("11111111-1111-4111-8111-111111111111", "founder@example.com", "Founder", userRoleSuperAdmin, userStatusActive))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "display_name", "role", "status", "preferred_language"}).AddRow("11111111-1111-4111-8111-111111111111", "founder@example.com", "Founder", userRoleSuperAdmin, userStatusActive, "zh-CN"))
 	mock.ExpectCommit()
 
 	handler := handleRegister(&Services{DB: db}, &Config{JWTSecret: "secret", SessionTTL: time.Hour})
@@ -239,7 +239,7 @@ func TestHandleRegisterAssignsUserWhenSuperAdminExists(t *testing.T) {
 	insertMatcher := regexp.QuoteMeta(`
 			INSERT INTO users (id, username, display_name, email, password_hash, status, role)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status
+			RETURNING id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(preferred_language, 'zh-CN')
 		`)
 
 	mock.ExpectBegin()
@@ -251,7 +251,7 @@ func TestHandleRegisterAssignsUserWhenSuperAdminExists(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(insertMatcher).
 		WithArgs(sqlmock.AnyArg(), "member@example.com", "Member", "member@example.com", sqlmock.AnyArg(), userStatusActive, userRoleUser).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "display_name", "role", "status"}).AddRow("22222222-2222-4222-8222-222222222222", "member@example.com", "Member", userRoleUser, userStatusActive))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "display_name", "role", "status", "preferred_language"}).AddRow("22222222-2222-4222-8222-222222222222", "member@example.com", "Member", userRoleUser, userStatusActive, "zh-CN"))
 	mock.ExpectCommit()
 
 	handler := handleRegister(&Services{DB: db}, &Config{JWTSecret: "secret", SessionTTL: time.Hour})

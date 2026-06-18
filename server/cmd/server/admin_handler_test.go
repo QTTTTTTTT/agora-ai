@@ -54,14 +54,14 @@ func TestAuthMiddlewareInjectsUserRole(t *testing.T) {
 	}
 
 	mock.ExpectQuery(regexp.QuoteMeta(`
-			SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic')
+			SELECT id, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), status, COALESCE(password_hash, ''), COALESCE(kyc_status, 'unverified'), COALESCE(kyc_level, 'tier1_basic'), COALESCE(preferred_language, 'zh-CN')
 			FROM users
 			WHERE id = $1
 			LIMIT 1
 		`)).
 		WithArgs("11111111-1111-4111-8111-111111111111").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "display_name", "role", "status", "password_hash", "kyc_status", "kyc_level"}).
-			AddRow("11111111-1111-4111-8111-111111111111", "founder@example.com", "Founder", userRoleSuperAdmin, userStatusActive, "$2a$10$abcdefghijklmnopqrstuv", "verified", "tier3_enterprise"))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "email", "display_name", "role", "status", "password_hash", "kyc_status", "kyc_level", "preferred_language"}).
+			AddRow("11111111-1111-4111-8111-111111111111", "founder@example.com", "Founder", userRoleSuperAdmin, userStatusActive, "$2a$10$abcdefghijklmnopqrstuv", "verified", "tier3_enterprise", "zh-CN"))
 
 	var capturedRole string
 	handler := authMiddleware(db, "secret")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
