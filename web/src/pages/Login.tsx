@@ -105,7 +105,7 @@ const Login: React.FC = () => {
             },
             placeholders: {
               email: "you@example.com",
-              displayName: "e.g. Operations admin",
+              displayName: "e.g. Alex Chen",
               password: "Enter at least 8 characters",
               confirmPassword: "Enter password again",
             },
@@ -119,20 +119,12 @@ const Login: React.FC = () => {
               registering: "Registering...",
               signIn: "Sign in and continue",
               register: "Register and continue",
-              wechat: "Sign in with WeChat",
-              wechatHint: "Scan in the WeChat app (miniapp users can also tap from inside their account).",
             },
             errors: {
               loginFailed: "Sign in failed",
               registerFailed: "Registration failed",
               invalidCredentials: "Incorrect email or password.",
             },
-            minimumAccountTitle: "Current minimum account model",
-            minimumAccountItems: [
-              "The first registered account automatically becomes the super admin.",
-              "All later registrations default to regular user.",
-              "When the session expires, the frontend clears local credentials and redirects back to login.",
-            ],
             backHome: "Back to home",
             forgotPassword: "Forgot your password?",
             twoFA: {
@@ -187,7 +179,7 @@ const Login: React.FC = () => {
             },
             placeholders: {
               email: "you@example.com",
-              displayName: "例如：运营管理员",
+              displayName: "例如：张三",
               password: "请输入至少 8 位密码",
               confirmPassword: "请再次输入密码",
             },
@@ -201,20 +193,12 @@ const Login: React.FC = () => {
               registering: "注册中...",
               signIn: "登录并进入系统",
               register: "注册并进入系统",
-              wechat: "使用微信登录",
-              wechatHint: "请在微信中扫码（小程序用户也可在小程序内直接点击进入）。",
             },
             errors: {
               loginFailed: "登录失败",
               registerFailed: "注册失败",
               invalidCredentials: "邮箱或密码错误。",
             },
-            minimumAccountTitle: "当前最小账号体系",
-            minimumAccountItems: [
-              "首个注册账号会自动成为超级管理员。",
-              "后续注册账号默认为普通用户。",
-              "如果会话失效，前端会清空本地凭证并跳回登录页。",
-            ],
             backHome: "返回首页",
             forgotPassword: "忘记密码？",
             twoFA: {
@@ -718,41 +702,8 @@ const Login: React.FC = () => {
                     {copy.forgotPassword}
                   </Link>
                 </div>
-
-                {/*
-                  * WeChat login entry. The product surface lists WeChat sign-in
-                  * as a supported path on both web and miniapp; previously web
-                  * only exposed email/password and the WeChat box was missing
-                  * entirely. Until the OAuth-redirect handler is wired on the
-                  * server we keep this as an *information* button that explains
-                  * how to complete the WeChat flow today (via the miniapp's
-                  * code2session, which already shares the JWT keyring with web
-                  * via the auth_wechat handler). Replace the click handler with
-                  * the OAuth redirect once /api/auth/wechat-redirect ships.
-                  */}
-                <div className="mt-6 flex flex-col items-center gap-2 rounded-2xl bg-sage-50 px-4 py-4 text-xs text-sage-700 ring-1 ring-sage-200/70">
-                  <button
-                    type="button"
-                    onClick={() => window.alert(copy.actions.wechatHint)}
-                    className="rounded-full bg-cream-0 px-4 py-2 text-sm font-semibold text-sage-700 ring-1 ring-sage-200 transition hover:bg-sage-50"
-                  >
-                    {copy.actions.wechat}
-                  </button>
-                  <p className="text-center text-[11px] text-sage-700/80">
-                    {copy.actions.wechatHint}
-                  </p>
-                </div>
               </>
             ) : null}
-
-            <div className="mt-8 rounded-2xl bg-cream-50 p-4 text-xs leading-6 text-ink-300 ring-1 ring-ink-100/70">
-              <p className="font-semibold text-ink-700">{copy.minimumAccountTitle}</p>
-              <ul className="mt-2 list-disc space-y-1 pl-5">
-                {copy.minimumAccountItems.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
 
             <div className="mt-6 text-center text-xs">
               <Link to="/masters" className="text-ink-300 transition hover:text-ink-700">

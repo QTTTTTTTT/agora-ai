@@ -448,6 +448,22 @@ func (a *MasterAgent) complete(ctx context.Context, sys, user string) (string, e
 // via a future translation layer.
 func (a *MasterAgent) buildSystemPrompt() string {
 	var b strings.Builder
+	// Prefix-cache friendly layout: keep the universal contract at the
+	// very beginning and byte-identical across every master. DeepSeek's
+	// automatic context cache keys on stable prefixes; putting persona-
+	// specific text first would prevent cross-master reuse of this large
+	// rule block. Dynamic stock data lives only in the user prompt.
+	b.WriteString("You are an investment master agent. Apply the PERSONA below to the stock in the user message and return one compact JSON object.\n")
+	b.WriteString("GLOBAL RULES:\n")
+	b.WriteString("1) Missing data: write 'data_unavailable:<field>'; never invent numbers. If listing_years < 10, use 'listing_lt_10y:N years' for criteria requiring 10y+ history.\n")
+	b.WriteString("2) red_lines_hit entries MUST be quoted verbatim from the persona.red_lines list (<=80 chars); [] if none. Do not translate, explain, or add inner monologue.\n")
+	b.WriteString("3) verdict MUST use persona.verdict_enum when present.\n")
+	b.WriteString("4) Output exactly ONE compact JSON object, no prose/fences. thesis MAX 60 words; exactly 3 key_reasons (MAX 20 words each); exactly 2 key_risks (MAX 20 words each); master_specific = {} unless 1-5 short scalar fields add value. Do NOT repeat the persona or restate input data.\n")
+	b.WriteString("5) Cite periods for any fund.* percentage/amount: use YYYY-Q[1-4] or annual_period/latest_period. Do NOT use vague phrases like 'recent/latest quarter'. For *_latest cite latest_announce_date (e.g. 2026-04-28) plus one absolute value (e.g. $254M).\n")
+	b.WriteString("6) If revenue_growth_yoy and earnings_growth_yoy have opposite signs with a >=20 percentage points gap, add a dedicated revenue-up-profit-down/profit-up-revenue-down risk with numbers and period. If latest YoY/QoQ signs conflict (e.g. 2026-Q1), add a dedicated momentum-reversal reason/risk.\n")
+	b.WriteString("7) Technical data may support fundamentals, but never give price forecasts, targets, stop-loss/take-profit, entry/exit levels, or action imperatives. Describe moving-average crosses only as past observations.\n")
+	b.WriteString("8) RESPOND IN ENGLISH for thesis/key_reasons/key_risks/master_specific. Exception: red_lines_hit entries MUST be quoted verbatim.\n")
+	b.WriteString("\n=== PERSONA SUMMARY ===\n")
 	fmt.Fprintf(&b, "You are %s (%s), an investment master whose style is \"%s\".\n",
 		a.persona.NameEn, a.persona.NameZh, a.persona.Style)
 	if a.persona.HoldingPeriod != "" {
@@ -456,112 +472,7 @@ func (a *MasterAgent) buildSystemPrompt() string {
 	if a.persona.Philosophy != "" {
 		fmt.Fprintf(&b, "Your core investment philosophy: %s\n", a.persona.Philosophy)
 	}
-	b.WriteString("\nYou MUST analyse strictly within the framework described in the persona JSON below " +
-		"(including must_have_criteria / red_lines / qualitative_filters / valuation_method / output_format and every other field).\n")
-	b.WriteString("When forming your judgement, observe these rules:\n")
-	b.WriteString("1) Whenever a data point is missing, write 'data_unavailable: <field>' in key_reasons honestly. Never fabricate numbers.\n")
-	b.WriteString("2) Every entry in the red_lines_hit array MUST be a verbatim short phrase from the persona's red_lines list (<=80 characters). " +
-		"Do NOT add explanations, internal monologue, or meta-language such as \"corrected here\", \"not yet triggered\", \"Wait\", \"Ignore\". " +
-		"If no red line is triggered, return [].\n")
-	b.WriteString("3) verdict MUST be one of the values in verdict_enum (when the persona defines one).\n")
-	b.WriteString("4) Output exactly ONE JSON object. No markdown fences, no preamble, no explanation outside the JSON.\n")
-	// Rule 5 — disambiguation. Without this the model writes
-	// "latest quarterly growth rebounded to 27.97%" without
-	// saying which quarter, and a downstream reader (or
-	// reviewing AI) defaults the referent to the wrong period
-	// and judges us factually wrong. The prompt already exposes
-	// annual_period + latest_period labels in the user message;
-	// this rule forces the LLM to quote them back instead of
-	// using generic "recent / current / latest quarter".
-	b.WriteString("5) Whenever you cite any percentage or absolute value drawn from a fund.* field in the thesis / key_reasons / key_risks, " +
-		"you MUST explicitly attach the fiscal period that figure belongs to. Prefer the form 'YYYY-Q[1-4]' or 'YYYY annual report' " +
-		"(e.g. 'YoY revenue growth +27.97% in 2026-Q1', '2025 annual report attributable net income -28.77% YoY'). " +
-		"Do NOT use vague phrases like 'latest quarter' / 'recently' / 'current' / 'over the past year' as a substitute. " +
-		"If the prompt's annual_period or latest_period label for that figure is missing, do not cite the field at all.\n")
-	// Rule 6 — quality gap. earnings_growth_yoy and
-	// revenue_growth_yoy with opposite signs and a >20 ppt
-	// magnitude gap is the classic "revenue up, profits down"
-	// (or vice versa) signal. Wood / Lynch growth-style
-	// personas historically over-weight the revenue line and
-	// under-flag the earnings collapse; this rule makes the
-	// judgement explicit.
-	b.WriteString("6) When fund.revenue_growth_yoy and fund.earnings_growth_yoy are both present with opposite signs " +
-		"(i.e. revenue growth > 0 while earnings growth < 0, or the reverse) AND the absolute gap between them is >= 20 percentage points, " +
-		"you MUST list a 'revenue-up-profit-down' or 'profit-up-revenue-down' risk explicitly in key_risks, citing the actual numbers and the fiscal period. " +
-		"Do NOT bury this signal as a passing remark in the thesis. This is a quality-gap signal that growth-style personas tend to overlook.\n")
-	// Rule 7 — listing tenure. When listing_years < 10, the
-	// must-haves that demand 10y of history (cross-cycle
-	// resilience, 10y free cash flow, long dividend record)
-	// should be tagged 'listing_lt_10y:N' rather than
-	// 'data_unavailable:<field>', so a recently-IPO'd company
-	// isn't penalised as a fundamental defect for a structural
-	// constraint.
-	b.WriteString("7) When the prompt provides listing_years (the company's years since IPO) and the value is < 10, " +
-		"any condition that demands 10+ years of history (cross-cycle resilience, 10-year free cash flow record, multi-year dividend history, etc.) " +
-		"should be tagged in key_reasons as 'listing_lt_10y:N years' rather than 'data_unavailable:<field>'. " +
-		"Do NOT score the structural newness of a young listing as a fundamental flaw. " +
-		"You may still flag 'historical sample insufficient to verify long-cycle resilience' as a risk, " +
-		"but make the attribution explicit (years public, not disclosure quality).\n")
-	b.WriteString("8) When latest_announce_date is provided in the prompt, every reference to a fund.*_latest field " +
-		"(fund.revenue_growth_yoy_latest, fund.latest_revenue, fund.latest_net_income, fund.latest_revenue_qoq, fund.gross_margin_latest, etc.) " +
-		"MUST do three things in the same sentence: (i) name the latest_period (e.g. '2026-Q1'); " +
-		"(ii) cite latest_announce_date (e.g. 'announced 2026-04-28'); " +
-		"(iii) accompany every percentage with at least one absolute value to two significant figures (e.g. 'revenue $254M' or 'net income $19.6M'). " +
-		"Example: '2026-Q1 (announced 2026-04-28) revenue $254M, +27.97% YoY but -9.63% QoQ shows momentum peaking.' " +
-		"This anchoring lets any external reader trace the figure back to the original filing using the announce date and the absolute amount. " +
-		"Additionally, when latest_*_qoq and latest_*_yoy disagree in sign (one > 0 and the other < 0), " +
-		"you MUST list the 'YoY-up-but-QoQ-down' (or vice versa) momentum-reversal signal as its OWN dedicated entry in key_reasons or key_risks.\n")
-	// Rule 9 — technical-analysis citation. Prompt may carry a
-	// 'technical snapshot' block with closed prices, moving
-	// averages, RSI, MACD, KDJ, support/resistance, etc. The
-	// LLM MUST be able to QUOTE those values (e.g. "RSI14 78
-	// overbought, price 5% above 20D high") but MUST NOT turn
-	// them into a price target, stop loss, or buy / sell point.
-	// The Publisher-mode phrase scanner (compliance/scanner.go)
-	// will redact such phrases server-side, but redaction makes
-	// the output read awkwardly — far better to never emit them.
-	//
-	// What's allowed:
-	//   - quoting a level: "20-day high $128.50 acted as
-	//     resistance until 2026-06-08"
-	//   - past-tense observation: "MA5 crossed above MA20 on
-	//     2026-06-05 (typical short-term bullish crossover)"
-	//   - regime classification: "trend regime: uptrend per
-	//     SMA20>SMA50>SMA200 alignment"
-	//
-	// What's forbidden:
-	//   - forecast: "price target $150"
-	//   - directive: "entry at $128"
-	//   - signal claim: "golden cross signal triggered"
-	//   - imperative: "go long" / "buy here"
-	//
-	// The technical block, when present, is FACT. The persona's
-	// reasoning ABOUT the fact stays a research observation.
-	b.WriteString("9) When the prompt includes a '--- technical snapshot ---' section, you may cite specific values from it in the thesis / key_reasons / key_risks " +
-		"(e.g. 'RSI14 78 in overbought territory', '2026-06-08 close $128.50 broke the 20-day high $125.30', 'MA20>MA50>MA200 indicates multi-timeframe uptrend'), " +
-		"but you MUST observe the following hard constraints: " +
-		"(i) NEVER provide any form of price forecast, target price, stop-loss / take-profit level, buy-point / sell-point, or entry / exit level (numeric or range); " +
-		"(ii) NEVER describe a moving-average crossover as 'signal confirmed / triggered / about to form' (e.g. 'golden cross triggered'); " +
-		"only describe it as an observed past event (e.g. 'MA5 crossed above MA20 on 2026-06-05'); " +
-		"(iii) NEVER use action-imperative language such as 'recommend buying / selling / adding to position / trimming', 'go long / short', 'strong buy / sell rating'; " +
-		"(iv) the technical view must SUPPORT — never REPLACE — a fundamentals-based core argument. " +
-		"If only a technical signal is available and fundamentals are missing, tag 'technical_only_signal' explicitly in key_reasons and keep the verdict conservative.\n")
-	// Rule 10 — output language. Explicit, terminal, and at the
-	// end of the rule list so it's the last thing the model
-	// reads before producing JSON. Even though the persona JSON
-	// (philosophy / must_have_criteria / red_lines) may contain
-	// Chinese phrases, the structured output fields the user
-	// sees in the UI must be English so that switching the UI
-	// to en-US shows English content. The verbatim red-line
-	// short phrases are the one exception — they MUST be quoted
-	// from the persona's red_lines list as written there, even
-	// if those entries are in Chinese, because the dedup +
-	// scanner pipeline downstream relies on exact-string match.
-	b.WriteString("10) RESPOND IN ENGLISH. Even though the persona JSON may contain Chinese descriptions, " +
-		"every free-form text field in your output (thesis, key_reasons, key_risks, master_specific value descriptions) " +
-		"MUST be written in clear, professional English. " +
-		"The only exception: red_lines_hit entries MUST be quoted verbatim from the persona's red_lines list — " +
-		"if a red-line entry is in Chinese in the persona JSON, keep it in Chinese (the downstream scanner relies on exact-string match).\n")
+	b.WriteString("Analyse strictly within the persona JSON below, including must_have_criteria, red_lines, qualitative_filters, valuation_method and output_format.\n")
 	b.WriteString("\n=== PERSONA JSON ===\n")
 	// Compact JSON is materially cheaper than pretty-printed JSON at
 	// daily-picks scale (hundreds of master calls per run) and preserves
@@ -570,7 +481,7 @@ func (a *MasterAgent) buildSystemPrompt() string {
 		b.Write(raw)
 	}
 	b.WriteString("\n=== OUTPUT JSON SHAPE ===\n")
-	b.WriteString("Return exactly one JSON object with keys: verdict, confidence, thesis (a single English paragraph), key_reasons (the 3 most decisive judgement factors, each in English), key_risks (the 2 most material risks, each in English), red_lines_hit, master_specific.\n")
+	b.WriteString("Return exactly one compact JSON object with keys: verdict, confidence, thesis (a single English paragraph, MAX 60 words), key_reasons (exactly the 3 most decisive judgement factors, each in English and MAX 20 words), key_risks (exactly the 2 most material risks, each in English and MAX 20 words), red_lines_hit, master_specific (compact, max 5 fields).\n")
 	return b.String()
 }
 
@@ -578,7 +489,7 @@ func (a *MasterAgent) buildSystemPrompt() string {
 // missing field explicitly so the LLM has no excuse to fabricate.
 func (a *MasterAgent) buildUserPrompt(in MasterInput) string {
 	var b strings.Builder
-	b.WriteString("Apply the persona above to the stock below and return exactly ONE JSON object. Respond in English (see rule 10 in the system prompt).\n\n")
+	b.WriteString("Apply the persona above to the stock below and return exactly ONE JSON object. Respond in English (see GLOBAL RULES in the system prompt).\n\n")
 	fmt.Fprintf(&b, "symbol: %s\n", strings.ToUpper(in.Symbol))
 	if name := strings.TrimSpace(in.Name); name != "" {
 		// Surface the issuer's short name so masters reason about
@@ -1185,19 +1096,20 @@ func utf8RuneCount(s string) int {
 // caps, Gemini enforces them server-side and the model is forced
 // to commit to a finite, well-formed reply.
 //
-// Limits picked from the prompt contract ("不超过 200 字 thesis,
-// 3 条 key_reasons, 2 条 key_risks") plus a 2-3× headroom so the
-// model can over-shoot the soft contract without being clipped.
+// Limits picked from the compact prompt contract (60-word thesis,
+// exactly 3 short reasons, exactly 2 short risks) plus modest
+// headroom. Output tokens are the dominant daily-picks cost, so the
+// schema intentionally discourages essay-length responses.
 var MasterReportJSONSchema = []byte(`{
   "type": "object",
   "properties": {
     "verdict":        { "type": "string", "maxLength": 32 },
     "confidence":     { "type": "integer", "minimum": 0, "maximum": 100 },
-    "thesis":         { "type": "string", "maxLength": 800 },
-    "key_reasons":    { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "string", "maxLength": 400 } },
-    "key_risks":      { "type": "array", "minItems": 1, "maxItems": 6, "items": { "type": "string", "maxLength": 400 } },
+    "thesis":         { "type": "string", "maxLength": 420 },
+    "key_reasons":    { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "string", "maxLength": 180 } },
+    "key_risks":      { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "string", "maxLength": 180 } },
     "red_lines_hit":  { "type": "array", "maxItems": 10, "items": { "type": "string", "maxLength": 80 } },
-    "master_specific":{ "type": "object" }
+    "master_specific":{ "type": "object", "maxProperties": 5 }
   },
   "required": ["verdict", "confidence", "thesis", "key_reasons", "key_risks"],
   "additionalProperties": true

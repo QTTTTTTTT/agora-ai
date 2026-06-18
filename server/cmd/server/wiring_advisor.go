@@ -308,12 +308,12 @@ func newAdvisorTacticDataLoader(svc *Services) advisor.TacticDataLoader {
 // MasterPanel for the requested keys on every call. We don't cache
 // panels because:
 //
-//   1. They're cheap to construct (no I/O at construction time).
-//   2. Persona keys can change across requests for the same user
-//      (preset switching), so a cache keyed on user_id would still
-//      miss most of the time.
-//   3. Clock injection per-request is useful for deterministic
-//      tests that need to control GeneratedAt.
+//  1. They're cheap to construct (no I/O at construction time).
+//  2. Persona keys can change across requests for the same user
+//     (preset switching), so a cache keyed on user_id would still
+//     miss most of the time.
+//  3. Clock injection per-request is useful for deterministic
+//     tests that need to control GeneratedAt.
 //
 // Phase B-3: ctx + userID are accepted so the LLMAdapter can stamp
 // ChatRequest.UserID and the llm.UserOverrideHook can swap in the
@@ -380,12 +380,10 @@ func userScopedAdvisorLLM(svc *Services, userID, stepName string) agent.LLMClien
 	}
 	if stepName == "advisor_master" {
 		// Master reports include thesis, reasons, risks and persona-specific
-		// fields. DeepSeek's non-native JSON mode can be more verbose than
-		// Gemini responseSchema mode, so the default 4096 cap occasionally
-		// cuts the object in half and causes parse_error:no json object found.
-		// Give advisor_master enough headroom while leaving shorter tactic
-		// calls at their provider/default cap.
-		opts = append(opts, agent.WithLLMAdapterMaxTokens(7168))
+		// fields, but the prompt/schema now require compact output. Keep
+		// enough headroom for DeepSeek's prompt-only JSON mode without
+		// letting essay-length replies consume thousands of output tokens.
+		opts = append(opts, agent.WithLLMAdapterMaxTokens(2048))
 	}
 	if userID != "" {
 		opts = append(opts, agent.WithLLMAdapterUser(userID))
@@ -650,7 +648,7 @@ func buildAdvisorFundamentalHistoryFetcherFromEnv() fundamental.HistoricalFetche
 const historyDurationDefault = 24 * time.Hour
 
 var (
-	_ = strconv.Atoi    // keep strconv import live for future env parsing
+	_ = strconv.Atoi // keep strconv import live for future env parsing
 	_ = historyDurationDefault
 )
 
@@ -660,16 +658,16 @@ var (
 // daily_picks.result_json blob).
 //
 // Construction shape:
-//   1. one OHLC fetcher per process (cache-wrapped via
-//      buildOHLCFetcherFromEnv), so 50 symbols × 4 presets in one
-//      cron tick fan out into ~50 unique Yahoo chart requests, not
-//      200 (the cache TTL bucket subsumes the cron pass);
-//   2. lookback fixed at 260 daily bars (~1y) so SMA200 has full
-//      seeding margin and the 52-week-high return is meaningful;
-//   3. per-call timeout fixed at 6s — Yahoo p99 is well under 2s
-//      and the advisor's per-symbol timeout in the daily-picks
-//      loop is already 90s, so a stuck Yahoo call must not chew
-//      through that envelope before fundamentals get a chance.
+//  1. one OHLC fetcher per process (cache-wrapped via
+//     buildOHLCFetcherFromEnv), so 50 symbols × 4 presets in one
+//     cron tick fan out into ~50 unique Yahoo chart requests, not
+//     200 (the cache TTL bucket subsumes the cron pass);
+//  2. lookback fixed at 260 daily bars (~1y) so SMA200 has full
+//     seeding margin and the 52-week-high return is meaningful;
+//  3. per-call timeout fixed at 6s — Yahoo p99 is well under 2s
+//     and the advisor's per-symbol timeout in the daily-picks
+//     loop is already 90s, so a stuck Yahoo call must not chew
+//     through that envelope before fundamentals get a chance.
 //
 // Returns nil when no OHLC fetcher is wired (local-dev /
 // air-gapped tests). The advisor service then degrades to the
@@ -710,15 +708,15 @@ func newAdvisorTechnicalLoader() advisor.TechnicalLoader {
 // agent.MasterTechnicalBlock wire shape the master prompt and the
 // frontend consume. Three responsibilities:
 //
-//   1. Field-by-field copy (rsi14, macd, kdj, S/R, etc.).
-//   2. Multi-window returns derived from the bar slice itself
-//      (the snapshot only carries the latest values; computing
-//      5d / 20d / 52w returns from the OHLC tail is one slice
-//      lookup each).
-//   3. RSI zone string normalisation: indicator.Snapshot uses
-//      "overbought"/"oversold"/""; the prompt section uses
-//      "overbought"/"oversold"/"neutral" so the masters never
-//      see an empty-string zone label that could be misread.
+//  1. Field-by-field copy (rsi14, macd, kdj, S/R, etc.).
+//  2. Multi-window returns derived from the bar slice itself
+//     (the snapshot only carries the latest values; computing
+//     5d / 20d / 52w returns from the OHLC tail is one slice
+//     lookup each).
+//  3. RSI zone string normalisation: indicator.Snapshot uses
+//     "overbought"/"oversold"/""; the prompt section uses
+//     "overbought"/"oversold"/"neutral" so the masters never
+//     see an empty-string zone label that could be misread.
 func technicalSnapshotToBlock(s indicator.Snapshot, bars []ohlc.Bar) *agent.MasterTechnicalBlock {
 	if s.LastClose == 0 || len(bars) == 0 {
 		return nil
