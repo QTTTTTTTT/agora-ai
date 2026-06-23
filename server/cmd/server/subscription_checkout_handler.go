@@ -2,17 +2,19 @@
 // 订阅入口（USD 计费）。
 //
 // Routes
-//   POST /api/subscription/checkout         body: {tier, billing_period}
-//   GET  /api/subscription/intent/{id}      前端 success 回跳后轮询
-//   GET  /api/subscription/portal           跳 LS customer portal（取消/换卡）
+//
+//	POST /api/subscription/checkout         body: {tier, billing_period}
+//	GET  /api/subscription/intent/{id}      前端 success 回跳后轮询
+//	GET  /api/subscription/portal           跳 LS customer portal（取消/换卡）
 //
 // 流程：
-//   /pricing 点 Subscribe → POST checkout → 后端 INSERT checkout_intents
-//   pending → 调 LS CreateHostedCheckout（custom_data 带 intent_id /
-//   user_id / tier / billing_period）→ 返回 checkout_url 给前端 →
-//   前端 window.assign → LS 收款 → success_url 回跳 SPA 携带 intent_id
-//   → SPA 轮询 GET /intent/{id} 等到 status=completed → webhook
-//   subscription_created 已经 UPSERT subscriptions + 关 intent。
+//
+//	/pricing 点 Subscribe → POST checkout → 后端 INSERT checkout_intents
+//	pending → 调 LS CreateHostedCheckout（custom_data 带 intent_id /
+//	user_id / tier / billing_period）→ 返回 checkout_url 给前端 →
+//	前端 window.assign → LS 收款 → success_url 回跳 SPA 携带 intent_id
+//	→ SPA 轮询 GET /intent/{id} 等到 status=completed → webhook
+//	subscription_created 已经 UPSERT subscriptions + 关 intent。
 //
 // 与 advisor_credits 共用同一个 /api/lemonsqueezy/webhook —— 该 webhook
 // 在 advisor_credits_handler.go 里，本文件只负责创建 checkout 的入口
@@ -35,6 +37,7 @@ import (
 
 	"github.com/fundai/server/internal/api"
 	"github.com/fundai/server/internal/lemonsqueezy"
+	"github.com/fundai/server/internal/subscription"
 )
 
 type subscriptionCheckoutHandler struct {
@@ -192,10 +195,15 @@ func (h *subscriptionCheckoutHandler) handleCreateCheckout(w http.ResponseWriter
 	// 5. 调 LS hosted checkout
 	successURL := fmt.Sprintf("%s/subscription?status=processing&intent_id=%s", h.appBaseURL, intentID)
 	cancelURL := fmt.Sprintf("%s/pricing?status=cancelled", h.appBaseURL)
+	variantQuantity := 0
+	if tier == "team" {
+		variantQuantity = seatCount
+	}
 	resp, err := h.lsClient.CreateHostedCheckout(ctx, lemonsqueezy.CheckoutRequest{
-		VariantID: variantID,
-		UserEmail: email,
-		UserName:  name,
+		VariantID:       variantID,
+		UserEmail:       email,
+		UserName:        name,
+		VariantQuantity: variantQuantity,
 		CustomData: map[string]string{
 			"intent_id":      intentID,
 			"user_id":        userID,
@@ -338,7 +346,40 @@ func (h *subscriptionCheckoutHandler) lookupVariant(ctx context.Context, tier, p
 		  WHERE plan_tier=$1 AND billing_period=$2 AND active=TRUE`,
 		tier, period,
 	).Scan(&variantID, &priceCents)
+	if errors.Is(err, sql.ErrNoRows) {
+		if envVariantID := subscriptionVariantIDFromEnv(tier, period); envVariantID != "" {
+			return envVariantID, subscriptionPriceCents(tier, period), nil
+		}
+	}
 	return variantID, priceCents, err
+}
+
+func subscriptionVariantIDFromEnv(tier, period string) string {
+	upperTier := strings.ToUpper(strings.TrimSpace(tier))
+	upperPeriod := strings.ToUpper(strings.TrimSpace(period))
+	if upperTier == "" || upperPeriod == "" {
+		return ""
+	}
+	for _, key := range []string{
+		"LEMONSQUEEZY_VARIANT_" + upperTier + "_" + upperPeriod,
+		"LS_VARIANT_" + upperTier + "_" + upperPeriod,
+	} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func subscriptionPriceCents(tier, period string) int {
+	plan, ok := subscription.Plans[subscription.PlanTier(strings.ToLower(strings.TrimSpace(tier)))]
+	if !ok || plan == nil {
+		return 0
+	}
+	if strings.EqualFold(period, "yearly") {
+		return plan.PriceCentsUSDYear
+	}
+	return plan.PriceCentsUSDMonth
 }
 
 func (h *subscriptionCheckoutHandler) lookupUserContact(ctx context.Context, userID string) (email, name string) {

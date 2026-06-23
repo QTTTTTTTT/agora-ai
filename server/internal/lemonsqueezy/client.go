@@ -3,9 +3,9 @@
 //
 // We deliberately implement only what Phase C needs:
 //
-//   * CreateHostedCheckout — create a checkout URL the SPA
+//   - CreateHostedCheckout — create a checkout URL the SPA
 //     redirects to.
-//   * VerifyWebhookSignature — validate the HMAC the LemonSqueezy
+//   - VerifyWebhookSignature — validate the HMAC the LemonSqueezy
 //     webhook sends so we can trust the body before crediting
 //     anyone.
 //
@@ -14,8 +14,9 @@
 // to handle replays.
 //
 // References:
-//   https://docs.lemonsqueezy.com/api/checkouts/create-checkout
-//   https://docs.lemonsqueezy.com/help/webhooks
+//
+//	https://docs.lemonsqueezy.com/api/checkouts/create-checkout
+//	https://docs.lemonsqueezy.com/help/webhooks
 package lemonsqueezy
 
 import (
@@ -56,12 +57,14 @@ type Config struct {
 // the billing surface.
 //
 // Required env:
-//   LEMONSQUEEZY_API_KEY        — secret API key (lst_*)
-//   LEMONSQUEEZY_STORE_ID       — numeric store id from LS dashboard
-//   LEMONSQUEEZY_WEBHOOK_SECRET — webhook signing secret
+//
+//	LEMONSQUEEZY_API_KEY        — secret API key (lst_*)
+//	LEMONSQUEEZY_STORE_ID       — numeric store id from LS dashboard
+//	LEMONSQUEEZY_WEBHOOK_SECRET — webhook signing secret
 //
 // Optional:
-//   LEMONSQUEEZY_API_BASE       — override for tests / mock
+//
+//	LEMONSQUEEZY_API_BASE       — override for tests / mock
 func FromEnv() (*Config, bool) {
 	api := strings.TrimSpace(os.Getenv("LEMONSQUEEZY_API_KEY"))
 	store := strings.TrimSpace(os.Getenv("LEMONSQUEEZY_STORE_ID"))
@@ -117,11 +120,15 @@ func NewClientFromEnv() (*Client, bool, error) {
 
 // CheckoutRequest is the input to CreateHostedCheckout.
 type CheckoutRequest struct {
-	VariantID         string
-	UserEmail         string
-	UserName          string
-	CustomData        map[string]string
-	RedirectURL       string
+	VariantID  string
+	UserEmail  string
+	UserName   string
+	CustomData map[string]string
+	// VariantQuantity is used for seat-based products. LemonSqueezy
+	// expects this under checkout_data.variant_quantities, not as a
+	// top-level quantity field.
+	VariantQuantity    int
+	RedirectURL        string
 	SuccessRedirectURL string
 }
 
@@ -147,25 +154,23 @@ func (c *Client) CreateHostedCheckout(ctx context.Context, req CheckoutRequest) 
 		return nil, errors.New("lemonsqueezy: variant_id required")
 	}
 
-	attrs := map[string]any{
-		"checkout_data": map[string]any{
-			"email":       req.UserEmail,
-			"name":        req.UserName,
-			"custom":      req.CustomData,
-		},
+	checkoutData := map[string]any{
+		"email":  req.UserEmail,
+		"name":   req.UserName,
+		"custom": req.CustomData,
 	}
-	if strings.TrimSpace(req.RedirectURL) != "" || strings.TrimSpace(req.SuccessRedirectURL) != "" {
-		options := map[string]any{}
-		if u := strings.TrimSpace(req.SuccessRedirectURL); u != "" {
-			attrs["product_options"] = map[string]any{
-				"redirect_url": u,
-			}
+	if req.VariantQuantity > 0 {
+		checkoutData["variant_quantities"] = []map[string]any{
+			{"variant_id": req.VariantID, "quantity": req.VariantQuantity},
 		}
-		if u := strings.TrimSpace(req.RedirectURL); u != "" {
-			options["redirect_url"] = u
-		}
-		if len(options) > 0 {
-			attrs["checkout_options"] = options
+	}
+
+	attrs := map[string]any{
+		"checkout_data": checkoutData,
+	}
+	if u := strings.TrimSpace(req.SuccessRedirectURL); u != "" {
+		attrs["product_options"] = map[string]any{
+			"redirect_url": u,
 		}
 	}
 
@@ -254,8 +259,9 @@ func VariantIDFromEnv(envVarName string) string {
 // invoices, so we don't have to build that surface ourselves.
 //
 // LS schema:
-//   GET /v1/customers/{id}
-//   → data.attributes.urls.customer_portal
+//
+//	GET /v1/customers/{id}
+//	→ data.attributes.urls.customer_portal
 func (c *Client) GetCustomerPortalURL(ctx context.Context, customerID string) (string, error) {
 	if c == nil {
 		return "", errors.New("lemonsqueezy: client not configured")

@@ -24,6 +24,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/fundai/server/internal/subscription"
 )
 
 // subscriptionWebhookExt 嵌进 advisorCreditsHandler，由该 handler
@@ -166,6 +168,10 @@ func (s *subscriptionWebhookExt) activate(
 		`SELECT price_cents_usd FROM plan_lemonsqueezy_variants
 		  WHERE plan_tier=$1 AND billing_period=$2`, tier, period,
 	).Scan(&price)
+	if !price.Valid {
+		price.Int64 = int64(subscriptionPriceCentsForWebhook(tier, period))
+		price.Valid = price.Int64 > 0
+	}
 
 	// 标记其它 active 订阅为 cancelled（用户从 starter → pro 等情况，
 	// LS 那边走的是新建一条新 sub + 原 sub 自动 cancel；保险起见这里
@@ -339,6 +345,17 @@ func nullableTime(t time.Time) any {
 		return nil
 	}
 	return t
+}
+
+func subscriptionPriceCentsForWebhook(tier, period string) int {
+	plan, ok := subscription.Plans[subscription.PlanTier(strings.ToLower(strings.TrimSpace(tier)))]
+	if !ok || plan == nil {
+		return 0
+	}
+	if strings.EqualFold(period, "yearly") {
+		return plan.PriceCentsUSDYear
+	}
+	return plan.PriceCentsUSDMonth
 }
 
 func mustJSON(v any) []byte {
