@@ -17,15 +17,16 @@ import (
 // called with so assertions can check the handler forwarded the
 // path-derived fundID + the authenticated userID correctly.
 type stubBacktestService struct {
-	submitFn       func(userID string, input SubmitBacktestInput) (*BacktestJob, error)
-	listFn         func(userID, fundID string) ([]*BacktestJob, error)
-	getFn          func(userID, fundID, jobID string) (*BacktestJob, error)
-	cancelFn       func(userID, fundID, jobID string) (bool, error)
-	compareFn      func(userID, fundID, jobIDA, jobIDB string) (*BacktestComparison, error)
-	submitSweepFn  func(userID string, input SubmitSweepInput) (*BacktestSweep, error)
-	listSweepsFn   func(userID, fundID string) ([]*BacktestSweep, error)
-	getSweepFn     func(userID, fundID, sweepID string) (*BacktestSweep, error)
-	axisCatalogFn  func() []string
+	submitFn      func(userID string, input SubmitBacktestInput) (*BacktestJob, error)
+	listFn        func(userID, fundID string) ([]*BacktestJob, error)
+	getFn         func(userID, fundID, jobID string) (*BacktestJob, error)
+	cancelFn      func(userID, fundID, jobID string) (bool, error)
+	compareFn     func(userID, fundID, jobIDA, jobIDB string) (*BacktestComparison, error)
+	submitSweepFn func(userID string, input SubmitSweepInput) (*BacktestSweep, error)
+	listSweepsFn  func(userID, fundID string) ([]*BacktestSweep, error)
+	getSweepFn    func(userID, fundID, sweepID string) (*BacktestSweep, error)
+	axisCatalogFn func() []string
+	buySymbolsFn  func(userID, fundID string, limit int) ([]BacktestHistoricalBuySymbol, error)
 }
 
 func (s stubBacktestService) SubmitBacktest(userID string, input SubmitBacktestInput) (*BacktestJob, error) {
@@ -89,6 +90,13 @@ func (s stubBacktestService) SweepAxisCatalog() []string {
 		return s.axisCatalogFn()
 	}
 	return []string{"slippageBps", "engineKind"}
+}
+
+func (s stubBacktestService) ListHistoricalBuySymbols(userID, fundID string, limit int) ([]BacktestHistoricalBuySymbol, error) {
+	if s.buySymbolsFn != nil {
+		return s.buySymbolsFn(userID, fundID, limit)
+	}
+	return []BacktestHistoricalBuySymbol{}, nil
 }
 
 // newBacktestHandler is the minimal FundHandler wiring needed for
@@ -677,16 +685,42 @@ func TestSweepAxisCatalog(t *testing.T) {
 	}
 }
 
+func TestListHistoricalBuySymbols(t *testing.T) {
+	svc := stubBacktestService{
+		buySymbolsFn: func(userID, fundID string, limit int) ([]BacktestHistoricalBuySymbol, error) {
+			if userID != "user-1" || fundID != "fund-1" {
+				t.Fatalf("unexpected args userID=%q fundID=%q", userID, fundID)
+			}
+			if limit != 25 {
+				t.Fatalf("limit = %d want 25", limit)
+			}
+			return []BacktestHistoricalBuySymbol{{Symbol: "AAPL", Market: "us_equity", BuyCount: 2}}, nil
+		},
+	}
+	mux := http.NewServeMux()
+	newBacktestHandler(svc).RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/api/funds/fund-1/backtests/historical-buy-symbols?limit=25", nil)
+	req = authRequest(req, "user-1")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "AAPL") {
+		t.Errorf("body missing symbol: %s", rr.Body.String())
+	}
+}
+
 // normaliseEngineKind tests
 func TestNormaliseEngineKind(t *testing.T) {
 	cases := map[string]string{
-		"":             "fallback",
-		"fallback":     "fallback",
-		"LLM":          "llm",
-		" Debate ":     "llm-debate",
-		"llm-debate":   "llm-debate",
-		"llm_debate":   "llm-debate",
-		"bogus":        "fallback",
+		"":           "fallback",
+		"fallback":   "fallback",
+		"LLM":        "llm",
+		" Debate ":   "llm-debate",
+		"llm-debate": "llm-debate",
+		"llm_debate": "llm-debate",
+		"bogus":      "fallback",
 	}
 	for in, want := range cases {
 		if got := normaliseEngineKind(in); got != want {

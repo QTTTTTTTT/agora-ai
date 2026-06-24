@@ -134,6 +134,45 @@ func TestBacktestAdapterRunRequiresOHLC(t *testing.T) {
 	}
 }
 
+func TestListHistoricalBuySymbolsQueriesFilledBuys(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock new: %v", err)
+	}
+	defer db.Close()
+	adapter := &backtestServiceAdapter{db: db}
+	now := time.Date(2026, 6, 25, 9, 30, 0, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta(`
+		SELECT UPPER(TRIM(symbol)) AS symbol,
+		       COALESCE(NULLIF(TRIM(market), ''), 'us_equity') AS market,
+		       COUNT(*)::int AS buy_count,
+		       MIN(COALESCE(executed_at, created_at)) AS first_bought_at,
+		       MAX(COALESCE(executed_at, created_at)) AS last_bought_at,
+		       COALESCE(SUM(ABS(COALESCE(amount, filled_qty * COALESCE(filled_price, price), quantity * COALESCE(price, filled_price), 0))), 0)::float8 AS gross_buy_amount
+		  FROM trade_executions
+		 WHERE fund_id = $1
+		   AND LOWER(side) = 'buy'
+		   AND status IN ('filled', 'partial')
+		   AND COALESCE(filled_qty, quantity, 0) > 0
+		   AND TRIM(symbol) <> ''
+		 GROUP BY UPPER(TRIM(symbol)), COALESCE(NULLIF(TRIM(market), ''), 'us_equity')
+		 ORDER BY last_bought_at DESC, buy_count DESC, symbol ASC
+		 LIMIT $2`)).
+		WithArgs("fund-1", 10).
+		WillReturnRows(sqlmock.NewRows([]string{"symbol", "market", "buy_count", "first_bought_at", "last_bought_at", "gross_buy_amount"}).
+			AddRow("AAPL", "us_equity", 2, now.AddDate(0, 0, -5), now, 12345.67))
+	out, err := adapter.ListHistoricalBuySymbols("user-1", "fund-1", 10)
+	if err != nil {
+		t.Fatalf("ListHistoricalBuySymbols: %v", err)
+	}
+	if len(out) != 1 || out[0].Symbol != "AAPL" || out[0].BuyCount != 2 {
+		t.Fatalf("unexpected rows: %+v", out)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
 // -------------------- Phase 2F persistence integration --------------------
 
 // newPersistentAdapter wires a real backtestServiceAdapter on top

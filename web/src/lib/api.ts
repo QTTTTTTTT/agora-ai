@@ -905,6 +905,19 @@ export interface BacktestSubmitInput {
   rebalanceFrequency?: "daily" | "weekly" | "monthly" | string;
 }
 
+export interface BacktestHistoricalBuySymbol {
+  symbol: string;
+  market?: string;
+  buyCount: number;
+  firstBoughtAt?: string;
+  lastBoughtAt?: string;
+  grossBuyAmount?: number;
+}
+
+export interface BacktestHistoricalBuySymbolsResponse {
+  symbols: BacktestHistoricalBuySymbol[];
+}
+
 export interface WalkForwardInput {
   numFolds: number;
   trainRatio?: number;
@@ -1037,6 +1050,11 @@ export async function submitBacktest(fundId: string, body: BacktestSubmitInput):
 
 export async function listBacktests(fundId: string): Promise<BacktestJob[]> {
   return apiGet<BacktestJob[]>(`/api/funds/${encodeURIComponent(fundId)}/backtests`);
+}
+
+export async function listHistoricalBuySymbols(fundId: string, limit = 50): Promise<BacktestHistoricalBuySymbolsResponse> {
+  const capped = Math.max(1, Math.min(200, Math.floor(limit)));
+  return apiGet<BacktestHistoricalBuySymbolsResponse>(`/api/funds/${encodeURIComponent(fundId)}/backtests/historical-buy-symbols?limit=${capped}`);
 }
 
 // ---------------------------------------------------------------------------

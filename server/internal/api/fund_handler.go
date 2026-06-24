@@ -341,9 +341,9 @@ type Fund struct {
 	// ActivityRetentionDays surfaces the per-fund retention setting
 	// (1..10 days). Always populated on Fund reads: a missing or
 	// invalid stored value falls back to 7 in normalizeActivityRetentionDays.
-	ActivityRetentionDays int `json:"activityRetentionDays,omitempty"`
-	CreatedAt        time.Time           `json:"createdAt"`
-	UpdatedAt        time.Time           `json:"updatedAt"`
+	ActivityRetentionDays int       `json:"activityRetentionDays,omitempty"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
 // TodayPnL is the dashboard "今日盈亏" payload returned by
@@ -382,7 +382,7 @@ type TodayPnL struct {
 	//   = RealisedPnL + (CurrentUnrealisedPnL - PriorCloseUnrealisedPnL)
 	// which equals "live total assets - prior close total assets"
 	// when no cash deposits/withdrawals happened in between.
-	TodayPnL float64 `json:"todayPnl"`
+	TodayPnL float64   `json:"todayPnl"`
 	AsOf     time.Time `json:"asOf"`
 }
 
@@ -1424,11 +1424,11 @@ type WorkflowService interface {
 // scheduler considers `now` inside the active trading window for
 // this fund — useful for badges like "running now" vs "next at 9:30".
 type NextWorkflowRun struct {
-	FundID            string                `json:"fundId"`
-	TradingDate       string                `json:"tradingDate"`
-	Timezone          string                `json:"timezone"`
-	NextTriggerAt     time.Time             `json:"nextTriggerAt"`
-	CurrentlyInWindow bool                  `json:"currentlyInWindow"`
+	FundID            string    `json:"fundId"`
+	TradingDate       string    `json:"tradingDate"`
+	Timezone          string    `json:"timezone"`
+	NextTriggerAt     time.Time `json:"nextTriggerAt"`
+	CurrentlyInWindow bool      `json:"currentlyInWindow"`
 	// Steps lists the legacy single-shot 10-step schedule (one full
 	// workflow per trading day). Set only when DecisionIntervalMinutes
 	// is nil; when interval mode is active the per-day schedule is a
@@ -1507,14 +1507,14 @@ type AttributionService interface {
 // stat structs into plain JSON keys so frontends don't have to
 // reach into sql.NullString etc.
 type AttributionResponse struct {
-	FundID         string                  `json:"fundId"`
-	WindowDays     int                     `json:"windowDays"`
-	Since          time.Time               `json:"since"`
-	GeneratedAt    time.Time               `json:"generatedAt"`
-	BySleeve       []SleeveStatDTO         `json:"bySleeve"`
-	ByRegime       []RegimeStatDTO         `json:"byRegime"`
-	BySleeveRegime []SleeveRegimeStatDTO   `json:"bySleeveRegime"`
-	Lessons        []AttributionLessonDTO  `json:"lessons"`
+	FundID         string                 `json:"fundId"`
+	WindowDays     int                    `json:"windowDays"`
+	Since          time.Time              `json:"since"`
+	GeneratedAt    time.Time              `json:"generatedAt"`
+	BySleeve       []SleeveStatDTO        `json:"bySleeve"`
+	ByRegime       []RegimeStatDTO        `json:"byRegime"`
+	BySleeveRegime []SleeveRegimeStatDTO  `json:"bySleeveRegime"`
+	Lessons        []AttributionLessonDTO `json:"lessons"`
 }
 
 // SleeveStatDTO is the per-sleeve aggregate row. Win rate is
@@ -1809,19 +1809,19 @@ type MarketplaceAuctionService interface {
 // ---------------------------------------------------------------------------
 
 type FundHandler struct {
-	funds            FundService
-	teams            TeamService
-	plans            PlanService
-	trades           TradeService
-	workflow         WorkflowService
-	memory           MemoryService
-	reflections      ReflectionService
-	agentSkills      AgentSkillService
-	decisionTrace    DecisionTraceService
-	market           MarketService
-	abtests          ABTestService
-	marketplace      MarketplaceService
-	auctions         MarketplaceAuctionService
+	funds         FundService
+	teams         TeamService
+	plans         PlanService
+	trades        TradeService
+	workflow      WorkflowService
+	memory        MemoryService
+	reflections   ReflectionService
+	agentSkills   AgentSkillService
+	decisionTrace DecisionTraceService
+	market        MarketService
+	abtests       ABTestService
+	marketplace   MarketplaceService
+	auctions      MarketplaceAuctionService
 	// attribution surfaces the Phase 3A-5 cross-tab + lesson
 	// stream for a fund. Optional: when nil the handler responds
 	// 503 and the dashboard renders an empty state.
@@ -1830,50 +1830,50 @@ type FundHandler struct {
 	// handlers return 503 / empty list when this isn't wired so
 	// the rest of the API works unchanged on deployments without
 	// OHLC providers.
-	backtests        BacktestService
+	backtests BacktestService
 	// promotions is the Phase 2J/K/L strategy promotion +
 	// shadow + decay-monitor service. nil disables the
 	// /promotions endpoints with a 503 / empty list.
-	promotions       PromotionService
+	promotions PromotionService
 	// corpActions is the Sprint 4 corp-action read service.
 	// nil-safe: GetCorpActions returns 503 when unset.
-	corpActions      CorpActionService
+	corpActions CorpActionService
 	// benchmarks powers the benchmark-history overlay on the fund
 	// dashboard. nil-safe: GetBenchmarkHistory returns 503 when
 	// unwired so deployments without ohlc providers stay healthy.
-	benchmarks       BenchmarkService
+	benchmarks BenchmarkService
 	// holdingsSeries powers the per-holding mini-chart grid (P1-2).
 	// Same nil-safety contract as benchmarks; both lean on the
 	// shared ohlc.Fetcher so they share the same kill-switch.
-	holdingsSeries   HoldingsSeriesService
+	holdingsSeries HoldingsSeriesService
 	// abShadowAgents surfaces the per-variant shadow agent
 	// learning timeline (Card D). nil-safe: the handler returns
 	// 503 when unwired so AB analyses still work without it.
-	abShadowAgents   ABShadowAgentService
+	abShadowAgents ABShadowAgentService
 	// abAttribution surfaces the per-symbol A vs B operational
 	// attribution table (Card D). Same nil-safety contract.
-	abAttribution    ABOperationalAttributionService
+	abAttribution ABOperationalAttributionService
 	// fundAssist is the LLM-backed "describe a fund + team in
 	// natural language and we'll create them" feature. nil-safe:
 	// the endpoint returns 503 when unwired so deployments without
 	// LLM keys still work.
-	fundAssist       FundAssistService
+	fundAssist FundAssistService
 	// factorlab powers the Stage-2 IC/IR/分层 report endpoint
 	// (/api/factorlab/reports). Same nil-safety contract: handler
 	// returns 503 when unwired.
-	factorlab        FactorLabService
+	factorlab FactorLabService
 	// paperTrading powers the Stage-4 tamper-evident performance
 	// archive (/api/papertrading/*). Same nil-safety contract.
-	paperTrading     PaperTradingService
+	paperTrading PaperTradingService
 	// cnIntraday powers the Stage-5 A-share intraday signal
 	// dry-run endpoint (/api/cnintraday/signals/dry-run). Live
 	// engine runs out-of-process in cmd/cnintraday-runner.
-	cnIntraday       CNIntradayService
+	cnIntraday CNIntradayService
 	// compliance powers the SEC / Marketing-Rule disclosure
 	// surface: user-disclosure acknowledgments + post-LLM
 	// phrase scanner audit. nil-safe: /api/compliance/* returns
 	// 503 and the in-handler scanner becomes a no-op.
-	compliance       ComplianceService
+	compliance ComplianceService
 }
 
 // WithBacktestService wires the Phase 2E backtest service. nil
@@ -2025,6 +2025,7 @@ func (h *FundHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/funds/{fundId}", h.DeleteFund)
 	mux.HandleFunc("POST /api/funds/{fundId}/backtests", h.SubmitBacktest)
 	mux.HandleFunc("GET /api/funds/{fundId}/backtests", h.ListBacktests)
+	mux.HandleFunc("GET /api/funds/{fundId}/backtests/historical-buy-symbols", h.ListHistoricalBuySymbols)
 	mux.HandleFunc("GET /api/funds/{fundId}/backtests/compare", h.CompareBacktests)
 	mux.HandleFunc("POST /api/funds/{fundId}/backtests/sweeps", h.SubmitSweep)
 	mux.HandleFunc("GET /api/funds/{fundId}/backtests/sweeps", h.ListSweeps)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,6 +56,11 @@ type BacktestService interface {
 	// caller may vary. The web UI uses this to populate the
 	// "axis" picker without hard-coding the list.
 	SweepAxisCatalog() []string
+	// ListHistoricalBuySymbols returns the distinct symbols this
+	// fund has actually bought in filled/partial executions. The
+	// backtest form uses it as a one-click universe so operators can
+	// replay the real strategy purchase basket and compare PnL.
+	ListHistoricalBuySymbols(userID, fundID string, limit int) ([]BacktestHistoricalBuySymbol, error)
 }
 
 // SubmitBacktestInput mirrors the public POST body. We keep it
@@ -62,19 +68,19 @@ type BacktestService interface {
 // to import the backtest package — the wiring layer translates
 // between them.
 type SubmitBacktestInput struct {
-	FundID           string                     `json:"fundId"`
-	Name             string                     `json:"name,omitempty"`
-	Market           string                     `json:"market,omitempty"`
-	Symbols          []string                   `json:"symbols"`
-	InitialPositions []BacktestInitialPosition  `json:"initialPositions,omitempty"`
-	Start            time.Time                  `json:"start"`
-	End              time.Time                  `json:"end"`
-	InitialCash      float64                    `json:"initialCash"`
-	BaseCurrency     string                     `json:"baseCurrency,omitempty"`
-	SlippageBps      float64                    `json:"slippageBps,omitempty"`
-	CommissionBps    float64                    `json:"commissionBps,omitempty"`
-	MaxOrdersPerDay  int                        `json:"maxOrdersPerDay,omitempty"`
-	EngineKind       string                     `json:"engineKind,omitempty"`
+	FundID           string                    `json:"fundId"`
+	Name             string                    `json:"name,omitempty"`
+	Market           string                    `json:"market,omitempty"`
+	Symbols          []string                  `json:"symbols"`
+	InitialPositions []BacktestInitialPosition `json:"initialPositions,omitempty"`
+	Start            time.Time                 `json:"start"`
+	End              time.Time                 `json:"end"`
+	InitialCash      float64                   `json:"initialCash"`
+	BaseCurrency     string                    `json:"baseCurrency,omitempty"`
+	SlippageBps      float64                   `json:"slippageBps,omitempty"`
+	CommissionBps    float64                   `json:"commissionBps,omitempty"`
+	MaxOrdersPerDay  int                       `json:"maxOrdersPerDay,omitempty"`
+	EngineKind       string                    `json:"engineKind,omitempty"`
 	// BenchmarkSymbol is the index ticker to track alongside the
 	// strategy so the UI can plot a third "超额收益" line and the
 	// metrics block carries alpha/beta/IR. Optional — empty
@@ -114,18 +120,18 @@ type BacktestInitialPosition struct {
 // every endpoint. Result is only populated when Status ==
 // "completed"; Error is populated when Status == "failed".
 type BacktestJob struct {
-	ID          string                `json:"id"`
-	FundID      string                `json:"fundId"`
-	Name        string                `json:"name"`
-	EngineKind  string                `json:"engineKind"`
-	Status      string                `json:"status"`
-	Progress    BacktestProgressView  `json:"progress"`
-	SubmittedAt time.Time             `json:"submittedAt"`
-	StartedAt   time.Time             `json:"startedAt,omitempty"`
-	CompletedAt time.Time             `json:"completedAt,omitempty"`
-	Error       string                `json:"error,omitempty"`
-	Result      *BacktestResultView   `json:"result,omitempty"`
-	Request     *BacktestRequestEcho  `json:"request,omitempty"`
+	ID          string               `json:"id"`
+	FundID      string               `json:"fundId"`
+	Name        string               `json:"name"`
+	EngineKind  string               `json:"engineKind"`
+	Status      string               `json:"status"`
+	Progress    BacktestProgressView `json:"progress"`
+	SubmittedAt time.Time            `json:"submittedAt"`
+	StartedAt   time.Time            `json:"startedAt,omitempty"`
+	CompletedAt time.Time            `json:"completedAt,omitempty"`
+	Error       string               `json:"error,omitempty"`
+	Result      *BacktestResultView  `json:"result,omitempty"`
+	Request     *BacktestRequestEcho `json:"request,omitempty"`
 }
 
 // BacktestProgressView is the polling-friendly fragment.
@@ -155,14 +161,14 @@ type BacktestRequestEcho struct {
 // BacktestResultView is the final output. Wraps the NAV curve and
 // trades in JSON-friendly shapes.
 type BacktestResultView struct {
-	InitialCash     float64                `json:"initialCash"`
-	FinalNav        float64                `json:"finalNav"`
-	NavCurve        []BacktestNavPoint     `json:"navCurve"`
-	Trades          []BacktestTradeEvent   `json:"trades"`
-	Metrics         BacktestMetricsView    `json:"metrics"`
-	CompletedAt     time.Time              `json:"completedAt,omitempty"`
-	WalkForward     *WalkForwardResultView `json:"walkForward,omitempty"`
-	BenchmarkSymbol string                 `json:"benchmarkSymbol,omitempty"`
+	InitialCash     float64                  `json:"initialCash"`
+	FinalNav        float64                  `json:"finalNav"`
+	NavCurve        []BacktestNavPoint       `json:"navCurve"`
+	Trades          []BacktestTradeEvent     `json:"trades"`
+	Metrics         BacktestMetricsView      `json:"metrics"`
+	CompletedAt     time.Time                `json:"completedAt,omitempty"`
+	WalkForward     *WalkForwardResultView   `json:"walkForward,omitempty"`
+	BenchmarkSymbol string                   `json:"benchmarkSymbol,omitempty"`
 	BenchmarkCurve  []BacktestBenchmarkPoint `json:"benchmarkCurve,omitempty"`
 }
 
@@ -179,14 +185,14 @@ type BacktestBenchmarkPoint struct {
 // WalkForwardResultView is the JSON-friendly per-fold breakdown
 // for runs that used the walkForward sub-spec.
 type WalkForwardResultView struct {
-	Spec            WalkForwardInput        `json:"spec"`
-	Mode            string                  `json:"mode"`
-	Folds           []WalkForwardFoldView   `json:"folds"`
-	OOSReturn       float64                 `json:"oosReturn"`
-	OOSSharpe       float64                 `json:"oosSharpe"`
-	MeanFoldReturn  float64                 `json:"meanFoldReturn"`
-	WorstFoldReturn float64                 `json:"worstFoldReturn"`
-	BestFoldReturn  float64                 `json:"bestFoldReturn"`
+	Spec            WalkForwardInput      `json:"spec"`
+	Mode            string                `json:"mode"`
+	Folds           []WalkForwardFoldView `json:"folds"`
+	OOSReturn       float64               `json:"oosReturn"`
+	OOSSharpe       float64               `json:"oosSharpe"`
+	MeanFoldReturn  float64               `json:"meanFoldReturn"`
+	WorstFoldReturn float64               `json:"worstFoldReturn"`
+	BestFoldReturn  float64               `json:"bestFoldReturn"`
 	// FoldBoundaries indexes into NavCurve — each entry is the
 	// first NavCurve index of a new fold. The UI draws vertical
 	// separators on the chart at these positions.
@@ -248,6 +254,20 @@ type BacktestMetricsView struct {
 	InformationRatio          float64 `json:"informationRatio,omitempty"`
 }
 
+// BacktestHistoricalBuySymbol summarises one historically bought
+// ticker for the backtest form's "use strategy purchase history"
+// shortcut. Amounts are gross buy notionals in the trade table's
+// quote currency; they are informational only and not used by the
+// runner unless the user copies them into initial positions later.
+type BacktestHistoricalBuySymbol struct {
+	Symbol         string    `json:"symbol"`
+	Market         string    `json:"market,omitempty"`
+	BuyCount       int       `json:"buyCount"`
+	FirstBoughtAt  time.Time `json:"firstBoughtAt,omitempty"`
+	LastBoughtAt   time.Time `json:"lastBoughtAt,omitempty"`
+	GrossBuyAmount float64   `json:"grossBuyAmount,omitempty"`
+}
+
 // ErrBacktestUnconfigured is returned when the BacktestService
 // wasn't wired (legacy deployments without OHLC). The handler
 // translates it to a 503.
@@ -269,10 +289,10 @@ var ErrWalkForwardInvalid = errors.New("walkForward sub-spec invalid")
 // the list of dimensions to vary. The wire format is intentionally
 // dumb so the UI can serialise it from a 3-field form.
 type SubmitSweepInput struct {
-	FundID string                   `json:"fundId"`
-	Name   string                   `json:"name,omitempty"`
-	Base   SubmitBacktestInput      `json:"base"`
-	Axes   []SubmitSweepAxisInput   `json:"axes"`
+	FundID string                 `json:"fundId"`
+	Name   string                 `json:"name,omitempty"`
+	Base   SubmitBacktestInput    `json:"base"`
+	Axes   []SubmitSweepAxisInput `json:"axes"`
 }
 
 // SubmitSweepAxisInput is one varying dimension. Values are kept
@@ -290,16 +310,16 @@ type SubmitSweepAxisInput struct {
 // completion. The status field aggregates children's statuses
 // (see deriveSweepStatus in the adapter).
 type BacktestSweep struct {
-	ID         string                  `json:"id"`
-	FundID     string                  `json:"fundId"`
-	Name       string                  `json:"name"`
-	Status     string                  `json:"status"`
-	TotalCells int                     `json:"totalCells"`
-	DoneCells  int                     `json:"doneCells"`
-	CreatedAt  time.Time               `json:"createdAt"`
-	Base       *BacktestRequestEcho    `json:"base,omitempty"`
-	Axes       []SubmitSweepAxisInput  `json:"axes"`
-	Children   []*BacktestSweepChild   `json:"children,omitempty"`
+	ID         string                 `json:"id"`
+	FundID     string                 `json:"fundId"`
+	Name       string                 `json:"name"`
+	Status     string                 `json:"status"`
+	TotalCells int                    `json:"totalCells"`
+	DoneCells  int                    `json:"doneCells"`
+	CreatedAt  time.Time              `json:"createdAt"`
+	Base       *BacktestRequestEcho   `json:"base,omitempty"`
+	Axes       []SubmitSweepAxisInput `json:"axes"`
+	Children   []*BacktestSweepChild  `json:"children,omitempty"`
 }
 
 // BacktestSweepChild is a thin reference to one cell's job +
@@ -321,9 +341,9 @@ var ErrBacktestNotComparable = errors.New("backtest not comparable: both jobs mu
 // Two job views + a small derived diff block so the UI doesn't
 // have to recompute the delta on every render.
 type BacktestComparison struct {
-	A     *BacktestJob          `json:"a"`
-	B     *BacktestJob          `json:"b"`
-	Diff  BacktestComparisonDiff `json:"diff"`
+	A    *BacktestJob           `json:"a"`
+	B    *BacktestJob           `json:"b"`
+	Diff BacktestComparisonDiff `json:"diff"`
 }
 
 // BacktestComparisonDiff holds B - A for every comparable metric.
@@ -426,6 +446,47 @@ func (h *FundHandler) ListBacktests(w http.ResponseWriter, r *http.Request) {
 		jobs = []*BacktestJob{}
 	}
 	writeJSON(w, http.StatusOK, jobs)
+}
+
+// ListHistoricalBuySymbols handles
+// GET /api/funds/{fundId}/backtests/historical-buy-symbols. It is a
+// convenience endpoint for the backtest UI: instead of manually
+// copying tickers from the execution log, the operator can load the
+// actual strategy buy basket and replay that universe directly.
+func (h *FundHandler) ListHistoricalBuySymbols(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireAuthenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+	fundID := pathValue(r, "fundId")
+	if !requireNonEmpty(w, fundID, "fundId") {
+		return
+	}
+	if h.backtests == nil {
+		writeError(w, http.StatusServiceUnavailable, "backtest service unavailable", ErrBacktestUnconfigured.Error())
+		return
+	}
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid request", "limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := h.backtests.ListHistoricalBuySymbols(userID, fundID, limit)
+	if err != nil {
+		handleServiceError(w, err, "backtest")
+		return
+	}
+	if rows == nil {
+		rows = []BacktestHistoricalBuySymbol{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"symbols": rows})
 }
 
 // GetBacktest handles GET /api/funds/{fundId}/backtests/{jobId}.

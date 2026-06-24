@@ -24,21 +24,21 @@ import (
 // backtestServiceAdapter wires Phase 2E's in-memory backtest layer
 // behind the api.BacktestService façade. Responsibilities:
 //
-//   1. Authorise per-fund access by reusing repository.FundRepo —
-//      the same path the production GetFund / UpdateFund handlers
-//      walk, so we don't drift from the platform's existing
-//      RBAC story.
-//   2. Translate api.SubmitBacktestInput ↔ backtest.Request so the
-//      api package can stay free of the backtest/ohlc/decision
-//      transitive imports.
-//   3. Pick the right DecisionEngine for the requested EngineKind:
-//      "fallback" (default) → decision.FallbackEngine (no LLM
-//      cost, deterministic); "llm" → decision.LLMDecisionEngine
-//      using the platform's shared LLM client; other / unknown →
-//      "fallback".
-//   4. Run the JobStore. There is exactly one shared JobStore per
-//      process — backtest jobs are operator-driven and short, so a
-//      single in-memory ledger is enough.
+//  1. Authorise per-fund access by reusing repository.FundRepo —
+//     the same path the production GetFund / UpdateFund handlers
+//     walk, so we don't drift from the platform's existing
+//     RBAC story.
+//  2. Translate api.SubmitBacktestInput ↔ backtest.Request so the
+//     api package can stay free of the backtest/ohlc/decision
+//     transitive imports.
+//  3. Pick the right DecisionEngine for the requested EngineKind:
+//     "fallback" (default) → decision.FallbackEngine (no LLM
+//     cost, deterministic); "llm" → decision.LLMDecisionEngine
+//     using the platform's shared LLM client; other / unknown →
+//     "fallback".
+//  4. Run the JobStore. There is exactly one shared JobStore per
+//     process — backtest jobs are operator-driven and short, so a
+//     single in-memory ledger is enough.
 //
 // Nil-safety: every method tolerates a nil ohlcFetcher (legacy
 // deployments without OHLC); SubmitBacktest returns a friendly
@@ -65,7 +65,7 @@ type backtestServiceAdapter struct {
 	// pendingCell carries the axis-name → value map for the
 	// current SweepSubmit child. Reset to nil between Submit
 	// calls so one-off backtests aren't tagged with stale cells.
-	pendingCell    map[string]string
+	pendingCell map[string]string
 
 	jobsMu      sync.Mutex
 	userIDByJob map[string]string
@@ -399,6 +399,58 @@ func (s *backtestServiceAdapter) ListBacktests(userID, fundID string) ([]*api.Ba
 		} else {
 			slog.Warn("backtest: list from db failed", "fund_id", fundID, "err", err)
 		}
+	}
+	return out, nil
+}
+
+// ListHistoricalBuySymbols implements api.BacktestService. It reads
+// the real execution ledger and returns the distinct tickers the
+// strategy actually bought, newest/most-used first. This lets the
+// factor/backtest UI replay "what the strategy has historically
+// purchased" without manually copying symbols from the trade log.
+func (s *backtestServiceAdapter) ListHistoricalBuySymbols(userID, fundID string, limit int) ([]api.BacktestHistoricalBuySymbol, error) {
+	if err := s.authorize(userID, fundID); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return []api.BacktestHistoricalBuySymbol{}, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(context.Background(), `
+		SELECT UPPER(TRIM(symbol)) AS symbol,
+		       COALESCE(NULLIF(TRIM(market), ''), 'us_equity') AS market,
+		       COUNT(*)::int AS buy_count,
+		       MIN(COALESCE(executed_at, created_at)) AS first_bought_at,
+		       MAX(COALESCE(executed_at, created_at)) AS last_bought_at,
+		       COALESCE(SUM(ABS(COALESCE(amount, filled_qty * COALESCE(filled_price, price), quantity * COALESCE(price, filled_price), 0))), 0)::float8 AS gross_buy_amount
+		  FROM trade_executions
+		 WHERE fund_id = $1
+		   AND LOWER(side) = 'buy'
+		   AND status IN ('filled', 'partial')
+		   AND COALESCE(filled_qty, quantity, 0) > 0
+		   AND TRIM(symbol) <> ''
+		 GROUP BY UPPER(TRIM(symbol)), COALESCE(NULLIF(TRIM(market), ''), 'us_equity')
+		 ORDER BY last_bought_at DESC, buy_count DESC, symbol ASC
+		 LIMIT $2`, fundID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("backtest: list historical buy symbols: %w", err)
+	}
+	defer rows.Close()
+	out := make([]api.BacktestHistoricalBuySymbol, 0, limit)
+	for rows.Next() {
+		var row api.BacktestHistoricalBuySymbol
+		if err := rows.Scan(&row.Symbol, &row.Market, &row.BuyCount, &row.FirstBoughtAt, &row.LastBoughtAt, &row.GrossBuyAmount); err != nil {
+			return nil, fmt.Errorf("backtest: scan historical buy symbol: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("backtest: iterate historical buy symbols: %w", err)
 	}
 	return out, nil
 }

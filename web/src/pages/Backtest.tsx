@@ -7,6 +7,7 @@ import {
   getBacktest,
   getSweep,
   getSweepAxisCatalog,
+  listHistoricalBuySymbols,
   listBacktests,
   listSweeps,
   proposePromotion,
@@ -227,6 +228,12 @@ function buildCopy(language: AppLanguage) {
       market: "Market",
       symbols: "Symbols (comma separated)",
       symbolsPlaceholder: "AAPL, MSFT, GOOG",
+      loadHistoricalBuys: "Use historical buys",
+      loadingHistoricalBuys: "Loading buys…",
+      historicalBuysHint: "Fill symbols with stocks this strategy actually bought, so realised PnL can be checked against backtest assumptions.",
+      historicalBuysEmpty: "No filled buy history for this fund yet.",
+      historicalBuysLoaded: "Loaded {n} historically bought symbols.",
+      historicalBuysError: "Failed to load historical buys",
       start: "Start",
       end: "End",
       initialCash: "Initial cash",
@@ -361,6 +368,12 @@ function buildCopy(language: AppLanguage) {
     market: "市场",
     symbols: "股票代码（逗号分隔）",
     symbolsPlaceholder: "AAPL, MSFT, GOOG",
+    loadHistoricalBuys: "使用历史买入股票",
+    loadingHistoricalBuys: "读取历史买入中…",
+    historicalBuysHint: "一键填入该策略真实买过的股票，便于把实际收益和回测收益对齐验证。",
+    historicalBuysEmpty: "该基金暂无已成交买入记录。",
+    historicalBuysLoaded: "已加载 {n} 个历史买入标的。",
+    historicalBuysError: "读取历史买入失败",
     start: "起始日期",
     end: "结束日期",
     initialCash: "初始资金",
@@ -546,6 +559,8 @@ const Backtest: React.FC = () => {
     market: "us_equity",
   });
   const [symbolsRaw, setSymbolsRaw] = useState("AAPL, MSFT");
+  const [historicalBuysLoading, setHistoricalBuysLoading] = useState(false);
+  const [historicalBuysMessage, setHistoricalBuysMessage] = useState<string | null>(null);
 
   // Poll cadence: every 1.5s while a job is queued/running. We
   // bail out of the polling loop as soon as every job is in a
@@ -670,6 +685,34 @@ const Backtest: React.FC = () => {
       refreshJobs();
     } catch (err) {
       setError(formatApiError(err, copy.submitError));
+    }
+  };
+
+  const loadHistoricalBuys = async () => {
+    if (!fundId) return;
+    setHistoricalBuysLoading(true);
+    setHistoricalBuysMessage(null);
+    setError(null);
+    try {
+      const res = await listHistoricalBuySymbols(fundId, 100);
+      const symbols = (res.symbols ?? [])
+        .map((row) => row.symbol.trim().toUpperCase())
+        .filter(Boolean);
+      const unique = Array.from(new Set(symbols));
+      if (unique.length === 0) {
+        setHistoricalBuysMessage(copy.historicalBuysEmpty);
+        return;
+      }
+      setSymbolsRaw(unique.join(", "));
+      const firstMarket = res.symbols.find((row) => row.market)?.market;
+      if (firstMarket) {
+        setForm((prev) => ({ ...prev, market: firstMarket }));
+      }
+      setHistoricalBuysMessage(copy.historicalBuysLoaded.replace("{n}", String(unique.length)));
+    } catch (err) {
+      setError(formatApiError(err, copy.historicalBuysError));
+    } finally {
+      setHistoricalBuysLoading(false);
     }
   };
 
@@ -919,13 +962,24 @@ const Backtest: React.FC = () => {
               </select>
             </label>
             <label className="block">
-              <span className="text-gray-700">{copy.symbols}</span>
+              <span className="flex items-center justify-between gap-2 text-gray-700">
+                <span>{copy.symbols}</span>
+                <button
+                  type="button"
+                  onClick={() => void loadHistoricalBuys()}
+                  disabled={historicalBuysLoading}
+                  className="rounded border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {historicalBuysLoading ? copy.loadingHistoricalBuys : copy.loadHistoricalBuys}
+                </button>
+              </span>
               <input
                 className="mt-1 w-full rounded border border-gray-300 px-2 py-1 text-sm"
                 placeholder={copy.symbolsPlaceholder}
                 value={symbolsRaw}
                 onChange={(e) => setSymbolsRaw(e.target.value)}
               />
+              <p className="mt-1 text-xs text-gray-400">{historicalBuysMessage ?? copy.historicalBuysHint}</p>
             </label>
             <div className="grid grid-cols-2 gap-3">
               <label className="block">
