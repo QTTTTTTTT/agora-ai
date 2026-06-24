@@ -380,10 +380,14 @@ func userScopedAdvisorLLM(svc *Services, userID, stepName string) agent.LLMClien
 	}
 	if stepName == "advisor_master" {
 		// Master reports include thesis, reasons, risks and persona-specific
-		// fields, but the prompt/schema now require compact output. Keep
-		// enough headroom for DeepSeek's prompt-only JSON mode without
-		// letting essay-length replies consume thousands of output tokens.
-		opts = append(opts, agent.WithLLMAdapterMaxTokens(2048))
+		// fields, but DeepSeek's prompt-only JSON mode can spend hidden
+		// reasoning tokens before emitting visible JSON. 2048 caused many
+		// empty/truncated replies in the daily_picks batch; 4096 preserves
+		// compact prompts while giving enough room to close the JSON object.
+		opts = append(opts,
+			agent.WithLLMAdapterMaxTokens(4096),
+			agent.WithLLMAdapterTemperature(0.2),
+		)
 	}
 	if userID != "" {
 		opts = append(opts, agent.WithLLMAdapterUser(userID))

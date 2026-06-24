@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +73,68 @@ func TestMasterAgentFallback(t *testing.T) {
 	}
 	if rep.Verdict != "HOLD" {
 		t.Errorf("Verdict = %q want HOLD (fallback)", rep.Verdict)
+	}
+}
+
+type retrySchemaLLM struct {
+	replies []string
+	errs    []error
+	calls   []string
+}
+
+func (f *retrySchemaLLM) Complete(ctx context.Context, sys, user string) (string, error) {
+	return f.CompleteWithSchema(ctx, sys, user, nil)
+}
+
+func (f *retrySchemaLLM) CompleteWithSchema(_ context.Context, _, user string, _ []byte) (string, error) {
+	f.calls = append(f.calls, user)
+	i := len(f.calls) - 1
+	if i < len(f.errs) && f.errs[i] != nil {
+		return "", f.errs[i]
+	}
+	if i < len(f.replies) {
+		return f.replies[i], nil
+	}
+	return "", errors.New("unexpected extra call")
+}
+
+func TestMasterAgentRetriesEmptyLLMReply(t *testing.T) {
+	ResetMasterPersonaCache()
+	personas, err := LoadMasterPersonas()
+	if err != nil {
+		t.Fatalf("LoadMasterPersonas: %v", err)
+	}
+	llm := &retrySchemaLLM{replies: []string{
+		"",
+		`{"verdict":"BUY","confidence":72,"thesis":"Durable business quality supports a constructive view despite incomplete data.","key_reasons":["Strong profitability is visible","Business scale is substantial","Technical trend is supportive"],"key_risks":["Valuation may be demanding","Some long-term fields are unavailable"],"red_lines_hit":[],"master_specific":{"quality_score":8}}`,
+	}}
+	agent, err := NewMasterAgent(personas["munger"], llm)
+	if err != nil {
+		t.Fatalf("NewMasterAgent: %v", err)
+	}
+	rep, err := agent.Analyze(context.Background(), MasterInput{Symbol: "SLB", AsOf: testClock})
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(llm.calls) != 2 {
+		t.Fatalf("expected one retry after empty reply, got %d calls", len(llm.calls))
+	}
+	if !strings.Contains(llm.calls[1], "RETRY_INSTRUCTION") {
+		t.Fatalf("retry call should alter prompt to avoid cached bad response")
+	}
+	if rep.LLMModel != "llm" || rep.Verdict != "BUY" {
+		t.Fatalf("expected successful LLM report after retry, got model=%q verdict=%q risks=%v", rep.LLMModel, rep.Verdict, rep.KeyRisks)
+	}
+}
+
+func TestParseMasterLLMToleratesStringConfidence(t *testing.T) {
+	raw := `{"verdict":"AVOID","confidence":"76","thesis":"High leverage and valuation fail the persona screen.","key_reasons":["Debt is above limit","Valuation is not cheap","History is incomplete"],"key_risks":["Leverage raises downside risk","Missing data limits conviction"],"red_lines_hit":[],"master_specific":{"passes_defensive_criteria":"2/10"}}`
+	parsed, err := parseMasterLLM(raw)
+	if err != nil {
+		t.Fatalf("parseMasterLLM: %v", err)
+	}
+	if parsed.Confidence != 76 {
+		t.Fatalf("Confidence = %d want 76", parsed.Confidence)
 	}
 }
 

@@ -47,8 +47,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -305,14 +307,7 @@ func (a *MasterAgent) Analyze(ctx context.Context, in MasterInput) (MasterReport
 	sys := a.buildSystemPrompt()
 	user := a.buildUserPrompt(in)
 
-	raw, err := a.complete(ctx, sys, user)
-	if err != nil {
-		a.logger.Warn("master agent: LLM failed, returning fallback",
-			"master", a.persona.Key, "symbol", in.Symbol, "err", err)
-		rep.KeyRisks = append(rep.KeyRisks, fmt.Sprintf("llm_error:%v", err))
-		return rep, nil
-	}
-	parsed, perr := parseMasterLLM(raw)
+	raw, parsed, perr := a.completeAndParseWithRetry(ctx, sys, user, in.Symbol)
 	if perr != nil {
 		// Include a sample of the raw reply (capped to 400 chars to
 		// avoid log explosion on a chatty model). The most common cause
@@ -414,6 +409,59 @@ func (a *MasterAgent) Analyze(ctx context.Context, in MasterInput) (MasterReport
 		}, nil
 	}
 	return rep, nil
+}
+
+func (a *MasterAgent) completeAndParseWithRetry(ctx context.Context, sys, user, symbol string) (string, llmMasterReport, error) {
+	const maxAttempts = 2
+	var lastRaw string
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		prompt := user
+		if attempt > 1 {
+			// Change the prompt text so the LLM cache does not replay the
+			// previous empty/truncated response. This is intentionally short:
+			// daily_picks can fan out hundreds of master calls, and retries
+			// must preserve prefix-cache friendliness while forcing a complete
+			// visible JSON answer.
+			prompt += "\n\nRETRY_INSTRUCTION: Your previous reply was empty or malformed. Return exactly one complete compact JSON object now. No markdown, no prose, close every brace."
+		}
+
+		raw, err := a.complete(ctx, sys, prompt)
+		lastRaw = raw
+		if err != nil {
+			lastErr = fmt.Errorf("llm_error:%w", err)
+			if attempt < maxAttempts {
+				a.logger.Warn("master agent: LLM failed, retrying",
+					"master", a.persona.Key, "symbol", symbol, "attempt", attempt, "err", err)
+				continue
+			}
+			return lastRaw, llmMasterReport{}, lastErr
+		}
+
+		parsed, perr := parseMasterLLM(raw)
+		if perr == nil {
+			return raw, parsed, nil
+		}
+		lastErr = perr
+		if attempt < maxAttempts && isRetryableMasterParseError(perr) {
+			a.logger.Warn("master agent: parse failed, retrying",
+				"master", a.persona.Key, "symbol", symbol, "attempt", attempt, "err", perr, "raw_len", len(strings.TrimSpace(raw)))
+			continue
+		}
+		return lastRaw, llmMasterReport{}, lastErr
+	}
+	return lastRaw, llmMasterReport{}, lastErr
+}
+
+func isRetryableMasterParseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "empty llm reply") ||
+		strings.Contains(msg, "no json object found") ||
+		strings.Contains(msg, "unexpected end of JSON") ||
+		strings.Contains(msg, "unexpected EOF")
 }
 
 // complete dispatches to the schema-aware LLM call when the
@@ -848,11 +896,59 @@ func parseMasterLLM(raw string) (llmMasterReport, error) {
 		return llmMasterReport{}, errors.New("no json object found")
 	}
 	body = body[start : end+1]
-	var out llmMasterReport
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
+	var wire struct {
+		Verdict        string          `json:"verdict"`
+		Confidence     json.RawMessage `json:"confidence"`
+		Thesis         string          `json:"thesis"`
+		KeyReasons     []string        `json:"key_reasons"`
+		KeyRisks       []string        `json:"key_risks"`
+		RedLinesHit    []string        `json:"red_lines_hit"`
+		MasterSpecific map[string]any  `json:"master_specific"`
+	}
+	if err := json.Unmarshal([]byte(body), &wire); err != nil {
 		return llmMasterReport{}, err
 	}
+	confidence, err := parseMasterConfidence(wire.Confidence)
+	if err != nil {
+		return llmMasterReport{}, err
+	}
+	out := llmMasterReport{
+		Verdict:        wire.Verdict,
+		Confidence:     confidence,
+		Thesis:         wire.Thesis,
+		KeyReasons:     wire.KeyReasons,
+		KeyRisks:       wire.KeyRisks,
+		RedLinesHit:    wire.RedLinesHit,
+		MasterSpecific: wire.MasterSpecific,
+	}
 	return out, nil
+}
+
+func parseMasterConfidence(raw json.RawMessage) (int, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, errors.New("confidence missing")
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n, nil
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return int(math.Round(f)), nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return 0, fmt.Errorf("confidence invalid: %w", err)
+	}
+	s = strings.TrimSpace(strings.TrimSuffix(s, "%"))
+	if s == "" {
+		return 0, errors.New("confidence empty string")
+	}
+	parsed, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("confidence invalid string: %w", err)
+	}
+	return int(math.Round(parsed)), nil
 }
 
 // normaliseMasterVerdict maps free-text verdicts onto our enum.
