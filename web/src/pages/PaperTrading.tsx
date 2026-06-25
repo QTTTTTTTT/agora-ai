@@ -20,6 +20,7 @@ import {
   listPaperPortfolios,
   proposePaperOrder,
   type MasterBacktestResultView,
+  type MasterOperationView,
   type PaperNavPointView,
   type PaperOrderView,
   type PaperPortfolioInput,
@@ -105,6 +106,18 @@ const COPY = {
     masterMetricMaxDD: "最大回撤",
     masterBenchmarkLabel: "{symbol} 累计收益",
     masterUniverseTitle: "因子映射股票池",
+    masterOpsTitle: "2016-2026 操作股票流水",
+    masterOpsSubtitle: "展示月度等权再平衡产生的模拟买入/卖出明细，可核对每一年策略实际操作了哪些股票。",
+    masterOpsEmpty: "暂无操作流水",
+    masterOpsDate: "日期",
+    masterOpsMaster: "大师",
+    masterOpsSymbol: "股票",
+    masterOpsAction: "动作",
+    masterOpsWeight: "目标权重",
+    masterOpsShares: "股数变化",
+    masterOpsPrice: "价格",
+    masterOpsNotional: "金额",
+    masterOpsShowing: "共 {total} 条操作记录",
     masterRangeLabel: "回测区间",
     masterEmpty: "暂无回测数据",
     masterError: "回测加载失败",
@@ -161,6 +174,18 @@ const COPY = {
     masterMetricMaxDD: "Max drawdown",
     masterBenchmarkLabel: "{symbol} cum. return",
     masterUniverseTitle: "Factor anchors",
+    masterOpsTitle: "2016-2026 stock operation ledger",
+    masterOpsSubtitle: "Simulated monthly equal-weight rebalance orders showing which tickers the strategy operated each year.",
+    masterOpsEmpty: "No operation records",
+    masterOpsDate: "Date",
+    masterOpsMaster: "Master",
+    masterOpsSymbol: "Ticker",
+    masterOpsAction: "Action",
+    masterOpsWeight: "Target wt",
+    masterOpsShares: "Shares Δ",
+    masterOpsPrice: "Price",
+    masterOpsNotional: "Notional",
+    masterOpsShowing: "{total} operation records",
     masterRangeLabel: "Window",
     masterEmpty: "No backtest data",
     masterError: "Backtest load failed",
@@ -781,7 +806,7 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    getMasterTeamBacktest({ start: "2015-01-01", benchmarks: ["SPY", "QQQ"] })
+    getMasterTeamBacktest({ start: "2016-01-01", end: "2026-06-25", benchmarks: ["SPY", "QQQ"] })
       .then((res) => {
         if (!cancelled) {
           setData(res);
@@ -954,9 +979,87 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
               ))}
             </ul>
           </div>
+
+          <MasterOperationsTable
+            copy={copy}
+            operations={data.operations ?? []}
+            language={language}
+          />
         </>
       )}
     </section>
+  );
+};
+
+const MasterOperationsTable: React.FC<{
+  copy: Copy;
+  operations: MasterOperationView[];
+  language: AppLanguage;
+}> = ({ copy, operations, language }) => {
+  const rows = useMemo(() => {
+    return [...operations]
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  }, [operations]);
+  const fmtNum = (v: number, digits = 2) =>
+    formatNumberForLanguage(v, language, { maximumFractionDigits: digits });
+  const fmtPct = (v: number) =>
+    `${formatNumberForLanguage(v * 100, language, { maximumFractionDigits: 1 })}%`;
+
+  return (
+    <div className="mt-5 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+            {copy.masterOpsTitle}
+          </h3>
+          <p className="mt-1 max-w-3xl text-[11px] text-slate-500">{copy.masterOpsSubtitle}</p>
+        </div>
+        {operations.length > 0 && (
+          <span className="text-[11px] text-slate-500">
+            {copy.masterOpsShowing
+              .replace("{total}", String(operations.length))}
+          </span>
+        )}
+      </div>
+      {rows.length === 0 ? (
+        <div className="py-4 text-center text-xs text-slate-400">{copy.masterOpsEmpty}</div>
+      ) : (
+        <div className="mt-3 max-h-96 overflow-auto rounded-md border border-slate-200 bg-white">
+          <table className="min-w-full text-xs">
+            <thead className="sticky top-0 bg-slate-100 text-[10px] uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="px-2 py-2 text-left">{copy.masterOpsDate}</th>
+                <th className="px-2 py-2 text-left">{copy.masterOpsMaster}</th>
+                <th className="px-2 py-2 text-left">{copy.masterOpsSymbol}</th>
+                <th className="px-2 py-2 text-left">{copy.masterOpsAction}</th>
+                <th className="px-2 py-2 text-right">{copy.masterOpsWeight}</th>
+                <th className="px-2 py-2 text-right">{copy.masterOpsShares}</th>
+                <th className="px-2 py-2 text-right">{copy.masterOpsPrice}</th>
+                <th className="px-2 py-2 text-right">{copy.masterOpsNotional}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((op, idx) => (
+                <tr key={`${op.date}-${op.symbol}-${idx}`} className="hover:bg-slate-50">
+                  <td className="px-2 py-1.5 font-mono text-[11px] text-slate-600">{op.date.slice(0, 10)}</td>
+                  <td className="px-2 py-1.5 capitalize text-slate-700" title={op.style}>{op.master || "—"}</td>
+                  <td className="px-2 py-1.5 font-mono font-semibold text-slate-900">{op.symbol}</td>
+                  <td className="px-2 py-1.5">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${op.action === "SELL" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`}>
+                      {op.action}
+                    </span>
+                  </td>
+                  <td className="px-2 py-1.5 text-right font-mono text-slate-700">{fmtPct(op.targetWeight)}</td>
+                  <td className="px-2 py-1.5 text-right font-mono text-slate-700">{fmtNum(op.sharesChange, 4)}</td>
+                  <td className="px-2 py-1.5 text-right font-mono text-slate-700">${fmtNum(op.price)}</td>
+                  <td className="px-2 py-1.5 text-right font-mono text-slate-700">${fmtNum(op.notional, 0)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 };
 

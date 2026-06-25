@@ -1384,6 +1384,19 @@ export interface MasterCurvePointView {
   pct: number;
 }
 
+export interface MasterOperationView {
+  date: string;
+  master: string;
+  symbol: string;
+  style: string;
+  action: "BUY" | "SELL" | string;
+  price: number;
+  sharesChange: number;
+  sharesAfter: number;
+  targetWeight: number;
+  notional: number;
+}
+
 export interface MasterBenchmarkCurveView {
   symbol: string;
   curve: MasterCurvePointView[];
@@ -1406,6 +1419,7 @@ export interface MasterBacktestResultView {
   initialCapital: number;
   finalNav: number;
   universe: MasterAnchorView[];
+  operations: MasterOperationView[];
   navCurve: MasterCurvePointView[];
   benchmarks: MasterBenchmarkCurveView[];
   metrics: MasterBacktestMetricsView;
