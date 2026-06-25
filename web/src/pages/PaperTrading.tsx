@@ -117,6 +117,8 @@ const COPY = {
     masterOpsShares: "股数变化",
     masterOpsPrice: "价格",
     masterOpsNotional: "金额",
+    masterOpsCurrentValue: "当前账户总价值",
+    masterOpsAsOf: "截至 {date}",
     masterOpsShowing: "共 {total} 条操作记录",
     masterRangeLabel: "回测区间",
     masterEmpty: "暂无回测数据",
@@ -185,6 +187,8 @@ const COPY = {
     masterOpsShares: "Shares Δ",
     masterOpsPrice: "Price",
     masterOpsNotional: "Notional",
+    masterOpsCurrentValue: "Current account value",
+    masterOpsAsOf: "As of {date}",
     masterOpsShowing: "{total} operation records",
     masterRangeLabel: "Window",
     masterEmpty: "No backtest data",
@@ -983,6 +987,8 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
           <MasterOperationsTable
             copy={copy}
             operations={data.operations ?? []}
+            currentValue={data.finalNav}
+            asOf={data.end}
             language={language}
           />
         </>
@@ -994,8 +1000,10 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
 const MasterOperationsTable: React.FC<{
   copy: Copy;
   operations: MasterOperationView[];
+  currentValue: number;
+  asOf: string;
   language: AppLanguage;
-}> = ({ copy, operations, language }) => {
+}> = ({ copy, operations, currentValue, asOf, language }) => {
   const rows = useMemo(() => {
     return [...operations]
       .sort((a, b) => String(b.date).localeCompare(String(a.date)));
@@ -1014,12 +1022,20 @@ const MasterOperationsTable: React.FC<{
           </h3>
           <p className="mt-1 max-w-3xl text-[11px] text-slate-500">{copy.masterOpsSubtitle}</p>
         </div>
-        {operations.length > 0 && (
-          <span className="text-[11px] text-slate-500">
-            {copy.masterOpsShowing
-              .replace("{total}", String(operations.length))}
-          </span>
-        )}
+        <div className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-right shadow-sm">
+          <div className="text-[10px] uppercase tracking-wide text-emerald-700">{copy.masterOpsCurrentValue}</div>
+          <div className="mt-0.5 font-mono text-base font-semibold text-emerald-700">
+            ${fmtNum(currentValue, 0)}
+          </div>
+          <div className="mt-0.5 text-[10px] text-slate-500">
+            {copy.masterOpsAsOf.replace("{date}", asOf.slice(0, 10))}
+          </div>
+          {operations.length > 0 && (
+            <div className="mt-1 text-[10px] text-slate-400">
+              {copy.masterOpsShowing.replace("{total}", String(operations.length))}
+            </div>
+          )}
+        </div>
       </div>
       {rows.length === 0 ? (
         <div className="py-4 text-center text-xs text-slate-400">{copy.masterOpsEmpty}</div>
