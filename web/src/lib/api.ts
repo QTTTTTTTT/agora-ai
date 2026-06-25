@@ -1395,6 +1395,8 @@ export interface MasterOperationView {
   sharesAfter: number;
   targetWeight: number;
   notional: number;
+  accountValue: number;
+  cumulativeReturn: number;
 }
 
 export interface MasterBenchmarkCurveView {

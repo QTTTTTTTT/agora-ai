@@ -117,8 +117,11 @@ const COPY = {
     masterOpsShares: "股数变化",
     masterOpsPrice: "价格",
     masterOpsNotional: "金额",
-    masterOpsCurrentValue: "当前账户总价值",
+    masterOpsAccountValue: "调仓后账户价值",
+    masterOpsReturn: "累计收益",
+    masterOpsCurrentValue: "价值累积路径",
     masterOpsAsOf: "截至 {date}",
+    masterOpsValuePath: "{initial} → {current}",
     masterOpsShowing: "共 {total} 条操作记录",
     masterRangeLabel: "回测区间",
     masterEmpty: "暂无回测数据",
@@ -187,8 +190,11 @@ const COPY = {
     masterOpsShares: "Shares Δ",
     masterOpsPrice: "Price",
     masterOpsNotional: "Notional",
-    masterOpsCurrentValue: "Current account value",
+    masterOpsAccountValue: "Account value after rebalance",
+    masterOpsReturn: "Cum. return",
+    masterOpsCurrentValue: "Value path",
     masterOpsAsOf: "As of {date}",
+    masterOpsValuePath: "{initial} → {current}",
     masterOpsShowing: "{total} operation records",
     masterRangeLabel: "Window",
     masterEmpty: "No backtest data",
@@ -987,6 +993,7 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
           <MasterOperationsTable
             copy={copy}
             operations={data.operations ?? []}
+            initialValue={data.initialCapital}
             currentValue={data.finalNav}
             asOf={data.end}
             language={language}
@@ -1000,13 +1007,14 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
 const MasterOperationsTable: React.FC<{
   copy: Copy;
   operations: MasterOperationView[];
+  initialValue: number;
   currentValue: number;
   asOf: string;
   language: AppLanguage;
-}> = ({ copy, operations, currentValue, asOf, language }) => {
+}> = ({ copy, operations, initialValue, currentValue, asOf, language }) => {
   const rows = useMemo(() => {
     return [...operations]
-      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
   }, [operations]);
   const fmtNum = (v: number, digits = 2) =>
     formatNumberForLanguage(v, language, { maximumFractionDigits: digits });
@@ -1025,7 +1033,9 @@ const MasterOperationsTable: React.FC<{
         <div className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-right shadow-sm">
           <div className="text-[10px] uppercase tracking-wide text-emerald-700">{copy.masterOpsCurrentValue}</div>
           <div className="mt-0.5 font-mono text-base font-semibold text-emerald-700">
-            ${fmtNum(currentValue, 0)}
+            {copy.masterOpsValuePath
+              .replace("{initial}", `$${fmtNum(initialValue, 0)}`)
+              .replace("{current}", `$${fmtNum(currentValue, 0)}`)}
           </div>
           <div className="mt-0.5 text-[10px] text-slate-500">
             {copy.masterOpsAsOf.replace("{date}", asOf.slice(0, 10))}
@@ -1052,6 +1062,8 @@ const MasterOperationsTable: React.FC<{
                 <th className="px-2 py-2 text-right">{copy.masterOpsShares}</th>
                 <th className="px-2 py-2 text-right">{copy.masterOpsPrice}</th>
                 <th className="px-2 py-2 text-right">{copy.masterOpsNotional}</th>
+                <th className="px-2 py-2 text-right">{copy.masterOpsAccountValue}</th>
+                <th className="px-2 py-2 text-right">{copy.masterOpsReturn}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -1069,6 +1081,8 @@ const MasterOperationsTable: React.FC<{
                   <td className="px-2 py-1.5 text-right font-mono text-slate-700">{fmtNum(op.sharesChange, 4)}</td>
                   <td className="px-2 py-1.5 text-right font-mono text-slate-700">${fmtNum(op.price)}</td>
                   <td className="px-2 py-1.5 text-right font-mono text-slate-700">${fmtNum(op.notional, 0)}</td>
+                  <td className="px-2 py-1.5 text-right font-mono font-semibold text-emerald-700">${fmtNum(op.accountValue, 0)}</td>
+                  <td className={`px-2 py-1.5 text-right font-mono ${op.cumulativeReturn >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{fmtPct(op.cumulativeReturn)}</td>
                 </tr>
               ))}
             </tbody>

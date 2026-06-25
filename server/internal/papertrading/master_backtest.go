@@ -105,16 +105,18 @@ type MasterCurvePoint struct {
 // track record is auditable at the ticker-operation level, not just
 // as a NAV line.
 type MasterOperation struct {
-	Date         time.Time `json:"date"`
-	Master       string    `json:"master"`
-	Symbol       string    `json:"symbol"`
-	Style        string    `json:"style"`
-	Action       string    `json:"action"`
-	Price        float64   `json:"price"`
-	SharesChange float64   `json:"sharesChange"`
-	SharesAfter  float64   `json:"sharesAfter"`
-	TargetWeight float64   `json:"targetWeight"`
-	Notional     float64   `json:"notional"`
+	Date             time.Time `json:"date"`
+	Master           string    `json:"master"`
+	Symbol           string    `json:"symbol"`
+	Style            string    `json:"style"`
+	Action           string    `json:"action"`
+	Price            float64   `json:"price"`
+	SharesChange     float64   `json:"sharesChange"`
+	SharesAfter      float64   `json:"sharesAfter"`
+	TargetWeight     float64   `json:"targetWeight"`
+	Notional         float64   `json:"notional"`
+	AccountValue     float64   `json:"accountValue"`
+	CumulativeReturn float64   `json:"cumulativeReturn"`
 }
 
 // MasterBenchmarkCurve aligns one index's NAV curve to the
@@ -495,16 +497,18 @@ func simulateEqualWeightMonthly(initialCapital float64, universe []string, days 
 				tw = targetWeight
 			}
 			operations = append(operations, MasterOperation{
-				Date:         day,
-				Master:       anchor.Master,
-				Symbol:       sym,
-				Style:        anchor.Style,
-				Action:       action,
-				Price:        px,
-				SharesChange: delta,
-				SharesAfter:  shares[sym],
-				TargetWeight: tw,
-				Notional:     notional,
+				Date:             day,
+				Master:           anchor.Master,
+				Symbol:           sym,
+				Style:            anchor.Style,
+				Action:           action,
+				Price:            px,
+				SharesChange:     delta,
+				SharesAfter:      shares[sym],
+				TargetWeight:     tw,
+				Notional:         notional,
+				AccountValue:     nav,
+				CumulativeReturn: nav/initialCapital - 1.0,
 			})
 		}
 	}
