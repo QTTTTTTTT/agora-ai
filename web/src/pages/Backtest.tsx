@@ -14,6 +14,7 @@ import {
   submitBacktest,
   submitSweep,
   type BacktestComparison,
+  type BacktestHistoricalBuySymbol,
   type BacktestJob,
   type BacktestNavPoint,
   type BacktestSubmitInput,
@@ -62,6 +63,26 @@ function statusTone(status?: string): string {
     default:
       return "border-gray-200 bg-gray-50 text-gray-600";
   }
+}
+
+function normalizeSymbol(raw?: string): string {
+  return (raw ?? "").trim().toUpperCase();
+}
+
+function uniqueNormalizedSymbols(symbols: string[] | undefined): string[] {
+  return Array.from(new Set((symbols ?? []).map(normalizeSymbol).filter(Boolean)));
+}
+
+function historicalMatchSummary(symbols: string[] | undefined, historicalSymbols: Set<string>): { matched: number; total: number } {
+  const unique = uniqueNormalizedSymbols(symbols);
+  return {
+    matched: unique.filter((symbol) => historicalSymbols.has(symbol)).length,
+    total: unique.length,
+  };
+}
+
+function historicalRowsToSymbols(rows: BacktestHistoricalBuySymbol[]): string[] {
+  return uniqueNormalizedSymbols(rows.map((row) => row.symbol));
 }
 
 // Tiny inline SVG NAV chart. We deliberately avoid pulling a
@@ -164,7 +185,11 @@ const NavChart: React.FC<{ curve: BacktestNavPoint[]; foldBoundaries?: number[] 
   );
 };
 
-const TradeTable: React.FC<{ trades: BacktestTradeEvent[]; copy: ReturnType<typeof buildCopy> }> = ({ trades, copy }) => {
+const TradeTable: React.FC<{
+  trades: BacktestTradeEvent[];
+  copy: ReturnType<typeof buildCopy>;
+  historicalSymbols?: Set<string>;
+}> = ({ trades, copy, historicalSymbols }) => {
   // Show filled trades first (sorted by date desc), then a
   // collapsed "skipped/capped" group so the table doesn't
   // drown the operator in noise.
@@ -189,22 +214,34 @@ const TradeTable: React.FC<{ trades: BacktestTradeEvent[]; copy: ReturnType<type
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {filled.slice(0, 200).map((t, i) => (
-            <tr key={`${t.date}-${i}-${t.symbol}`} className="hover:bg-gray-50">
-              <td className="px-3 py-2 text-gray-700">{t.date.slice(0, 10)}</td>
-              <td className="px-3 py-2 font-medium text-gray-900">{t.symbol}</td>
-              <td className="px-3 py-2 text-gray-700">{t.action}</td>
-              <td className="px-3 py-2">
-                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                  {t.status}
-                </span>
-              </td>
-              <td className="px-3 py-2 text-right text-gray-700">{t.quantity ?? "—"}</td>
-              <td className="px-3 py-2 text-right text-gray-700">{t.fillPrice?.toFixed(2) ?? "—"}</td>
-              <td className="px-3 py-2 text-right text-gray-700">{t.notional?.toFixed(0) ?? "—"}</td>
-              <td className="px-3 py-2 text-xs text-gray-500">{(t.reason ?? "").slice(0, 80)}</td>
-            </tr>
-          ))}
+          {filled.slice(0, 200).map((t, i) => {
+            const isHistorical = historicalSymbols?.has(normalizeSymbol(t.symbol)) ?? false;
+            return (
+              <tr key={`${t.date}-${i}-${t.symbol}`} className="hover:bg-gray-50">
+                <td className="px-3 py-2 text-gray-700">{t.date.slice(0, 10)}</td>
+                <td className="px-3 py-2 font-medium text-gray-900">
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span>{t.symbol}</span>
+                    {isHistorical && (
+                      <span className="rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                        {copy.historicalBuyBadge}
+                      </span>
+                    )}
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-gray-700">{t.action}</td>
+                <td className="px-3 py-2">
+                  <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                    {t.status}
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-right text-gray-700">{t.quantity ?? "—"}</td>
+                <td className="px-3 py-2 text-right text-gray-700">{t.fillPrice?.toFixed(2) ?? "—"}</td>
+                <td className="px-3 py-2 text-right text-gray-700">{t.notional?.toFixed(0) ?? "—"}</td>
+                <td className="px-3 py-2 text-xs text-gray-500">{(t.reason ?? "").slice(0, 80)}</td>
+              </tr>
+            );
+          })}
           {other.length > 0 && (
             <tr>
               <td colSpan={8} className="px-3 py-2 text-xs text-gray-500">
@@ -229,11 +266,16 @@ function buildCopy(language: AppLanguage) {
       symbols: "Symbols (comma separated)",
       symbolsPlaceholder: "AAPL, MSFT, GOOG",
       loadHistoricalBuys: "Use historical buys",
+      runHistoricalBuys: "Use historical buys & run",
       loadingHistoricalBuys: "Loading buys…",
       historicalBuysHint: "Fill symbols with stocks this strategy actually bought, so realised PnL can be checked against backtest assumptions.",
       historicalBuysEmpty: "No filled buy history for this fund yet.",
       historicalBuysLoaded: "Loaded {n} historically bought symbols.",
       historicalBuysError: "Failed to load historical buys",
+      historicalBuysRunName: "Historical buys replay",
+      historicalBuyBadge: "Historical buy",
+      historicalUniverse: "Backtest universe",
+      historicalUniverseMatched: "{matched}/{total} symbols are historically bought by this strategy.",
       start: "Start",
       end: "End",
       initialCash: "Initial cash",
@@ -369,11 +411,16 @@ function buildCopy(language: AppLanguage) {
     symbols: "股票代码（逗号分隔）",
     symbolsPlaceholder: "AAPL, MSFT, GOOG",
     loadHistoricalBuys: "使用历史买入股票",
+    runHistoricalBuys: "使用历史买入并回测",
     loadingHistoricalBuys: "读取历史买入中…",
     historicalBuysHint: "一键填入该策略真实买过的股票，便于把实际收益和回测收益对齐验证。",
     historicalBuysEmpty: "该基金暂无已成交买入记录。",
     historicalBuysLoaded: "已加载 {n} 个历史买入标的。",
     historicalBuysError: "读取历史买入失败",
+    historicalBuysRunName: "历史买入股票复盘",
+    historicalBuyBadge: "历史买入",
+    historicalUniverse: "回测股票池",
+    historicalUniverseMatched: "{matched}/{total} 个标的是该策略历史买入股票。",
     start: "起始日期",
     end: "结束日期",
     initialCash: "初始资金",
@@ -561,6 +608,9 @@ const Backtest: React.FC = () => {
   const [symbolsRaw, setSymbolsRaw] = useState("AAPL, MSFT");
   const [historicalBuysLoading, setHistoricalBuysLoading] = useState(false);
   const [historicalBuysMessage, setHistoricalBuysMessage] = useState<string | null>(null);
+  const [historicalBuyRows, setHistoricalBuyRows] = useState<BacktestHistoricalBuySymbol[]>([]);
+
+  const historicalBuySymbols = useMemo(() => new Set(historicalRowsToSymbols(historicalBuyRows)), [historicalBuyRows]);
 
   // Poll cadence: every 1.5s while a job is queued/running. We
   // bail out of the polling loop as soon as every job is in a
@@ -587,6 +637,26 @@ const Backtest: React.FC = () => {
   useEffect(() => {
     refreshJobs();
   }, [refreshJobs]);
+
+  useEffect(() => {
+    if (!fundId) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await listHistoricalBuySymbols(fundId, 100);
+        if (!cancelled) {
+          setHistoricalBuyRows(res.symbols ?? []);
+        }
+      } catch {
+        // Best-effort: this powers badges only, so don't block the
+        // page if the historical ledger endpoint is unavailable.
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [fundId]);
 
   // Poll while any job is non-terminal.
   useEffect(() => {
@@ -635,12 +705,8 @@ const Backtest: React.FC = () => {
     };
   }, [fundId, selectedId, jobs]);
 
-  const submit = async () => {
+  const submitSymbols = async (symbols: string[], overrides: Partial<BacktestSubmitInput> = {}) => {
     if (!fundId) return;
-    const symbols = symbolsRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
     if (symbols.length === 0) {
       setError(copy.requireSymbols);
       return;
@@ -660,7 +726,7 @@ const Backtest: React.FC = () => {
     setError(null);
     setSubmitting(true);
     try {
-      const body: BacktestSubmitInput = { ...form, symbols };
+      const body: BacktestSubmitInput = { ...form, ...overrides, symbols };
       if (wfMode) {
         body.walkForward = {
           numFolds: wfFolds,
@@ -678,6 +744,14 @@ const Backtest: React.FC = () => {
     }
   };
 
+  const submit = async () => {
+    const symbols = symbolsRaw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await submitSymbols(symbols);
+  };
+
   const cancel = async (jobId: string) => {
     if (!fundId) return;
     try {
@@ -688,20 +762,19 @@ const Backtest: React.FC = () => {
     }
   };
 
-  const loadHistoricalBuys = async () => {
-    if (!fundId) return;
+  const loadHistoricalBuys = async (): Promise<string[]> => {
+    if (!fundId) return [];
     setHistoricalBuysLoading(true);
     setHistoricalBuysMessage(null);
     setError(null);
     try {
       const res = await listHistoricalBuySymbols(fundId, 100);
-      const symbols = (res.symbols ?? [])
-        .map((row) => row.symbol.trim().toUpperCase())
-        .filter(Boolean);
-      const unique = Array.from(new Set(symbols));
+      const rows = res.symbols ?? [];
+      setHistoricalBuyRows(rows);
+      const unique = historicalRowsToSymbols(rows);
       if (unique.length === 0) {
         setHistoricalBuysMessage(copy.historicalBuysEmpty);
-        return;
+        return [];
       }
       setSymbolsRaw(unique.join(", "));
       const firstMarket = res.symbols.find((row) => row.market)?.market;
@@ -709,11 +782,22 @@ const Backtest: React.FC = () => {
         setForm((prev) => ({ ...prev, market: firstMarket }));
       }
       setHistoricalBuysMessage(copy.historicalBuysLoaded.replace("{n}", String(unique.length)));
+      return unique;
     } catch (err) {
       setError(formatApiError(err, copy.historicalBuysError));
+      return [];
     } finally {
       setHistoricalBuysLoading(false);
     }
+  };
+
+  const runHistoricalBuys = async () => {
+    const symbols = await loadHistoricalBuys();
+    if (symbols.length === 0) return;
+    await submitSymbols(symbols, {
+      name: form.name?.trim() || copy.historicalBuysRunName,
+      engineKind: "fallback",
+    });
   };
 
   // toggleCompareSelection adds jobId to the compare pair, or
@@ -1238,6 +1322,16 @@ const Backtest: React.FC = () => {
                 ? copy.sweepSubmit
                 : copy.runIt}
             </button>
+            {!sweepMode && (
+              <button
+                type="button"
+                className="w-full rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={submitting || historicalBuysLoading}
+                onClick={() => void runHistoricalBuys()}
+              >
+                {historicalBuysLoading || submitting ? copy.runningLabel : copy.runHistoricalBuys}
+              </button>
+            )}
           </div>
         </aside>
 
@@ -1290,6 +1384,7 @@ const Backtest: React.FC = () => {
                   // the checkbox for queued/running/failed runs;
                   // the row stays clickable for inspection.
                   const compareDisabled = j.status !== "completed";
+                  const historicalSummary = historicalMatchSummary(j.request?.symbols, historicalBuySymbols);
                   return (
                     <li
                       key={j.id}
@@ -1321,6 +1416,11 @@ const Backtest: React.FC = () => {
                             {j.status}
                           </span>
                           <span className="text-xs text-gray-500">{j.engineKind}</span>
+                          {historicalSummary.matched > 0 && (
+                            <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                              {copy.historicalBuyBadge} {historicalSummary.matched}/{historicalSummary.total}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-xs text-gray-500">
                           <span>{formatDateTimeForLanguage(j.submittedAt, language)}</span>
@@ -1455,6 +1555,41 @@ const Backtest: React.FC = () => {
                 <p className="text-sm text-red-700">{selected.error}</p>
               ) : selected.result ? (
                 <div className="space-y-4">
+                  {selected.request?.symbols && selected.request.symbols.length > 0 && (
+                    <div className="rounded-lg border border-amber-100 bg-amber-50/60 p-3">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-amber-900">{copy.historicalUniverse}</h3>
+                        {(() => {
+                          const summary = historicalMatchSummary(selected.request?.symbols, historicalBuySymbols);
+                          return (
+                            <span className="text-xs text-amber-700">
+                              {copy.historicalUniverseMatched
+                                .replace("{matched}", String(summary.matched))
+                                .replace("{total}", String(summary.total))}
+                            </span>
+                          );
+                        })()}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {uniqueNormalizedSymbols(selected.request.symbols).map((symbol) => {
+                          const isHistorical = historicalBuySymbols.has(symbol);
+                          return (
+                            <span
+                              key={symbol}
+                              className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
+                                isHistorical
+                                  ? "border-amber-300 bg-white text-amber-800"
+                                  : "border-gray-200 bg-white text-gray-600"
+                              }`}
+                            >
+                              {symbol}
+                              {isHistorical ? ` · ${copy.historicalBuyBadge}` : ""}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                   <BacktestPerformancePanel
                     benchmarkSymbol={selected.result.benchmarkSymbol}
                     benchmarkCurve={selected.result.benchmarkCurve}
@@ -1482,7 +1617,7 @@ const Backtest: React.FC = () => {
                   )}
                   <div>
                     <h3 className="mb-2 text-sm font-semibold text-gray-700">{copy.tradeLog}</h3>
-                    <TradeTable trades={selected.result.trades} copy={copy} />
+                    <TradeTable trades={selected.result.trades} copy={copy} historicalSymbols={historicalBuySymbols} />
                   </div>
                 </div>
               ) : null}
