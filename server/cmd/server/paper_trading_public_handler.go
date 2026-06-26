@@ -167,9 +167,11 @@ const publicTrackTimeout = 5 * time.Second
 
 // masterBacktestTimeout is wider than publicTrackTimeout because
 // a cold-cache run pulls ~12 daily OHLC histories from upstream
-// providers (Yahoo). The runner caches results for 6h so warm
-// hits return in milliseconds.
-const masterBacktestTimeout = 30 * time.Second
+// providers (Yahoo). The runner fetches those histories concurrently
+// and caches results for 6h, so warm hits return in milliseconds;
+// the wider cap keeps cold benchmark curves (SPY/QQQ) from being
+// silently skipped when upstream latency spikes.
+const masterBacktestTimeout = 90 * time.Second
 
 // handleMasterBacktest returns the master-team factor backtest
 // curve plus benchmark curves for the /papertrading SPA.

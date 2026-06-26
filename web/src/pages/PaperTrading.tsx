@@ -97,17 +97,21 @@ const COPY = {
     newOrderSubmitting: "提交中...",
     error: "操作失败",
     loading: "加载中...",
-    masterCardTitle: "大师团队因子回测 vs 美股指数",
+    masterCardTitle: "大师团队模拟回测 vs 美股指数",
+    masterMvpBadge: "MVP 模拟版 · 非实盘收益证明",
     masterCardSubtitle:
-      "10 位大师风格映射到代表性标的，月度等权再平衡，与 SPY / QQQ 同窗口对比。",
+      "当前用于产品上线阶段的方向性验证：10 位大师风格映射到代表性标的，每月第一个实际开盘交易日等权再平衡，并按整数股成交，与 SPY / QQQ 同窗口对比。",
     masterMetricCumulative: "大师团队累计收益",
     masterMetricAnnual: "年化收益",
     masterMetricSharpe: "Sharpe",
     masterMetricMaxDD: "最大回撤",
     masterBenchmarkLabel: "{symbol} 累计收益",
     masterUniverseTitle: "因子映射股票池",
-    masterOpsTitle: "2016-2026 操作股票流水",
-    masterOpsSubtitle: "展示月度等权再平衡产生的模拟买入/卖出明细，可核对每一年策略实际操作了哪些股票。",
+    masterDataCaveatTitle: "数据口径提示",
+    masterDataCaveat:
+      "该结果为 MVP 阶段的模拟回测，使用免费行情源和当前可查询标的，可能缺少退市股、历史成分变化、公司行动细节、分红复权差异和真实成交约束；仅适合做策略方向验证和产品展示，不构成真实账户收益、投资建议或正式可审计业绩。接入专业付费数据源后应重新生成完整机构级回测。",
+    masterOpsTitle: "2016 至今操作股票流水",
+    masterOpsSubtitle: "展示每月月初等权再平衡产生的模拟买入/卖出明细；若月初休市，则顺延到当月下一个实际开盘日，并按整数股成交，剩余资金留作现金。",
     masterOpsEmpty: "暂无操作流水",
     masterOpsDate: "日期",
     masterOpsMaster: "大师",
@@ -115,6 +119,7 @@ const COPY = {
     masterOpsAction: "动作",
     masterOpsWeight: "目标权重",
     masterOpsShares: "股数变化",
+    masterOpsSharesAfter: "操作后剩余股数",
     masterOpsPrice: "价格",
     masterOpsNotional: "金额",
     masterOpsAccountValue: "调仓后账户价值",
@@ -170,17 +175,21 @@ const COPY = {
     newOrderSubmitting: "Submitting...",
     error: "Operation failed",
     loading: "Loading...",
-    masterCardTitle: "Master-team factor backtest vs US indices",
+    masterCardTitle: "Master-team simulated backtest vs US indices",
+    masterMvpBadge: "MVP simulation · not live-performance proof",
     masterCardSubtitle:
-      "10 master personas mapped to representative tickers, equal-weight monthly rebalanced, compared with SPY / QQQ over the same window.",
+      "Directional validation for the launch-stage product: 10 master personas mapped to representative tickers, equal-weight rebalanced on the first actual trading day of each month with whole-share execution, compared with SPY / QQQ over the same window.",
     masterMetricCumulative: "Master team cum. return",
     masterMetricAnnual: "Annualised",
     masterMetricSharpe: "Sharpe",
     masterMetricMaxDD: "Max drawdown",
     masterBenchmarkLabel: "{symbol} cum. return",
     masterUniverseTitle: "Factor anchors",
-    masterOpsTitle: "2016-2026 stock operation ledger",
-    masterOpsSubtitle: "Simulated monthly equal-weight rebalance orders showing which tickers the strategy operated each year.",
+    masterDataCaveatTitle: "Data caveat",
+    masterDataCaveat:
+      "This is an MVP-stage simulated backtest using free market-data sources and currently queryable tickers, so it may miss delisted stocks, historical constituent changes, corporate-action details, dividend adjustment differences, and real execution constraints. Treat it as directional strategy validation and product demonstration only, not live-account performance, investment advice, or formally auditable track record. A full institutional-grade backtest should be regenerated after connecting professional paid data.",
+    masterOpsTitle: "2016-present stock operation ledger",
+    masterOpsSubtitle: "Simulated month-start equal-weight rebalance orders; if month-start is closed, the next trading day in the same month is used, whole shares are executed, and residual capital stays in cash.",
     masterOpsEmpty: "No operation records",
     masterOpsDate: "Date",
     masterOpsMaster: "Master",
@@ -188,6 +197,7 @@ const COPY = {
     masterOpsAction: "Action",
     masterOpsWeight: "Target wt",
     masterOpsShares: "Shares Δ",
+    masterOpsSharesAfter: "Shares after",
     masterOpsPrice: "Price",
     masterOpsNotional: "Notional",
     masterOpsAccountValue: "Account value after rebalance",
@@ -816,7 +826,8 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    getMasterTeamBacktest({ start: "2016-01-01", end: "2026-06-25", benchmarks: ["SPY", "QQQ"] })
+    const latestEnd = new Date().toISOString().slice(0, 10);
+    getMasterTeamBacktest({ start: "2016-01-01", end: latestEnd, benchmarks: ["SPY", "QQQ"] })
       .then((res) => {
         if (!cancelled) {
           setData(res);
@@ -870,7 +881,12 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
       <header className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h2 className="text-base font-semibold text-slate-900">{copy.masterCardTitle}</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-base font-semibold text-slate-900">{copy.masterCardTitle}</h2>
+            <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+              {copy.masterMvpBadge}
+            </span>
+          </div>
           <p className="mt-1 text-xs text-slate-500">{copy.masterCardSubtitle}</p>
         </div>
         {data ? (
@@ -968,6 +984,11 @@ const MasterTeamBacktestCard: React.FC<{ copy: Copy; language: AppLanguage }> = 
             </ResponsiveContainer>
           </div>
 
+          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
+            <span className="font-semibold">{copy.masterDataCaveatTitle}: </span>
+            {copy.masterDataCaveat}
+          </div>
+
           <div className="mt-4">
             <h3 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
               {copy.masterUniverseTitle}
@@ -1014,7 +1035,7 @@ const MasterOperationsTable: React.FC<{
 }> = ({ copy, operations, initialValue, currentValue, asOf, language }) => {
   const rows = useMemo(() => {
     return [...operations]
-      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
   }, [operations]);
   const fmtNum = (v: number, digits = 2) =>
     formatNumberForLanguage(v, language, { maximumFractionDigits: digits });
@@ -1060,6 +1081,7 @@ const MasterOperationsTable: React.FC<{
                 <th className="px-2 py-2 text-left">{copy.masterOpsAction}</th>
                 <th className="px-2 py-2 text-right">{copy.masterOpsWeight}</th>
                 <th className="px-2 py-2 text-right">{copy.masterOpsShares}</th>
+                <th className="px-2 py-2 text-right">{copy.masterOpsSharesAfter}</th>
                 <th className="px-2 py-2 text-right">{copy.masterOpsPrice}</th>
                 <th className="px-2 py-2 text-right">{copy.masterOpsNotional}</th>
                 <th className="px-2 py-2 text-right">{copy.masterOpsAccountValue}</th>
@@ -1078,7 +1100,8 @@ const MasterOperationsTable: React.FC<{
                     </span>
                   </td>
                   <td className="px-2 py-1.5 text-right font-mono text-slate-700">{fmtPct(op.targetWeight)}</td>
-                  <td className="px-2 py-1.5 text-right font-mono text-slate-700">{fmtNum(op.sharesChange, 4)}</td>
+                  <td className="px-2 py-1.5 text-right font-mono text-slate-700">{fmtNum(op.sharesChange, 0)}</td>
+                  <td className="px-2 py-1.5 text-right font-mono font-semibold text-slate-800">{fmtNum(op.sharesAfter, 0)}</td>
                   <td className="px-2 py-1.5 text-right font-mono text-slate-700">${fmtNum(op.price)}</td>
                   <td className="px-2 py-1.5 text-right font-mono text-slate-700">${fmtNum(op.notional, 0)}</td>
                   <td className="px-2 py-1.5 text-right font-mono font-semibold text-emerald-700">${fmtNum(op.accountValue, 0)}</td>

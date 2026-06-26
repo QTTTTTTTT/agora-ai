@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"regexp"
 	"strings"
 	"testing"
@@ -225,5 +226,44 @@ func TestCanonicalPayloadIsValidJSON(t *testing.T) {
 	}
 	if m["symbol"] != "AAPL" {
 		t.Errorf("symbol round-trip failed: got %v", m["symbol"])
+	}
+}
+
+func TestShouldRebalanceMonthlyUsesFirstAvailableTradingSlot(t *testing.T) {
+	seen := map[string]struct{}{}
+	days := []time.Time{
+		time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),  // first available January trading day
+		time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC),  // same month, skip
+		time.Date(2026, 1, 16, 0, 0, 0, 0, time.UTC), // same month, skip
+		time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC),  // first available February trading day
+	}
+	want := []bool{true, false, false, true}
+	for i, day := range days {
+		if got := shouldRebalanceMonthly(day, seen); got != want[i] {
+			t.Fatalf("day %s rebalance=%v, want %v", day.Format("2006-01-02"), got, want[i])
+		}
+	}
+}
+
+func TestSimulateEqualWeightMonthlyUsesWholeShares(t *testing.T) {
+	days := []time.Time{
+		time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 1, 16, 0, 0, 0, 0, time.UTC),
+	}
+	closeBy := map[time.Time]map[string]float64{
+		days[0]: {"AAA": 300, "BBB": 200},
+		days[1]: {"AAA": 310, "BBB": 210},
+	}
+	_, operations := simulateEqualWeightMonthly(1000, []string{"AAA", "BBB"}, days, closeBy)
+	if len(operations) == 0 {
+		t.Fatalf("expected operations")
+	}
+	for _, op := range operations {
+		if op.SharesAfter != math.Trunc(op.SharesAfter) {
+			t.Fatalf("sharesAfter should be whole-share, got %v for %s", op.SharesAfter, op.Symbol)
+		}
+		if op.SharesChange != math.Trunc(op.SharesChange) {
+			t.Fatalf("sharesChange should be whole-share, got %v for %s", op.SharesChange, op.Symbol)
+		}
 	}
 }
