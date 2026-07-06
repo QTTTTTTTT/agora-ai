@@ -1,13 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   apiGet,
   apiPost,
   apiPut,
   decideAdminKYCApplication,
   fetchAdminKYCApplications,
+  fetchAdminUsageAnalytics,
   fetchWorkflowSchedulerSnapshot,
   formatApiError,
   triggerFundWorkflow,
+  type AdminUsageAnalyticsResponse,
+  type AdminUsageUserAggregate,
   type AdminKYCApplication,
   type AdminMarketDataHealthResponse,
   type AdminMarketDataProviderHealth,
@@ -46,6 +50,7 @@ import AdminFeatureFlagsSection from "../components/AdminFeatureFlagsSection";
 import AdminAnnouncementsSection from "../components/AdminAnnouncementsSection";
 import AdminUserRolesSection from "../components/AdminUserRolesSection";
 import AdminSupportContactSection from "../components/AdminSupportContactSection";
+import AdminUsageAnalyticsSection from "../components/AdminUsageAnalyticsSection";
 
 interface PlatformSettings {
   access_mode: "paid_open" | "free_open";
@@ -217,6 +222,10 @@ function countTeamMembers(user: AdminUserSummary): number {
   );
 }
 
+function formatUsageFeatureKey(key: string): string {
+  return key.replace(/[_:.]+/g, " ").replace(/\s+/g, " ").trim() || key;
+}
+
 const Admin: React.FC = () => {
   const { language } = useAppPreferences();
   const [overview, setOverview] = useState<AdminOverviewResponse>({ users: [] });
@@ -258,6 +267,9 @@ const Admin: React.FC = () => {
   const [schedulerRefreshedAt, setSchedulerRefreshedAt] = useState<string | null>(null);
   const [triggeringFundId, setTriggeringFundId] = useState<string | null>(null);
   const [triggerNotice, setTriggerNotice] = useState<string | null>(null);
+  const [usageAnalytics, setUsageAnalytics] = useState<AdminUsageAnalyticsResponse>({ since: "", users: [] });
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageError, setUsageError] = useState<string | null>(null);
 
   const copy = useMemo(
     () =>
@@ -268,6 +280,23 @@ const Admin: React.FC = () => {
             loadError: "Failed to load admin data",
             retry: "Retry",
             subtitle: "Inspect all users, companies, funds, and team members, and switch the platform between paid and free-open modes.",
+            masterFocusTitle: "大师团与埋点统计 / Master team & usage analytics",
+            masterFocusHint: "For the current phase, put master-team adoption first: normal-user usage is aggregated by user, while heavyweight platform operations are folded below.",
+            usageTitle: "Normal-user feature usage",
+            usageHint: "Excludes admin and super-admin users. Counts page entries and button/link actions from the last 30 days, grouped by user.",
+            usageEmpty: "No normal-user usage events yet. Open /masters, /advisor or /daily-picks as a normal user, then refresh this card.",
+            usageError: "Failed to load usage analytics",
+            usageSince: "Since",
+            usageTotal: "Total events",
+            usagePages: "Page views",
+            usageActions: "Actions",
+            usageActiveDays: "Active days",
+            usageLastSeen: "Last seen",
+            usageTopFeatures: "Top features",
+            usageRefresh: "Refresh usage",
+            usageRefreshing: "Refreshing…",
+            compactOpsTitle: "Advanced admin operations",
+            compactOpsHint: "Less urgent platform, risk, infra, model, and compliance panels are collapsed by default to reduce noise.",
             users: "Users",
             companies: "Companies",
             funds: "Funds",
@@ -365,6 +394,23 @@ const Admin: React.FC = () => {
             loadError: "加载管理员数据失败",
             retry: "重试",
             subtitle: "集中查看当前所有用户、公司、基金和团队成员摘要，并控制平台免费开放或收费开放状态。",
+            masterFocusTitle: "大师团与埋点统计",
+            masterFocusHint: "现阶段先围绕大师团增长与使用情况：非管理员普通用户的页面进入与功能点击会按用户聚合，重型平台运维能力默认折叠在下方。",
+            usageTitle: "普通用户功能使用统计",
+            usageHint: "排除 admin / super_admin，仅统计最近 30 天的页面进入和按钮/链接功能使用，并按用户聚合展示。",
+            usageEmpty: "暂时还没有普通用户使用事件。请先用普通用户进入 /masters、/advisor 或 /daily-picks，再刷新本卡片。",
+            usageError: "加载使用统计失败",
+            usageSince: "统计起点",
+            usageTotal: "总次数",
+            usagePages: "进入页面",
+            usageActions: "功能使用",
+            usageActiveDays: "活跃天数",
+            usageLastSeen: "最近使用",
+            usageTopFeatures: "高频功能",
+            usageRefresh: "刷新埋点统计",
+            usageRefreshing: "刷新中…",
+            compactOpsTitle: "高级运维与平台能力",
+            compactOpsHint: "暂时不作为主线的大量风控、模型、基础设施与合规面板已默认折叠，减少后台噪音。",
             users: "用户数",
             companies: "公司数",
             funds: "基金数",
@@ -480,6 +526,20 @@ const Admin: React.FC = () => {
     }
   }, [copy.loadError, kycStatusFilter]);
 
+  const loadUsageAnalytics = useCallback(async () => {
+    setUsageLoading(true);
+    setUsageError(null);
+    try {
+      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const usageRes = await fetchAdminUsageAnalytics({ since, limit: 50 });
+      setUsageAnalytics(usageRes);
+    } catch (err) {
+      setUsageError(formatApiError(err, copy.usageError));
+    } finally {
+      setUsageLoading(false);
+    }
+  }, [copy.usageError]);
+
   const loadMarketHealth = useCallback(async () => {
     setMarketHealthLoading(true);
     try {
@@ -550,6 +610,10 @@ const Admin: React.FC = () => {
   }, [loadData]);
 
   useEffect(() => {
+    void loadUsageAnalytics();
+  }, [loadUsageAnalytics]);
+
+  useEffect(() => {
     if (overview.users.length === 0) {
       setSelectedUserId("");
       setRechargeForm((current) => ({ ...current, user_id: "" }));
@@ -596,6 +660,11 @@ const Admin: React.FC = () => {
           }
         : { companies: 0, funds: 0, teamMembers: 0 },
     [selectedUser],
+  );
+
+  const topUsageUsers = useMemo(
+    () => usageAnalytics.users.slice(0, 8),
+    [usageAnalytics.users],
   );
 
   const handleSave = useCallback(async () => {
@@ -712,6 +781,26 @@ const Admin: React.FC = () => {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">{copy.title}</h1>
             <p className="mt-2 max-w-3xl text-sm text-gray-500">{copy.subtitle}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <a
+                href="#admin-usage-analytics"
+                className="inline-flex items-center rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700"
+              >
+                大师团与埋点统计
+              </a>
+              <Link
+                to="/admin/usage-analytics"
+                className="inline-flex items-center rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-indigo-700 ring-1 ring-indigo-200 hover:bg-indigo-50"
+              >
+                打开独立统计页
+              </Link>
+              <a
+                href="#admin-announcements"
+                className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 ring-1 ring-amber-200 hover:bg-amber-100"
+              >
+                站内信
+              </a>
+            </div>
           </div>
           {settings?.updated_at ? (
             <p className="text-xs text-gray-500">
@@ -740,14 +829,124 @@ const Admin: React.FC = () => {
         </div>
       </section>
 
+      <AdminUsageAnalyticsSection />
+
+      <section id="admin-usage-analytics" className="scroll-mt-6 rounded-3xl border border-indigo-200 bg-gradient-to-br from-indigo-50 via-white to-emerald-50 px-5 py-5 shadow-sm">
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-indigo-500">Master Team</p>
+            <h2 className="mt-2 text-xl font-bold text-gray-950">{copy.masterFocusTitle}</h2>
+            <p className="mt-2 max-w-3xl text-sm text-gray-600">{copy.masterFocusHint}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {usageAnalytics.since ? (
+              <span className="rounded-full bg-white/80 px-3 py-1.5 text-xs font-medium text-indigo-700 ring-1 ring-indigo-100">
+                {copy.usageSince}: {formatDateTimeForLanguage(usageAnalytics.since, language)}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void loadUsageAnalytics()}
+              disabled={usageLoading}
+              className="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {usageLoading ? copy.usageRefreshing : copy.usageRefresh}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-5 rounded-2xl border border-white/80 bg-white/90 p-4 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h3 className="text-base font-semibold text-gray-900">{copy.usageTitle}</h3>
+              <p className="mt-1 text-sm text-gray-500">{copy.usageHint}</p>
+            </div>
+            <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">
+              {usageAnalytics.users.length} {copy.users}
+            </span>
+          </div>
+
+          <div className="mt-4 overflow-hidden rounded-2xl border border-gray-100 bg-white">
+            {usageError ? (
+              <div className="p-4 text-sm text-red-600">{usageError}</div>
+            ) : topUsageUsers.length === 0 ? (
+              <div className="p-4 text-sm text-gray-500">{copy.usageEmpty}</div>
+            ) : (
+              <div className="divide-y divide-gray-100">
+                {topUsageUsers.map((row: AdminUsageUserAggregate) => (
+                  <article key={row.user_id} className="grid gap-4 px-4 py-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1.6fr)] xl:items-center">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="truncate text-sm font-semibold text-gray-900">{row.display_name || row.email || row.user_id}</h4>
+                        <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${roleTone(row.role)}`}>{roleLabel(row.role, language)}</span>
+                      </div>
+                      <p className="mt-1 truncate text-xs text-gray-500">{row.email || row.user_id}</p>
+                      <p className="mt-1 font-mono text-[11px] text-gray-400">{row.user_id}</p>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                        <div className="rounded-xl bg-gray-50 px-3 py-2">
+                          <p className="text-[11px] text-gray-500">{copy.usageTotal}</p>
+                          <p className="mt-1 text-sm font-semibold text-gray-900">{row.total_events}</p>
+                        </div>
+                        <div className="rounded-xl bg-gray-50 px-3 py-2">
+                          <p className="text-[11px] text-gray-500">{copy.usagePages}</p>
+                          <p className="mt-1 text-sm font-semibold text-gray-900">{row.page_views}</p>
+                        </div>
+                        <div className="rounded-xl bg-gray-50 px-3 py-2">
+                          <p className="text-[11px] text-gray-500">{copy.usageActions}</p>
+                          <p className="mt-1 text-sm font-semibold text-gray-900">{row.feature_uses}</p>
+                        </div>
+                        <div className="rounded-xl bg-gray-50 px-3 py-2">
+                          <p className="text-[11px] text-gray-500">{copy.usageActiveDays}</p>
+                          <p className="mt-1 text-sm font-semibold text-gray-900">{row.active_days}</p>
+                        </div>
+                        <div className="rounded-xl bg-gray-50 px-3 py-2">
+                          <p className="text-[11px] text-gray-500">{copy.usageLastSeen}</p>
+                          <p className="mt-1 truncate text-xs font-medium text-gray-900">{formatDateTimeForLanguage(row.last_seen_at, language)}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] font-medium text-gray-500">{copy.usageTopFeatures}</span>
+                        {row.top_features.length === 0 ? (
+                          <span className="text-xs text-gray-400">—</span>
+                        ) : (
+                          row.top_features.map((feature) => (
+                            <span key={`${row.user_id}-${feature.event_name}-${feature.feature_key}`} className="rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 ring-1 ring-indigo-100">
+                              {formatUsageFeatureKey(feature.feature_key)} · {feature.count}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
       {/* Platform-wide control surfaces: feature flags (toggle product
           surfaces), in-app announcements (push notices to every user),
           and user role management (promote/demote admin / super admin).
           Placed directly under the totals tiles so an admin landing on
           this page sees them above the (very long) overview list. */}
-      <AdminFeatureFlagsSection language={language} />
-      <AdminAnnouncementsSection language={language} />
-      <AdminUserRolesSection language={language} />
+      <details className="rounded-2xl border border-gray-200 bg-white px-5 py-4 shadow-sm">
+        <summary className="cursor-pointer list-none text-base font-semibold text-gray-900">
+          {copy.compactOpsTitle}
+          <span className="ml-3 text-sm font-normal text-gray-500">{copy.compactOpsHint}</span>
+        </summary>
+        <div className="mt-4 space-y-4">
+          <AdminFeatureFlagsSection language={language} />
+          <div id="admin-announcements" className="scroll-mt-6">
+            <AdminAnnouncementsSection language={language} />
+          </div>
+          <AdminUserRolesSection language={language} />
+        </div>
+      </details>
 
       <section className="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_380px]">
         <div className="space-y-4">
@@ -1216,91 +1415,67 @@ const Admin: React.FC = () => {
             {kycSuccess ? <p className="mt-3 text-sm text-emerald-700">{kycSuccess}</p> : null}
           </section>
 
-          <AdminBrokerLinksSection language={language} />
+          <details className="rounded-2xl border border-gray-200 bg-white px-5 py-4 shadow-sm">
+            <summary className="cursor-pointer list-none text-base font-semibold text-gray-900">
+              {copy.compactOpsTitle}
+              <span className="mt-1 block text-sm font-normal text-gray-500">{copy.compactOpsHint}</span>
+            </summary>
+            <div className="mt-4 space-y-4">
+              <AdminBrokerLinksSection language={language} />
 
-          <AdminFundingSection language={language} />
+              <AdminFundingSection language={language} />
 
-          <AdminFXSection language={language} />
+              <AdminFXSection language={language} />
 
-          <AdminReconSection language={language} />
+              <AdminReconSection language={language} />
 
-          <AdminSurveillanceSection language={language} />
+              <AdminSurveillanceSection language={language} />
 
-          <AdminDrawdownSection language={language} />
+              <AdminDrawdownSection language={language} />
 
-          <AdminMarketStatusSection language={language} />
+              <AdminMarketStatusSection language={language} />
 
-          <AdminMarketImpactSection language={language} />
+              <AdminMarketImpactSection language={language} />
 
-          <AdminLockupSection language={language} />
+              <AdminLockupSection language={language} />
 
-          <AdminBorrowSection language={language} />
+              <AdminBorrowSection language={language} />
 
-          <AdminFactorExposureSection language={language} />
+              <AdminFactorExposureSection language={language} />
 
-          <AdminStressScenariosSection language={language} />
+              <AdminStressScenariosSection language={language} />
 
-          <AdminBrinsonCompositionsSection language={language} />
+              <AdminBrinsonCompositionsSection language={language} />
 
-          {/* S8.4 — per-agent reputation ledger (cross-fund view +
-              rebuild trigger). */}
-          <AdminAgentReputationSection language={language} />
+              <AdminAgentReputationSection language={language} />
 
-          {/* S9.2 — per-step workflow checkpoint timeline + resume. */}
-          <AdminWorkflowCheckpointsSection language={language} />
+              <AdminWorkflowCheckpointsSection language={language} />
 
-          {/* S13 — platform LLM provider admin (CRUD + hot reload). */}
-          {/* Renders ABOVE A/B so operators configure providers first; */}
-          {/* the A/B form's provider dropdown pulls from this table. */}
-          <AdminLLMProvidersSection language={language} />
+              <AdminLLMProvidersSection language={language} />
 
-          {/* S14.A — provider observability (health & cost dashboard). */}
-          {/* Reads from the 5-min probe loop + hourly rollup loop. */}
-          <AdminLLMObservabilitySection language={language} />
+              <AdminLLMObservabilitySection language={language} />
 
-          {/* S10.3 / S10.4 — model A/B experiments (list, report, CRUD). */}
-          <AdminModelABSection language={language} />
+              <AdminModelABSection language={language} />
 
-          {/* S13.3 — model A/B auto-promotion drafts (one-click apply / reject). */}
-          <AdminModelABPromotionSection language={language} />
+              <AdminModelABPromotionSection language={language} />
 
-          {/* S11.4 — LLM health dashboard: decision_source / fallback */}
-          {/* aggregates + recent fallback rows with raw provider summaries. */}
-          <AdminLLMHealthSection language={language} />
+              <AdminLLMHealthSection language={language} />
 
-          {/* W9-2 — memory re-embed queue depth + lifetime counters. */}
-          {/* Pairs with the Prometheus exporter from W7-1 so an SRE */}
-          {/* with only a browser handy can see backlog growth at 2 AM. */}
-          <AdminMemReembedSection language={language} />
+              <AdminMemReembedSection language={language} />
 
-          {/* W11-2 — embedquota.Limiter live state + histogram tails. */}
-          {/* Sibling of the memreembed panel; together they cover the */}
-          {/* whole embed pipeline ("are we throttling?" + "is the */}
-          {/* re-embed worker keeping up with the throttle?"). */}
-          <AdminEmbedQuotaSection language={language} />
+              <AdminEmbedQuotaSection language={language} />
 
-          {/* W14-3 — per-fund drill-down for the embed quota */}
-          {/* limiter. Renders the AdminEmbedQuotaSection's */}
-          {/* "throttle is firing" → "which fund is firing it" */}
-          {/* follow-up. Recorder is opt-in; the panel renders */}
-          {/* a clean disabled state until the EMBED_QUOTA_OBS_ENABLED */}
-          {/* flag is flipped on the server. */}
-          <AdminEmbedQuotaPerFundSection language={language} />
+              <AdminEmbedQuotaPerFundSection language={language} />
 
-          {/* W13-1 — DB connection pool live state. Completes the */}
-          {/* infra triad (memreembed + embedquota + db-pool) the */}
-          {/* runbook §8 enumerates as the "Grafana down? curl this" */}
-          {/* fallback. Three panels together answer "is the */}
-          {/* pipeline healthy from disk to LLM provider?". */}
-          <AdminDBPoolSection language={language} />
+              <AdminDBPoolSection language={language} />
 
-          {/* S12.3 — alertmanager-ingested events + ack flow. */}
-          <AdminAlertsSection language={language} />
+              <AdminAlertsSection language={language} />
 
-          {/* Stop-trigger watch — pending stops + poller status. */}
-          <AdminStopTriggerSection language={language} />
+              <AdminStopTriggerSection language={language} />
 
-          <AdminWSFeedSection language={language} />
+              <AdminWSFeedSection language={language} />
+            </div>
+          </details>
 
           <section className="rounded-2xl border border-sky-200 bg-sky-50 px-5 py-5 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">

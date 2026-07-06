@@ -124,6 +124,7 @@ export function clearApiToken(): void {
   window.localStorage.removeItem(PRIMARY_TOKEN_STORAGE_KEY);
   window.localStorage.removeItem(PRIMARY_SESSION_STORAGE_KEY);
   window.localStorage.removeItem(PRIMARY_USER_ID_STORAGE_KEY);
+  window.dispatchEvent(new CustomEvent("fundai:session-updated", { detail: { authenticated: false } }));
 }
 
 export function storeSession(token: string, session: AuthSession): void {
@@ -144,6 +145,7 @@ export function storeSession(token: string, session: AuthSession): void {
   };
   window.localStorage.setItem(PRIMARY_SESSION_STORAGE_KEY, JSON.stringify(normalizedSession));
   window.localStorage.setItem(PRIMARY_USER_ID_STORAGE_KEY, normalizedSession.userId);
+  window.dispatchEvent(new CustomEvent("fundai:session-updated", { detail: { authenticated: true, userId: normalizedSession.userId } }));
 }
 
 export function getStoredSession(): AuthSession | null {
@@ -381,6 +383,58 @@ export function apiPost<T>(path: string, body?: unknown): Promise<T> {
     method: "POST",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+
+export interface UsageTelemetryInput {
+  event_name: "page_view" | "feature_use";
+  feature_key: string;
+  page_path?: string;
+  count?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UsageTelemetryResponse {
+  recorded: boolean;
+  reason?: string;
+}
+
+export interface AdminUsageFeatureCount {
+  feature_key: string;
+  event_name: string;
+  count: number;
+}
+
+export interface AdminUsageUserAggregate {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: string;
+  total_events: number;
+  page_views: number;
+  feature_uses: number;
+  active_days: number;
+  last_seen_at: string;
+  top_features: AdminUsageFeatureCount[];
+}
+
+export interface AdminUsageAnalyticsResponse {
+  since: string;
+  users: AdminUsageUserAggregate[];
+}
+
+export function recordUsageTelemetry(input: UsageTelemetryInput): Promise<UsageTelemetryResponse> {
+  return apiPost<UsageTelemetryResponse>("/api/telemetry/usage", input);
+}
+
+export function fetchAdminUsageAnalytics(params: { since?: string; limit?: number } = {}): Promise<AdminUsageAnalyticsResponse> {
+  const qs = new URLSearchParams();
+  if (params.since) {
+    qs.set("since", params.since);
+  }
+  if (params.limit && params.limit > 0) {
+    qs.set("limit", String(params.limit));
+  }
+  return apiGet<AdminUsageAnalyticsResponse>(`/api/admin/usage-analytics${qs.toString() ? `?${qs}` : ""}`);
 }
 
 export interface WalletAccountResponse {

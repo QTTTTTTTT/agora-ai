@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import AdminUsersStatsCards from "../components/AdminUsersStatsCards";
 import AdminUsersList from "../components/AdminUsersList";
 import AdminUserDetailDrawer from "../components/AdminUserDetailDrawer";
+import AdminUsageAnalyticsSection from "../components/AdminUsageAnalyticsSection";
 import {
   fetchAdminUsersStats,
   formatApiError,
@@ -44,11 +45,20 @@ export default function AdminUsers() {
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 space-y-6">
       <header>
-        <h1 className="text-2xl font-semibold text-ink-900">用户管理</h1>
-        <p className="mt-1 text-sm text-ink-500">
-          只读视图：注册用户、订阅分布、LLM 消费明细。修改角色 / 套餐请到原有的对应入口。
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-ink-900">用户管理</h1>
+            <p className="mt-1 text-sm text-ink-500">
+              只读视图：注册用户、订阅分布、LLM 消费明细。修改角色 / 套餐请到原有的对应入口。
+            </p>
+          </div>
+          <a href="#admin-usage-analytics" className="rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700">
+            大师团与埋点统计
+          </a>
+        </div>
       </header>
+
+      <AdminUsageAnalyticsSection />
 
       <AdminUsersStatsCards
         stats={stats}

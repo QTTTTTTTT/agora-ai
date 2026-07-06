@@ -35,7 +35,7 @@ interface AnnouncementsResponse {
   announcements?: AnnouncementWire[];
 }
 
-const REFRESH_INTERVAL_MS = 90_000;
+const REFRESH_INTERVAL_MS = 15_000;
 
 const severityStyles: Record<string, { bg: string; text: string; ring: string; chip: string }> = {
   info: {
@@ -117,10 +117,16 @@ const AnnouncementCenter: React.FC = () => {
     // immediately when the user is logged out (instead of waiting
     // for the next poll, which would keep showing stale items).
     const onExpired = () => setItems([]);
+    const onSessionUpdated = () => void refresh();
+    const onFocus = () => void refresh();
     window.addEventListener("fundai:session-expired", onExpired);
+    window.addEventListener("fundai:session-updated", onSessionUpdated);
+    window.addEventListener("focus", onFocus);
     return () => {
       window.clearInterval(id);
       window.removeEventListener("fundai:session-expired", onExpired);
+      window.removeEventListener("fundai:session-updated", onSessionUpdated);
+      window.removeEventListener("focus", onFocus);
     };
   }, [refresh]);
 

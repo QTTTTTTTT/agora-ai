@@ -1,10 +1,11 @@
-import React, { Component, ReactNode, Suspense, useMemo } from "react";
+import React, { Component, ReactNode, Suspense, useEffect, useMemo } from "react";
 import {
   BrowserRouter,
   Routes,
   Route,
   Navigate,
   Link,
+  useLocation,
   useRouteError,
   isRouteErrorResponse,
 } from "react-router-dom";
@@ -20,6 +21,7 @@ import AnnouncementCenter from "./components/AnnouncementCenter";
 import { FeatureFlagsProvider } from "./lib/featureFlags";
 import { ComplianceProvider, type ComplianceLocale } from "./lib/compliance";
 import { useAppPreferences } from "./lib/preferences";
+import { getStoredSession, recordUsageTelemetry } from "./lib/api";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import { ToastViewport, toast } from "./lib/toast";
 
@@ -57,6 +59,7 @@ const Pricing = lazyWithRetry(() => import("./pages/Pricing"));
 const ModelConfig = lazyWithRetry(() => import("./pages/ModelConfig"));
 const Usage = lazyWithRetry(() => import("./pages/Usage"));
 const Admin = lazyWithRetry(() => import("./pages/Admin"));
+const AdminUsageAnalytics = lazyWithRetry(() => import("./pages/AdminUsageAnalytics"));
 const SkillInbox = lazyWithRetry(() => import("./pages/SkillInbox"));
 const Wallet = lazyWithRetry(() => import("./pages/Wallet"));
 const KYC = lazyWithRetry(() => import("./pages/KYC"));
@@ -91,6 +94,76 @@ const SettingsByok = lazyWithRetry(() => import("./pages/SettingsByok"));
 // Server-gated by adminHandler.requireAdmin (role IN admin/super_admin)
 // + client-gated by <AdminGate> for the redirect-on-mismatch UX.
 const AdminUsers = lazyWithRetry(() => import("./pages/AdminUsers"));
+
+const MASTER_FEATURE_PATTERNS: Array<[RegExp, string]> = [
+  [/^\/masters\/?$/, "masters_hub"],
+  [/^\/advisor\/?$/, "master_consult"],
+  [/^\/daily-picks\/?$/, "daily_picks"],
+  [/^\/trending\//, "trending"],
+  [/^\/papertrading\/?$/, "paper_trading"],
+  [/^\/settings\/byok\/?$/, "advisor_byok"],
+];
+
+function featureKeyForPath(pathname: string): string {
+  const matched = MASTER_FEATURE_PATTERNS.find(([pattern]) => pattern.test(pathname));
+  if (matched) {
+    return matched[1];
+  }
+  return pathname.replace(/^\/+/, "").replace(/\/+/g, ".") || "home";
+}
+
+function shouldTrackCurrentUser(): boolean {
+  const session = getStoredSession();
+  const role = session?.role?.trim().toLowerCase() ?? "";
+  if (!session?.userId) {
+    return false;
+  }
+  return role !== "admin" && role !== "super_admin";
+}
+
+const FeatureUsageTracker: React.FC = () => {
+  const location = useLocation();
+
+  useEffect(() => {
+    if (!shouldTrackCurrentUser()) {
+      return;
+    }
+    const pagePath = `${location.pathname}${location.search}`;
+    void recordUsageTelemetry({
+      event_name: "page_view",
+      feature_key: featureKeyForPath(location.pathname),
+      page_path: pagePath,
+      count: 1,
+    }).catch(() => undefined);
+  }, [location.pathname, location.search]);
+
+  useEffect(() => {
+    const handler = (event: MouseEvent) => {
+      if (!shouldTrackCurrentUser()) {
+        return;
+      }
+      const target = event.target instanceof Element ? event.target.closest("button,a,[role='button']") : null;
+      if (!target) {
+        return;
+      }
+      const label =
+        target.getAttribute("data-telemetry") ||
+        target.getAttribute("aria-label") ||
+        target.textContent?.trim().replace(/\s+/g, " ").slice(0, 80) ||
+        "action";
+      void recordUsageTelemetry({
+        event_name: "feature_use",
+        feature_key: `${featureKeyForPath(window.location.pathname)}:${label}`,
+        page_path: `${window.location.pathname}${window.location.search}`,
+        count: 1,
+      }).catch(() => undefined);
+    };
+    window.addEventListener("click", handler, { capture: true });
+    return () => window.removeEventListener("click", handler, { capture: true });
+  }, []);
+
+  return null;
+};
 
 interface ErrorBoundaryCopy {
   unexpectedError: string;
@@ -375,6 +448,7 @@ const AppRoutes: React.FC = () => {
           self-gating: when there's no session or no unread items
           it renders nothing. */}
       <AnnouncementCenter />
+      <FeatureUsageTracker />
       <PreferenceDock />
       <SupportContactButton />
       {/* Single global listener for `fundai:session-expired` events
@@ -431,6 +505,16 @@ const AppRoutes: React.FC = () => {
             <Route path="/marketplace" element={<AuthGate><Marketplace /></AuthGate>} />
             <Route path="/auctions" element={<AuthGate><Auctions /></AuthGate>} />
             <Route path="/admin" element={<AuthGate><AdminGate><Admin /></AdminGate></AuthGate>} />
+            <Route
+              path="/admin/usage-analytics"
+              element={
+                <AuthGate>
+                  <RequireRole roles={["admin", "super_admin"]}>
+                    <AdminUsageAnalytics />
+                  </RequireRole>
+                </AuthGate>
+              }
+            />
             <Route
               path="/admin/users"
               element={

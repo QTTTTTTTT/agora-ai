@@ -19,15 +19,15 @@ import (
 	"github.com/fundai/server/internal/cnmarketstructure"
 	"github.com/fundai/server/internal/factorexposure"
 	"github.com/fundai/server/internal/llm"
-	"github.com/fundai/server/internal/stress"
+	"github.com/fundai/server/internal/lockup"
 	"github.com/fundai/server/internal/marketdata"
 	"github.com/fundai/server/internal/marketimpact"
-	"github.com/fundai/server/internal/lockup"
 	"github.com/fundai/server/internal/modelab"
-	"github.com/fundai/server/internal/securitiesborrow"
 	"github.com/fundai/server/internal/quota"
 	"github.com/fundai/server/internal/quotecache"
 	"github.com/fundai/server/internal/repository"
+	"github.com/fundai/server/internal/securitiesborrow"
+	"github.com/fundai/server/internal/stress"
 	"github.com/fundai/server/internal/subscription"
 	"github.com/fundai/server/internal/wsfeed"
 )
@@ -387,10 +387,10 @@ func newAdminHandler(svc *Services) *adminHandler {
 		wsFeedCache:   svc.WSFeedCache,
 		wsFeedBridge:  svc.WSFeedBridge,
 
-		modelABRepo:     svc.ModelABRepo,
-		modelABReporter: svc.ModelABReporter,
-		llmHealthRepo:   svc.LLMHealthRepo,
-		alertEventRepo:  svc.AlertEventRepo,
+		modelABRepo:               svc.ModelABRepo,
+		modelABReporter:           svc.ModelABReporter,
+		llmHealthRepo:             svc.LLMHealthRepo,
+		alertEventRepo:            svc.AlertEventRepo,
 		modelABPromotionDraftRepo: svc.ModelABPromotionDraftRepo,
 		modelABPromotionScanLoop:  svc.ModelABPromotionScanLoop,
 		platformLLMProviderRepo:   svc.PlatformLLMProviderRepo,
@@ -465,6 +465,7 @@ func (h *adminHandler) RegisterRoutes(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("GET /api/admin/overview", h.handleOverview)
+	mux.HandleFunc("GET /api/admin/usage-analytics", h.handleAdminUsageAnalytics)
 	mux.HandleFunc("GET /api/admin/platform-settings", h.handleGetPlatformSettings)
 	mux.HandleFunc("PUT /api/admin/platform-settings", h.handleUpdatePlatformSettings)
 	// Floating support-contact button (Discord URL + QR image
@@ -1250,6 +1251,7 @@ func (h *adminHandler) handleDecideKYCApplication(w http.ResponseWriter, r *http
 // Both limit fields use *float64 so the caller can express:
 //   - "no cap on this window": send null / omit
 //   - "cap = 0": send 0.0 (rare but valid — blocks all spend)
+//
 // At least one of the two must be non-nil; otherwise the request is rejected.
 type llmBudgetRequest struct {
 	FundID            *string  `json:"fundId,omitempty"`

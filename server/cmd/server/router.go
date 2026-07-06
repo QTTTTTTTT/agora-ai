@@ -111,6 +111,9 @@ func buildRouter(svc *Services, cfg *Config) http.Handler {
 		registerAnnouncementPublicRoutes(mux, adminHandler.announcements)
 		mux.HandleFunc("GET /api/support-contact", adminHandler.handleGetSupportContact)
 	}
+	if usageHandler := newUsageTelemetryHandler(svc); usageHandler != nil {
+		usageHandler.RegisterRoutes(mux)
+	}
 	// Subscription checkout (LemonSqueezy hosted): registered
 	// independently of the SubscriptionHandler because it needs
 	// raw *sql.DB + LS client which the api-layer handler doesn't
